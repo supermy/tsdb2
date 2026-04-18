@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/tsdb-arrow",
+    "crates/tsdb-parquet",
+    "crates/tsdb-datafusion",
+    "crates/tsdb-storage-arrow",
+    "crates/tsdb-integration-tests",
+    "crates/tsdb-test-utils",
+    "crates/tsdb-stress",
+    "crates/tsdb-bench",
+    "crates/tsdb-rocksdb",
+    "crates/tsdb-stress-rocksdb",
+    "crates/tsdb-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tsdb-arrow = { path = "crates/tsdb-arrow" }
+tsdb-parquet = { path = "crates/tsdb-parquet" }
+tsdb-datafusion = { path = "crates/tsdb-datafusion" }
+tsdb-storage-arrow = { path = "crates/tsdb-storage-arrow" }
+tsdb-test-utils = { path = "crates/tsdb-test-utils" }
+
+arrow = "54"
+parquet = "54"
+datafusion = "46"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = "0.4"
+tokio = { version = "1", features = ["full"] }
+tempfile = "3"
+crc32fast = "1"
+async-trait = "0.1"
+criterion = { version = "0.5", features = ["html_reports"] }
+rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
+fxhash = "0.2"
+tsdb-rocksdb = { path = "crates/tsdb-rocksdb" }

@@ -1,0 +1,14 @@
+[package]
+name = "tsdb-stress-rocksdb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-rocksdb = { workspace = true }
+tsdb-test-utils = { workspace = true }
+rocksdb = { workspace = true }
+tempfile = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

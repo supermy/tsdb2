@@ -1,0 +1,13 @@
+[package]
+name = "tsdb-stress"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-parquet = { workspace = true }
+tsdb-storage-arrow = { workspace = true }
+tsdb-test-utils = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }

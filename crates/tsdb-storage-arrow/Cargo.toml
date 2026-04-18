@@ -1,0 +1,21 @@
+[package]
+name = "tsdb-storage-arrow"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-parquet = { workspace = true }
+tsdb-datafusion = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+datafusion = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

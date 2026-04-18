@@ -1,0 +1,18 @@
+[package]
+name = "tsdb-rocksdb"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+rocksdb = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+fxhash = "0.2"
+arrow = { workspace = true }
+num_cpus = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+proptest = "1"

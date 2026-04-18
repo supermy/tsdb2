@@ -1,0 +1,30 @@
+[package]
+name = "tsdb-bench"
+version.workspace = true
+edition.workspace = true
+
+[[bench]]
+name = "write_bench"
+harness = false
+
+[[bench]]
+name = "read_bench"
+harness = false
+
+[[bench]]
+name = "convert_bench"
+harness = false
+
+[[bench]]
+name = "sql_bench"
+harness = false
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-parquet = { workspace = true }
+tsdb-datafusion = { workspace = true }
+tsdb-storage-arrow = { workspace = true }
+tsdb-test-utils = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }

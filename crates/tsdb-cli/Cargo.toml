@@ -1,0 +1,30 @@
+[package]
+name = "tsdb-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "tsdb-cli"
+path = "src/main.rs"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+assert_cmd = "2"
+predicates = "3"
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-rocksdb = { workspace = true }
+tsdb-datafusion = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+anyhow = "1"
+csv = "1"
+datafusion = { workspace = true }
+arrow = { workspace = true }

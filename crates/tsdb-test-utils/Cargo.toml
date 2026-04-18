@@ -1,0 +1,9 @@
+[package]
+name = "tsdb-test-utils"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+arrow = { workspace = true }
+chrono = { workspace = true }
