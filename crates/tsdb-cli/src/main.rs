@@ -150,61 +150,53 @@ fn execute_query(data_dir: &str, sql: &str, format: &str) -> anyhow::Result<()> 
         let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
 
         let cfs = db.list_ts_cfs();
-        let mut all_datapoints = Vec::new();
+        let mut measurements: std::collections::HashSet<String> = std::collections::HashSet::new();
         for cf_name in &cfs {
             if let Some(stripped) = cf_name.strip_prefix("ts_") {
-                let parts: Vec<&str> = stripped.splitn(2, '_').collect();
-                if !parts.is_empty() {
-                    let measurement = parts[0];
-                    let now = chrono::Utc::now().timestamp_micros();
-                    let start = now - 365 * 86_400_000_000i64;
-                    if let Ok(dps) = db.read_range(measurement, start, now) {
-                        all_datapoints.extend(dps);
-                    }
+                if let Some(measurement) = stripped.split('_').next() {
+                    measurements.insert(measurement.to_string());
                 }
             }
         }
 
-        if all_datapoints.is_empty() {
+        if measurements.is_empty() {
             println!("No data found in database.");
             return Ok::<(), anyhow::Error>(());
         }
 
         let engine = tsdb_datafusion::DataFusionQueryEngine::new(data_dir);
 
-        let measurements: std::collections::HashMap<String, Vec<tsdb_arrow::schema::DataPoint>> =
-            all_datapoints
-                .into_iter()
-                .fold(std::collections::HashMap::new(), |mut acc, dp| {
-                    acc.entry(dp.measurement.clone()).or_default().push(dp);
-                    acc
-                });
+        let now = chrono::Utc::now().timestamp_micros();
+        let start = now - 7 * 86_400_000_000i64;
 
-        for (name, dps) in &measurements {
-            engine.register_from_datapoints(name, dps)?;
-        }
+        for measurement in &measurements {
+            if let Ok(dps) = db.read_range(measurement, start, now) {
+                if dps.is_empty() {
+                    continue;
+                }
+                engine.register_from_datapoints(measurement, &dps)?;
 
-        for (name, dps) in &measurements {
-            use datafusion::datasource::MemTable;
-            use tsdb_arrow::converter::datapoints_to_record_batch;
+                use datafusion::datasource::MemTable;
+                use tsdb_arrow::converter::datapoints_to_record_batch;
 
-            let table = engine
-                .session_context()
-                .catalog("datafusion")
-                .unwrap()
-                .schema("public")
-                .unwrap()
-                .table(name)
-                .await
-                .unwrap()
-                .unwrap();
-            let schema = table.schema();
-            let batch = datapoints_to_record_batch(dps, schema.clone())?;
-            let mem_table = MemTable::try_new(schema, vec![vec![batch]])?;
-            engine.session_context().deregister_table(name)?;
-            engine
-                .session_context()
-                .register_table(name, Arc::new(mem_table))?;
+                let table = engine
+                    .session_context()
+                    .catalog("datafusion")
+                    .unwrap()
+                    .schema("public")
+                    .unwrap()
+                    .table(measurement)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let schema = table.schema();
+                let batch = datapoints_to_record_batch(&dps, schema.clone())?;
+                let mem_table = MemTable::try_new(schema, vec![vec![batch]])?;
+                engine.session_context().deregister_table(measurement)?;
+                engine
+                    .session_context()
+                    .register_table(measurement, Arc::new(mem_table))?;
+            }
         }
 
         let result = engine.execute(sql).await?;
@@ -307,10 +299,40 @@ fn execute_import(
         }
         "csv" => {
             let mut reader = csv::Reader::from_path(file)?;
+            let headers = reader.headers()?.clone();
             let mut datapoints = Vec::new();
 
-            for result in reader.deserialize() {
-                let dp: tsdb_arrow::schema::DataPoint = result?;
+            for result in reader.records() {
+                let record = result?;
+                let mut dp = tsdb_arrow::schema::DataPoint::new("", 0);
+
+                for (i, header) in headers.iter().enumerate() {
+                    let val = record.get(i).unwrap_or("");
+                    match header {
+                        "measurement" => dp.measurement = val.to_string(),
+                        "timestamp" => dp.timestamp = val.parse::<i64>().unwrap_or(0),
+                        h if h.starts_with("tag_") => {
+                            let tag_key = &h[4..];
+                            if !val.is_empty() {
+                                dp.tags.insert(tag_key.to_string(), val.to_string());
+                            }
+                        }
+                        h => {
+                            if !val.is_empty() {
+                                if let Ok(f) = val.parse::<f64>() {
+                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::Float(f));
+                                } else if let Ok(i) = val.parse::<i64>() {
+                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::Integer(i));
+                                } else if val == "true" || val == "false" {
+                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::Boolean(val == "true"));
+                                } else {
+                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::String(val.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 datapoints.push(dp);
             }
 
@@ -332,7 +354,7 @@ fn execute_import(
     Ok(())
 }
 
-/// 归档管理操作
+/// 归档管理操作: 将过期 RocksDB CF 数据导出为 JSON Lines 文件后删除源 CF
 fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()> {
     match action {
         ArchiveActions::Create {
@@ -343,17 +365,20 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
             let db =
                 tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
 
-            std::fs::create_dir_all(output_dir)?;
+            let archive_path = Path::new(&output_dir);
+            let (archived_cfs, total_points) =
+                tsdb_rocksdb::DataArchiver::archive_expired_cfs(&db, archive_path, days as u64)?;
 
-            let now = chrono::Utc::now().date_naive();
-            let dropped = tsdb_rocksdb::TtlManager::drop_expired_cfs(&db, now, days as u64)?;
-
-            if dropped.is_empty() {
+            if archived_cfs == 0 {
                 println!("No CFs older than {} days found.", days);
             } else {
-                println!("Archived {} column families:", dropped.len());
-                for cf_name in &dropped {
-                    println!("  {}", cf_name);
+                println!(
+                    "Archived {} column families ({} data points) to {}",
+                    archived_cfs, total_points, output_dir
+                );
+                let files = tsdb_rocksdb::DataArchiver::list_archives(archive_path)?;
+                for f in &files {
+                    println!("  {}", f);
                 }
             }
         }
@@ -361,25 +386,49 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
             if !Path::new(&file).exists() {
                 anyhow::bail!("Archive file not found: {}", file);
             }
-            println!("Restore from: {}", file);
-            println!("Note: Full restore requires IngestExternalFile API (not yet implemented)");
-        }
-        ArchiveActions::List { archive_dir } => {
-            if !Path::new(&archive_dir).exists() {
-                println!("Archive directory does not exist: {}", archive_dir);
-                return Ok(());
+
+            let db =
+                tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+
+            let f = std::fs::File::open(&file)?;
+            let reader = std::io::BufReader::new(f);
+            let mut count = 0usize;
+            let mut batch = Vec::new();
+
+            for line in std::io::BufRead::lines(reader) {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let dp: tsdb_arrow::schema::DataPoint = serde_json::from_str(&line)?;
+                batch.push(dp);
+                if batch.len() >= 10000 {
+                    db.write_batch(&batch)?;
+                    count += batch.len();
+                    batch.clear();
+                }
+            }
+            if !batch.is_empty() {
+                db.write_batch(&batch)?;
+                count += batch.len();
             }
 
-            let entries: Vec<_> = std::fs::read_dir(&archive_dir)?
-                .filter_map(|e| e.ok())
-                .collect();
+            println!("Restored {} data points from {}", count, file);
+        }
+        ArchiveActions::List { archive_dir } => {
+            let archive_path = Path::new(&archive_dir);
+            let files = tsdb_rocksdb::DataArchiver::list_archives(archive_path)?;
 
-            if entries.is_empty() {
+            if files.is_empty() {
                 println!("No archives found.");
             } else {
                 println!("Archives in {}:", archive_dir);
-                for entry in &entries {
-                    println!("  {}", entry.path().display());
+                for f in &files {
+                    let path = archive_path.join(f);
+                    let size = std::fs::metadata(&path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+                    println!("  {} ({} bytes)", f, size);
                 }
             }
         }
@@ -412,9 +461,55 @@ fn execute_export(
             std::fs::write(output, &json)?;
         }
         "csv" => {
+            let mut tag_keys: Vec<String> = datapoints
+                .iter()
+                .flat_map(|dp| dp.tags.keys().cloned())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            tag_keys.sort();
+
+            let mut field_keys: Vec<String> = datapoints
+                .iter()
+                .flat_map(|dp| dp.fields.keys().cloned())
+                .collect::<std::collections::HashSet<_>>()
+                .into_iter()
+                .collect();
+            field_keys.sort();
+
+            let mut headers = vec![
+                "measurement".to_string(),
+                "timestamp".to_string(),
+            ];
+            for k in &tag_keys {
+                headers.push(format!("tag_{}", k));
+            }
+            for k in &field_keys {
+                headers.push(k.clone());
+            }
+
             let mut wtr = csv::Writer::from_path(output)?;
+            wtr.write_record(&headers)?;
+
             for dp in &datapoints {
-                wtr.serialize(dp)?;
+                let mut row = vec![
+                    dp.measurement.clone(),
+                    dp.timestamp.to_string(),
+                ];
+                for k in &tag_keys {
+                    let v = dp.tags.get(k).map(|s| s.as_str()).unwrap_or("");
+                    row.push(v.to_string());
+                }
+                for k in &field_keys {
+                    let v = dp.fields.get(k).map_or(String::new(), |fv| match fv {
+                        tsdb_arrow::schema::FieldValue::Float(f) => format!("{}", f),
+                        tsdb_arrow::schema::FieldValue::Integer(i) => i.to_string(),
+                        tsdb_arrow::schema::FieldValue::String(s) => s.clone(),
+                        tsdb_arrow::schema::FieldValue::Boolean(b) => b.to_string(),
+                    });
+                    row.push(v);
+                }
+                wtr.write_record(&row)?;
             }
             wtr.flush()?;
         }

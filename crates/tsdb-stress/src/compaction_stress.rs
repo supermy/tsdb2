@@ -1,5 +1,7 @@
+use std::sync::Arc;
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use tsdb_arrow::schema::{DataPoint, FieldValue};
     use tsdb_parquet::compaction::{CompactionConfig, ParquetCompactor};
     use tsdb_parquet::partition::PartitionConfig;
@@ -18,7 +20,7 @@ mod tests {
                 .unwrap();
 
         let mut writer = TsdbParquetWriter::new(
-            pm,
+            Arc::new(pm),
             WriteBufferConfig {
                 max_buffer_rows: 100,
                 ..Default::default()
@@ -43,21 +45,21 @@ mod tests {
         let pm2 =
             tsdb_parquet::partition::PartitionManager::new(dir.path(), PartitionConfig::default())
                 .unwrap();
-        let reader = TsdbParquetReader::new(pm2);
+        let reader = TsdbParquetReader::new(Arc::new(pm2));
         let before = reader.read_all_datapoints("cpu").unwrap();
         let before_count = before.len();
 
         let pm3 =
             tsdb_parquet::partition::PartitionManager::new(dir.path(), PartitionConfig::default())
                 .unwrap();
-        let compactor = ParquetCompactor::new(pm3, CompactionConfig::default());
+        let compactor = ParquetCompactor::new(Arc::new(pm3), CompactionConfig::default());
 
         compactor.compact_date(date).unwrap();
 
         let pm4 =
             tsdb_parquet::partition::PartitionManager::new(dir.path(), PartitionConfig::default())
                 .unwrap();
-        let reader2 = TsdbParquetReader::new(pm4);
+        let reader2 = TsdbParquetReader::new(Arc::new(pm4));
         let after = reader2.read_all_datapoints("cpu").unwrap();
         assert_eq!(after.len(), before_count);
     }

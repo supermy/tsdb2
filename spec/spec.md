@@ -23,11 +23,12 @@ tsdb2/
 │   ├── tsdb-arrow/           # Arrow 数据模型 + DataPoint↔RecordBatch 转换
 │   ├── tsdb-parquet/         # Parquet 存储引擎 (写入/读取/Compaction/WAL)
 │   ├── tsdb-storage-arrow/   # Arrow 存储引擎 (WriteBuffer + Parquet)
-│   ├── tsdb-datafusion/      # DataFusion SQL 查询引擎
+│   ├── tsdb-datafusion/      # DataFusion SQL 查询引擎 (谓词下推+列投影)
+│   ├── tsdb-flight/          # Arrow Flight SQL 服务端 (gRPC 远程查询)
 │   ├── tsdb-rocksdb/         # RocksDB 存储引擎 (核心 crate)
 │   ├── tsdb-cli/             # CLI 工具 (子命令框架已有，业务逻辑占位)
 │   ├── tsdb-test-utils/      # 测试工具 (数据生成器 + 断言)
-│   ├── tsdb-integration-tests/ # 集成测试 (Parquet E2E + RocksDB E2E)
+│   ├── tsdb-integration-tests/ # 集成测试 (Parquet E2E + RocksDB E2E + Flight E2E)
 │   ├── tsdb-stress/          # Parquet 压力测试
 │   ├── tsdb-stress-rocksdb/  # RocksDB 压力测试
 │   └── tsdb-bench/           # Criterion 基准测试
@@ -42,11 +43,12 @@ tsdb2/
 | `tsdb-rocksdb` | 13 | ~2418 | 62 | 10 (rocksdb_e2e) | 15 | ✅ 核心完成 |
 | `tsdb-arrow` | 5 | ~786 | 5+ | - | - | ✅ 基础完成 |
 | `tsdb-parquet` | 8 | ~1437 | 多 | - | - | ✅ 基础完成 |
-| `tsdb-datafusion` | 6 | ~565 | 6 | - | - | ✅ 基础完成 |
+| `tsdb-datafusion` | 6 | ~565 | 17 | - | - | ✅ 谓词下推+列投影 |
+| `tsdb-flight` | 3 | ~300 | 0 | 18 (flight_e2e) | - | ✅ Flight SQL 完成 |
 | `tsdb-storage-arrow` | 5 | ~591 | 多 | 7 (e2e) | 5 | ✅ Parquet 完成 |
 | `tsdb-cli` | 1 | 202 | 0 | - | - | ⚠️ 框架占位 |
 | `tsdb-test-utils` | 3 | ~181 | 0 | - | - | ✅ 工具层 |
-| `tsdb-integration-tests` | 3 | ~477 | - | 17 | - | ✅ 基础完成 |
+| `tsdb-integration-tests` | 3 | ~477 | - | 40 | - | ✅ 含 Flight E2E |
 | `tsdb-stress-rocksdb` | 6 | ~595 | - | - | 15 | ✅ 基础完成 |
 
 ---
@@ -58,12 +60,19 @@ tsdb2/
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                    查询层 (Query Layer)                       │
-│  CLI / HTTP API → DataFusion SQL → Logical Plan → Optimizer │
+│  CLI / HTTP API / Flight SQL → DataFusion SQL → Optimizer   │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│              Flight SQL 服务层 (tsdb-flight)                  │
+│  Arrow Flight gRPC: do_get(查询) / do_put(写入) / do_action  │
+│  协议: Arrow IPC → RecordBatch 流式传输                      │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
 │                  执行引擎 (Execution Engine)                  │
 │  Arrow RecordBatch Stream: Filter → Project → Aggregate     │
+│  优化: 谓词下推(timestamp范围) + 列投影 + Limit下推          │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -73,12 +82,14 @@ tsdb2/
 │  │  CF: ts_{m}_{date}   │  │  Partition: date-based       │ │
 │  │  CF: _series_meta    │  │  Compaction: hot/cold tiers  │ │
 │  │  Key: hash+timestamp │  │  Format: Parquet columnar    │ │
+│  │  实时读写+列投影下推  │  │  批量分析+高压缩比归档       │ │
 │  └──────────────────────┘  └──────────────────────────────┘ │
+│  双引擎互通: DataPoint 共享模型 + JSONL 归档桥接             │
 └──────────────────────────┬──────────────────────────────────┘
                            │
 ┌──────────────────────────▼──────────────────────────────────┐
 │                  文件系统层 (File System)                     │
-│  WAL Files / SST Files / Manifest / Object Storage (S3)     │
+│  WAL Files / SST Files / Parquet Files / Object Storage     │
 └─────────────────────────────────────────────────────────────┘
 ```
 

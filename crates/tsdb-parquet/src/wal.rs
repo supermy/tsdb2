@@ -1,16 +1,12 @@
 use crate::error::{Result, TsdbParquetError};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
-/// WAL 条目类型
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WALEntryType {
-    /// 数据插入
     Insert = 0,
-    /// 数据删除
     Delete = 1,
-    /// 检查点 (用于恢复时确定已持久化的位置)
     Checkpoint = 2,
 }
 
@@ -119,10 +115,9 @@ impl WALEntry {
 /// 保证写入持久性: 数据先写入 WAL, 再写入内存缓冲区。
 /// 崩溃恢复时从 WAL 重放未持久化的条目。
 pub struct TsdbWAL {
-    /// WAL 文件路径
     path: std::path::PathBuf,
-    /// 全局递增序列号 (原子操作, 线程安全)
     sequence: std::sync::atomic::AtomicU64,
+    writer: std::sync::Mutex<BufWriter<std::fs::File>>,
 }
 
 impl TsdbWAL {
@@ -136,9 +131,16 @@ impl TsdbWAL {
                 .map_err(|e| TsdbParquetError::Wal(format!("failed to create WAL dir: {}", e)))?;
         }
 
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|e| TsdbParquetError::Wal(format!("failed to open WAL: {}", e)))?;
+
         Ok(Self {
             path,
             sequence: std::sync::atomic::AtomicU64::new(0),
+            writer: std::sync::Mutex::new(BufWriter::new(file)),
         })
     }
 
@@ -158,28 +160,27 @@ impl TsdbWAL {
 
         let encoded = entry.encode();
 
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(|e| TsdbParquetError::Wal(format!("failed to open WAL: {}", e)))?;
-
-        file.write_all(&encoded)
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer
+            .write_all(&encoded)
             .map_err(|e| TsdbParquetError::Wal(format!("WAL write failed: {}", e)))?;
+        writer
+            .flush()
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL flush failed: {}", e)))?;
 
         Ok(seq)
     }
 
     /// 将 WAL 文件刷盘 (fsync)
     pub fn sync(&self) -> Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.path)
-            .map_err(|e| TsdbParquetError::Wal(format!("failed to open WAL for sync: {}", e)))?;
-
-        file.sync_all()
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer
+            .flush()
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL flush before sync failed: {}", e)))?;
+        writer
+            .get_ref()
+            .sync_all()
             .map_err(|e| TsdbParquetError::Wal(format!("WAL sync failed: {}", e)))?;
-
         Ok(())
     }
 

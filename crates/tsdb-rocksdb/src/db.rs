@@ -6,7 +6,7 @@ use crate::key::{compute_tags_hash, TsdbKey, TAGS_HASH_SIZE};
 use crate::merge::{tsdb_full_merge, tsdb_partial_merge};
 use crate::snapshot::TsdbSnapshot;
 use crate::tags::{decode_tags, encode_tags};
-use crate::value::{decode_fields, encode_fields};
+use crate::value::{decode_fields, decode_fields_projection, encode_fields};
 use rocksdb::{
     BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DBCompressionType,
     IteratorMode, Options, ReadOptions, SliceTransform, WriteBatch, DB,
@@ -87,43 +87,80 @@ impl TsdbRocksDb {
         })
     }
 
-    /// 数据库全局选项: 自定义比较器 + 无文件数限制
-    fn db_options(_config: &RocksDbConfig) -> Options {
+    /// 数据库全局选项: 自定义比较器 + 无文件数限制 + 分层压缩
+    fn db_options(config: &RocksDbConfig) -> Options {
         let mut opts = Options::default();
         opts.set_comparator("tsdb_comparator", Box::new(tsdb_compare));
         opts.set_max_open_files(-1);
+
+        opts.set_level_zero_file_num_compaction_trigger(config.level0_file_num_compaction_trigger);
+        opts.set_level_zero_slowdown_writes_trigger(config.level0_slowdown_writes_trigger);
+        opts.set_level_zero_stop_writes_trigger(config.level0_stop_writes_trigger);
+
+        let mut compression_per_level = Vec::new();
+        for level in 0..7 {
+            if level <= 2 {
+                compression_per_level.push(config.compression_l0_l2);
+            } else {
+                compression_per_level.push(config.compression_l3_plus);
+            }
+        }
+        opts.set_compression_per_level(&compression_per_level);
+
         opts
     }
 
     /// Block-Based Table 选项: LRU 缓存 + Bloom Filter + 元数据缓存
-    fn block_options(cache: &Cache, _config: &RocksDbConfig) -> BlockBasedOptions {
+    fn block_options(cache: &Cache, config: &RocksDbConfig) -> BlockBasedOptions {
         let mut opts = BlockBasedOptions::default();
         opts.set_block_cache(cache);
-        opts.set_bloom_filter(10.0, false);
+        opts.set_bloom_filter(
+            config.bloom_filter_bits_per_key as _,
+            config.bloom_filter_block_based,
+        );
         opts.set_format_version(5);
         opts.set_cache_index_and_filter_blocks(true);
         opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+        opts.set_block_size(config.block_size);
         opts
     }
 
-    /// 标签元数据 CF 选项: 仅 Zstd 压缩
+    /// 标签元数据 CF 选项: Snappy 压缩 + 优化配置
     fn meta_cf_options() -> Options {
         let mut opts = Options::default();
-        opts.set_compression_type(DBCompressionType::Zstd);
+        opts.set_compression_type(DBCompressionType::Snappy);
+        opts.set_write_buffer_size(16 * 1024 * 1024);
+        opts.set_max_write_buffer_number(2);
         opts
     }
 
-    /// 时序数据 CF 选项: Zstd 压缩 + 前缀 Bloom + Merge + TTL Filter
+    /// 时序数据 CF 选项: 分层压缩 + 前缀 Bloom + Merge + TTL Filter
     fn data_cf_options(block_opts: &BlockBasedOptions, config: &RocksDbConfig) -> Options {
         let mut opts = Options::default();
         opts.set_block_based_table_factory(block_opts);
-        opts.set_compression_type(DBCompressionType::Zstd);
+
+        opts.set_compression_type(config.compression_l3_plus);
+
+        let mut compression_per_level = Vec::new();
+        for level in 0..7 {
+            if level <= 2 {
+                compression_per_level.push(config.compression_l0_l2);
+            } else {
+                compression_per_level.push(config.compression_l3_plus);
+            }
+        }
+        opts.set_compression_per_level(&compression_per_level);
+
         opts.set_prefix_extractor(SliceTransform::create_fixed_prefix(TAGS_HASH_SIZE));
-        opts.set_memtable_prefix_bloom_ratio(0.1);
-        opts.set_max_write_buffer_number(4);
+        opts.set_memtable_prefix_bloom_ratio(config.memtable_prefix_bloom_ratio);
+        opts.set_max_write_buffer_number(config.max_write_buffer_number);
         opts.set_write_buffer_size(config.cf_write_buffer_size);
         opts.set_max_bytes_for_level_base(config.cf_max_bytes_for_level_base);
+        opts.set_level_zero_file_num_compaction_trigger(config.level0_file_num_compaction_trigger);
+        opts.set_level_zero_slowdown_writes_trigger(config.level0_slowdown_writes_trigger);
+        opts.set_level_zero_stop_writes_trigger(config.level0_stop_writes_trigger);
         opts.set_merge_operator("tsdb_field_merge", tsdb_full_merge, tsdb_partial_merge);
+        opts.set_optimize_filters_for_hits(true);
         if config.default_ttl_secs > 0 {
             opts.set_compaction_filter_factory(TsdbTtlFilterFactory::new(config.default_ttl_secs));
         }
@@ -187,7 +224,12 @@ impl TsdbRocksDb {
     /// 批量写入数据点 (按 CF 分组, 每组一个 WriteBatch 原子提交)
     ///
     /// 比逐条 put 更高效: 减少 WAL fsync 次数, 降低写入放大。
+    /// 优化: 预分配 WriteBatch 容量, 批量提交 tags 元数据。
     pub fn write_batch(&self, dps: &[tsdb_arrow::schema::DataPoint]) -> Result<()> {
+        if dps.is_empty() {
+            return Ok(());
+        }
+
         let mut by_cf: BTreeMap<String, Vec<&tsdb_arrow::schema::DataPoint>> = BTreeMap::new();
         for dp in dps {
             let date = micros_to_date(dp.timestamp).ok();
@@ -204,6 +246,9 @@ impl TsdbRocksDb {
 
         let meta_cf = self.ensure_meta_cf()?;
 
+        let mut seen_tags_hashes: std::collections::HashSet<u64> =
+            std::collections::HashSet::with_capacity(dps.len().min(128));
+
         for (cf_name, group) in &by_cf {
             let data_cf = self.ensure_data_cf(cf_name)?;
             let mut batch = WriteBatch::default();
@@ -213,7 +258,10 @@ impl TsdbRocksDb {
                 let key = TsdbKey::new(tags_hash, dp.timestamp).encode();
                 let value = encode_fields(&dp.fields);
                 batch.put_cf(&data_cf, &key, &value);
-                batch.put_cf(&meta_cf, tags_hash.to_be_bytes(), encode_tags(&dp.tags));
+
+                if seen_tags_hashes.insert(tags_hash) {
+                    batch.put_cf(&meta_cf, tags_hash.to_be_bytes(), encode_tags(&dp.tags));
+                }
             }
 
             self.db.write(batch)?;
@@ -253,6 +301,102 @@ impl TsdbRocksDb {
             }
             None => Ok(None),
         }
+    }
+
+    /// 批量读取多个数据点 (利用 RocksDB multi_get_cf 减少系统调用)
+    ///
+    /// 比 for 循环逐个 get 更高效: 一次提交所有 key 的查询请求,
+    /// 减少系统调用和锁竞争开销。
+    ///
+    /// # 参数
+    /// - `measurement`: 度量名
+    /// - `keys`: (tags, timestamp) 列表
+    ///
+    /// # 返回
+    /// 与输入 keys 等长的 Vec, 每项为 Some(DataPoint) 或 None
+    pub fn multi_get(
+        &self,
+        measurement: &str,
+        keys: &[(tsdb_arrow::schema::Tags, i64)],
+    ) -> Result<Vec<Option<tsdb_arrow::schema::DataPoint>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut by_cf: BTreeMap<String, Vec<(usize, u64, i64, &tsdb_arrow::schema::Tags)>> =
+            BTreeMap::new();
+
+        for (i, (tags, timestamp)) in keys.iter().enumerate() {
+            let tags_hash = compute_tags_hash(tags);
+            if let Ok(date) = micros_to_date(*timestamp) {
+                let cf_name = format!(
+                    "{}{}_{}",
+                    TS_CF_PREFIX,
+                    measurement,
+                    date.format("%Y%m%d")
+                );
+                by_cf
+                    .entry(cf_name)
+                    .or_default()
+                    .push((i, tags_hash, *timestamp, tags));
+            }
+        }
+
+        let mut results: Vec<Option<tsdb_arrow::schema::DataPoint>> =
+            vec![None; keys.len()];
+
+        for (cf_name, group) in &by_cf {
+            let data_cf = match self.db.cf_handle(cf_name) {
+                Some(cf) => cf,
+                None => continue,
+            };
+
+            let rocksdb_keys: Vec<Vec<u8>> = group
+                .iter()
+                .map(|(_, tags_hash, timestamp, _)| {
+                    TsdbKey::new(*tags_hash, *timestamp).encode()
+                })
+                .collect();
+
+            let values = self.db.multi_get_cf(
+                rocksdb_keys
+                    .iter()
+                    .map(|k| (&data_cf, k.as_slice())),
+            );
+
+            let meta_cf = self.db.cf_handle(SERIES_META_CF);
+
+            for (j, result) in values.into_iter().enumerate() {
+                let (original_idx, tags_hash, timestamp, tags) = &group[j];
+                match result {
+                    Ok(Some(v)) => {
+                        if let Ok(fields) = decode_fields(&v) {
+                            let resolved_tags = if let Some(ref meta_cf) = meta_cf {
+                                self.db
+                                    .get_pinned_cf(meta_cf, tags_hash.to_be_bytes())
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|v| decode_tags(&v).ok())
+                                    .unwrap_or_else(|| (*tags).clone())
+                            } else {
+                                (*tags).clone()
+                            };
+                            results[*original_idx] =
+                                Some(tsdb_arrow::schema::DataPoint {
+                                    measurement: measurement.to_string(),
+                                    tags: resolved_tags,
+                                    fields,
+                                    timestamp: *timestamp,
+                                });
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(_) => {}
+                }
+            }
+        }
+
+        Ok(results)
     }
 
     /// 范围查询: 扫描指定时间范围内的所有数据点
@@ -339,7 +483,7 @@ impl TsdbRocksDb {
             if let Some(data_cf) = self.db.cf_handle(&cf_name) {
                 let mut read_opts = ReadOptions::default();
                 let start_key = TsdbKey::new(tags_hash, start_micros).encode();
-                let end_key = TsdbKey::new(tags_hash, end_micros + 1).encode();
+                let end_key = TsdbKey::new(tags_hash, end_micros.saturating_add(1)).encode();
                 read_opts.set_iterate_range(start_key..end_key);
 
                 let iter = self
@@ -348,7 +492,7 @@ impl TsdbRocksDb {
                 for item in iter {
                     let (raw_key, raw_value) = item?;
                     let ts_key = TsdbKey::decode(&raw_key)?;
-                    if ts_key.tags_hash != tags_hash {
+                    if ts_key.tags_hash != tags_hash || ts_key.timestamp > end_micros {
                         continue;
                     }
                     let fields = decode_fields(&raw_value)?;
@@ -358,6 +502,64 @@ impl TsdbRocksDb {
                         fields,
                         timestamp: ts_key.timestamp,
                     });
+                }
+            }
+            current_date += chrono::Duration::days(1);
+        }
+
+        results.sort_by_key(|dp| dp.timestamp);
+        Ok(results)
+    }
+
+    /// 列投影范围查询: 只解码指定字段, 跳过不需要的列
+    ///
+    /// 比全量 read_range + 过滤更高效: 跳过不需要的字段值解码,
+    /// 减少内存分配和 CPU 开销。适用于只需要部分字段的查询场景。
+    pub fn read_range_projection(
+        &self,
+        measurement: &str,
+        start_micros: i64,
+        end_micros: i64,
+        field_names: &[&str],
+    ) -> Result<Vec<tsdb_arrow::schema::DataPoint>> {
+        let start_date = micros_to_date(start_micros)?;
+        let end_date = micros_to_date(end_micros)?;
+        let projection: std::collections::HashSet<&str> = field_names.iter().copied().collect();
+
+        let mut results = Vec::new();
+        let mut current_date = start_date;
+
+        while current_date <= end_date {
+            let cf_name = format!(
+                "{}{}_{}",
+                TS_CF_PREFIX,
+                measurement,
+                current_date.format("%Y%m%d")
+            );
+            if let Some(data_cf) = self.db.cf_handle(&cf_name) {
+                let iter = self.db.iterator_cf(&data_cf, IteratorMode::Start);
+                for item in iter {
+                    let (raw_key, raw_value) = item?;
+                    let ts_key = TsdbKey::decode(&raw_key)?;
+                    if ts_key.timestamp < start_micros || ts_key.timestamp > end_micros {
+                        continue;
+                    }
+                    let fields = decode_fields_projection(&raw_value, &projection)?;
+
+                    if let Some(meta_cf) = self.db.cf_handle(SERIES_META_CF) {
+                        if let Some(tags_value) = self
+                            .db
+                            .get_pinned_cf(&meta_cf, ts_key.tags_hash.to_be_bytes())?
+                        {
+                            let tags = decode_tags(&tags_value)?;
+                            results.push(tsdb_arrow::schema::DataPoint {
+                                measurement: measurement.to_string(),
+                                tags,
+                                fields,
+                                timestamp: ts_key.timestamp,
+                            });
+                        }
+                    }
                 }
             }
             current_date += chrono::Duration::days(1);
@@ -394,6 +596,20 @@ impl TsdbRocksDb {
             .filter(|name| name.starts_with(TS_CF_PREFIX))
             .collect();
         cfs
+    }
+
+    pub fn list_measurements(&self) -> Vec<String> {
+        self.list_ts_cfs()
+            .into_iter()
+            .map(|cf_name| {
+                cf_name
+                    .strip_prefix(TS_CF_PREFIX)
+                    .and_then(|s| s.rsplit_once('_').map(|(m, _)| m.to_string()))
+                    .unwrap_or_default()
+            })
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     /// 获取数据库统计信息 (字符串格式)
@@ -731,7 +947,7 @@ mod tests {
         let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
 
         let base_ts = now_ts();
-        let mut dps = Vec::new();
+        let mut dps: Vec<tsdb_arrow::schema::DataPoint> = Vec::new();
         for i in 0..100i64 {
             let mut tags = Tags::new();
             tags.insert("host".to_string(), format!("server{:02}", i % 5));
@@ -919,5 +1135,272 @@ mod tests {
         let cpu_cf = cfs.iter().find(|c| c.contains("cpu")).unwrap().clone();
         let stats = db.cf_stats(&cpu_cf);
         assert!(stats.is_some());
+    }
+
+    #[test]
+    fn test_multi_get_basic() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let tags_a = make_tags("server01");
+        let tags_b = make_tags("server02");
+        let base_ts = now_ts();
+
+        let mut fields1 = tsdb_arrow::schema::Fields::new();
+        fields1.insert("usage".to_string(), FieldValue::Float(1.0));
+        let mut fields2 = tsdb_arrow::schema::Fields::new();
+        fields2.insert("usage".to_string(), FieldValue::Float(2.0));
+        let mut fields3 = tsdb_arrow::schema::Fields::new();
+        fields3.insert("usage".to_string(), FieldValue::Float(3.0));
+
+        db.put("cpu", &tags_a, base_ts, &fields1).unwrap();
+        db.put("cpu", &tags_b, base_ts, &fields2).unwrap();
+        db.put("cpu", &tags_a, base_ts + 1_000_000, &fields3).unwrap();
+
+        let keys = vec![
+            (tags_a.clone(), base_ts),
+            (tags_b.clone(), base_ts),
+            (tags_a.clone(), base_ts + 1_000_000),
+        ];
+        let results = db.multi_get("cpu", &keys).unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_some());
+        assert_eq!(*results[0].as_ref().unwrap().fields.get("usage").unwrap(), FieldValue::Float(1.0));
+        assert!(results[1].is_some());
+        assert_eq!(*results[1].as_ref().unwrap().fields.get("usage").unwrap(), FieldValue::Float(2.0));
+        assert!(results[2].is_some());
+        assert_eq!(*results[2].as_ref().unwrap().fields.get("usage").unwrap(), FieldValue::Float(3.0));
+    }
+
+    #[test]
+    fn test_multi_get_missing_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let tags = make_tags("server01");
+        let base_ts = now_ts();
+
+        let mut fields = tsdb_arrow::schema::Fields::new();
+        fields.insert("usage".to_string(), FieldValue::Float(1.0));
+        db.put("cpu", &tags, base_ts, &fields).unwrap();
+
+        let keys = vec![
+            (tags.clone(), base_ts),
+            (tags.clone(), base_ts + 999_999_999),
+        ];
+        let results = db.multi_get("cpu", &keys).unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_some());
+        assert!(results[1].is_none());
+    }
+
+    #[test]
+    fn test_multi_get_empty_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let results = db.multi_get("cpu", &[]).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_multi_get_nonexistent_cf() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let tags = make_tags("server01");
+        let keys = vec![(tags, 9999999999999)];
+        let results = db.multi_get("nonexistent", &keys).unwrap();
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].is_none());
+    }
+
+    #[test]
+    fn test_multi_get_consistency_with_get() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let tags_a = make_tags("host_a");
+        let tags_b = make_tags("host_b");
+        let base_ts = now_ts();
+
+        for i in 0..20i64 {
+            let tags = if i % 2 == 0 { &tags_a } else { &tags_b };
+            let mut fields = tsdb_arrow::schema::Fields::new();
+            fields.insert("val".to_string(), FieldValue::Float(i as f64));
+            db.put("cpu", tags, base_ts + i * 1_000_000, &fields).unwrap();
+        }
+
+        let keys: Vec<(Tags, i64)> = (0..20)
+            .map(|i| {
+                let tags = if i % 2 == 0 { tags_a.clone() } else { tags_b.clone() };
+                (tags, base_ts + i * 1_000_000)
+            })
+            .collect();
+
+        let multi_results = db.multi_get("cpu", &keys).unwrap();
+
+        for (i, result) in multi_results.iter().enumerate() {
+            let single = db.get("cpu", &keys[i].0, keys[i].1).unwrap();
+            match result {
+                Some(dp) => {
+                    assert!(single.is_some(), "multi_get found but get didn't at index {}", i);
+                    assert_eq!(dp.timestamp, single.as_ref().unwrap().timestamp);
+                    assert_eq!(dp.fields, single.as_ref().unwrap().fields);
+                }
+                None => {
+                    assert!(single.is_none(), "get found but multi_get didn't at index {}", i);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_write_batch_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let result = db.write_batch(&[]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_write_batch_tags_deduplication() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let tags = make_tags("server01");
+        let base_ts = now_ts();
+
+        let dps: Vec<tsdb_arrow::schema::DataPoint> = (0..100)
+            .map(|i| {
+                let mut fields = tsdb_arrow::schema::Fields::new();
+                fields.insert("val".to_string(), FieldValue::Float(i as f64));
+                tsdb_arrow::schema::DataPoint {
+                    measurement: "cpu".to_string(),
+                    tags: tags.clone(),
+                    fields,
+                    timestamp: base_ts + i as i64 * 1_000_000,
+                }
+            })
+            .collect();
+
+        db.write_batch(&dps).unwrap();
+
+        let result = db.read_range("cpu", base_ts, base_ts + 99_000_000).unwrap();
+        assert_eq!(result.len(), 100);
+
+        let meta_cf = db.db().cf_handle("_series_meta").unwrap();
+        let tags_hash = compute_tags_hash(&tags);
+        let meta_val = db.db().get_pinned_cf(&meta_cf, tags_hash.to_be_bytes()).unwrap();
+        assert!(meta_val.is_some(), "tags metadata should be stored once");
+    }
+
+    #[test]
+    fn test_read_range_projection() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let dps: Vec<tsdb_arrow::schema::DataPoint> = (0..10)
+            .map(|i| {
+                let mut fields = tsdb_arrow::schema::Fields::new();
+                fields.insert("usage".to_string(), FieldValue::Float(i as f64 * 0.1));
+                fields.insert("idle".to_string(), FieldValue::Float(1.0 - i as f64 * 0.1));
+                fields.insert("count".to_string(), FieldValue::Integer(i as i64 * 10));
+                tsdb_arrow::schema::DataPoint {
+                    measurement: "cpu".to_string(),
+                    tags: make_tags("server01"),
+                    fields,
+                    timestamp: now_ts() + i as i64 * 1_000_000,
+                }
+            })
+            .collect();
+        db.write_batch(&dps).unwrap();
+
+        let start = dps[0].timestamp;
+        let end = dps[9].timestamp;
+
+        let projected = db.read_range_projection("cpu", start, end, &["usage"]).unwrap();
+        assert_eq!(projected.len(), 10);
+        for dp in &projected {
+            assert!(dp.fields.contains_key("usage"));
+            assert!(!dp.fields.contains_key("idle"));
+            assert!(!dp.fields.contains_key("count"));
+        }
+    }
+
+    #[test]
+    fn test_read_range_projection_multiple_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let dps: Vec<tsdb_arrow::schema::DataPoint> = (0..5)
+            .map(|i| {
+                let mut fields = tsdb_arrow::schema::Fields::new();
+                fields.insert("usage".to_string(), FieldValue::Float(i as f64));
+                fields.insert("idle".to_string(), FieldValue::Float(1.0 - i as f64));
+                fields.insert("count".to_string(), FieldValue::Integer(i));
+                tsdb_arrow::schema::DataPoint {
+                    measurement: "cpu".to_string(),
+                    tags: make_tags("server01"),
+                    fields,
+                    timestamp: now_ts() + i as i64 * 1_000_000,
+                }
+            })
+            .collect();
+        db.write_batch(&dps).unwrap();
+
+        let start = dps[0].timestamp;
+        let end = dps[4].timestamp;
+
+        let projected = db.read_range_projection("cpu", start, end, &["usage", "count"]).unwrap();
+        assert_eq!(projected.len(), 5);
+        for dp in &projected {
+            assert!(dp.fields.contains_key("usage"));
+            assert!(dp.fields.contains_key("count"));
+            assert!(!dp.fields.contains_key("idle"));
+        }
+    }
+
+    #[test]
+    fn test_list_measurements() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let cpu_dps: Vec<tsdb_arrow::schema::DataPoint> = (0..3)
+            .map(|i| {
+                let mut fields = tsdb_arrow::schema::Fields::new();
+                fields.insert("val".to_string(), FieldValue::Float(i as f64));
+                tsdb_arrow::schema::DataPoint {
+                    measurement: "cpu".to_string(),
+                    tags: make_tags("srv1"),
+                    fields,
+                    timestamp: now_ts() + i as i64 * 1_000_000,
+                }
+            })
+            .collect();
+
+        let mem_dps: Vec<tsdb_arrow::schema::DataPoint> = (0..2)
+            .map(|i| {
+                let mut fields = tsdb_arrow::schema::Fields::new();
+                fields.insert("val".to_string(), FieldValue::Float(i as f64));
+                tsdb_arrow::schema::DataPoint {
+                    measurement: "mem".to_string(),
+                    tags: make_tags("srv1"),
+                    fields,
+                    timestamp: now_ts() + i as i64 * 1_000_000,
+                }
+            })
+            .collect();
+
+        db.write_batch(&cpu_dps).unwrap();
+        db.write_batch(&mem_dps).unwrap();
+
+        let measurements = db.list_measurements();
+        assert!(measurements.contains(&"cpu".to_string()));
+        assert!(measurements.contains(&"mem".to_string()));
     }
 }

@@ -1,5 +1,7 @@
+use std::sync::Arc;
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use tsdb_arrow::schema::{DataPoint, FieldValue, Tags};
     use tsdb_parquet::partition::{PartitionConfig, PartitionManager};
     use tsdb_parquet::reader::TsdbParquetReader;
@@ -25,7 +27,7 @@ mod tests {
         }
 
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
 
         for dps in &all_dps {
             writer.write_batch(dps).unwrap();
@@ -33,7 +35,7 @@ mod tests {
         writer.flush_all().unwrap();
 
         let pm2 = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let reader = TsdbParquetReader::new(pm2);
+        let reader = TsdbParquetReader::new(Arc::new(pm2));
 
         let total: usize = (0..threads)
             .map(|t| {

@@ -5,6 +5,7 @@ members = [
     "crates/tsdb-parquet",
     "crates/tsdb-datafusion",
     "crates/tsdb-storage-arrow",
+    "crates/tsdb-flight",
     "crates/tsdb-integration-tests",
     "crates/tsdb-test-utils",
     "crates/tsdb-stress",
@@ -15,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 
@@ -27,8 +28,12 @@ tsdb-storage-arrow = { path = "crates/tsdb-storage-arrow" }
 tsdb-test-utils = { path = "crates/tsdb-test-utils" }
 
 arrow = "54"
+arrow-ipc = "54"
 parquet = "54"
 datafusion = "46"
+arrow-flight = "54"
+tonic = "0.12"
+prost = "0.13"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = "0.3"

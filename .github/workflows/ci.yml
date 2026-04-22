@@ -46,6 +46,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --workspace --exclude tsdb-stress-rocksdb
+      - name: Run Flight SQL integration tests
+        run: cargo test -p tsdb-integration-tests -- flight_e2e
+      - name: Run business scenario tests
+        run: cargo test -p tsdb-integration-tests -- business
       - name: Run stress tests
         if: matrix.os == 'ubuntu-latest'
         run: cargo test -p tsdb-stress-rocksdb

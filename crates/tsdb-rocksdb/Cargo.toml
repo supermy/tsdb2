@@ -12,6 +12,7 @@ chrono = { workspace = true }
 fxhash = "0.2"
 arrow = { workspace = true }
 num_cpus = "1"
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

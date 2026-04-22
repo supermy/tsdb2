@@ -30,6 +30,9 @@ pub enum TsdbRocksDbError {
     /// Arrow 数据转换错误
     #[error("Arrow conversion error: {0}")]
     ArrowConversion(#[from] tsdb_arrow::error::TsdbArrowError),
+    /// JSON 序列化/反序列化错误
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// 统一结果类型

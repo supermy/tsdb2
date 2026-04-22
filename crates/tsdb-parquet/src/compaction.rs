@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::PartitionManager;
 use arrow::record_batch::RecordBatch;
@@ -37,13 +38,13 @@ impl Default for CompactionConfig {
 /// 3. 按行数阈值重新写入 (行数 ≤ target_rows 使用 hot 编码, 否则使用 cold 编码)
 /// 4. 删除原始小文件
 pub struct ParquetCompactor {
-    partition_manager: PartitionManager,
+    partition_manager: Arc<PartitionManager>,
     config: CompactionConfig,
 }
 
 impl ParquetCompactor {
     /// 创建 Compactor
-    pub fn new(partition_manager: PartitionManager, config: CompactionConfig) -> Self {
+    pub fn new(partition_manager: Arc<PartitionManager>, config: CompactionConfig) -> Self {
         Self {
             partition_manager,
             config,
@@ -65,9 +66,8 @@ impl ParquetCompactor {
 
         let mut all_batches = Vec::new();
         for path in &files {
-            if let Ok(batches) = self.read_parquet_file(path) {
-                all_batches.extend(batches);
-            }
+            let batches = self.read_parquet_file(path)?;
+            all_batches.extend(batches);
         }
 
         if all_batches.is_empty() {
@@ -77,10 +77,11 @@ impl ParquetCompactor {
         let total_rows: usize = all_batches.iter().map(|b| b.num_rows()).sum();
 
         let dir = self.partition_manager.ensure_partition(date)?;
-        let output_path = dir.join(format!("compacted-{}.parquet", date.format("%Y%m%d")));
+        let tmp_path = dir.join(format!(".tmp-compacted-{}.parquet", date.format("%Y%m%d")));
+        let final_path = dir.join(format!("compacted-{}.parquet", date.format("%Y%m%d")));
 
         let schema = all_batches[0].schema();
-        let file = File::create(&output_path).map_err(|e| {
+        let file = File::create(&tmp_path).map_err(|e| {
             TsdbParquetError::Io(std::io::Error::other(format!(
                 "failed to create compacted file: {}",
                 e
@@ -106,9 +107,19 @@ impl ParquetCompactor {
 
         writer.close().map_err(TsdbParquetError::Parquet)?;
 
+        std::fs::rename(&tmp_path, &final_path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            TsdbParquetError::Io(std::io::Error::other(format!(
+                "atomic rename failed: {}",
+                e
+            )))
+        })?;
+
         for path in &files {
-            if path != &output_path {
-                let _ = std::fs::remove_file(path);
+            if path != &final_path {
+                if let Err(e) = std::fs::remove_file(path) {
+                    tracing::warn!("failed to remove file {:?}: {}", path, e);
+                }
             }
         }
 
@@ -173,7 +184,7 @@ mod tests {
 
     fn write_test_data(dir: &TempDir) -> PartitionManager {
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
 
         let today = chrono::Utc::now().date_naive();
         let base_ts = today
@@ -200,7 +211,7 @@ mod tests {
     fn test_compact_date_single_file() {
         let dir = TempDir::new().unwrap();
         let pm = write_test_data(&dir);
-        let compactor = ParquetCompactor::new(pm, CompactionConfig::default());
+        let compactor = ParquetCompactor::new(Arc::new(pm), CompactionConfig::default());
 
         let today = chrono::Utc::now().date_naive();
         let result = compactor.compact_date(today);
@@ -211,7 +222,7 @@ mod tests {
     fn test_cleanup_expired() {
         let dir = TempDir::new().unwrap();
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
 
         let old_date = chrono::Utc::now().date_naive() - chrono::Duration::days(10);
         let base_ts = old_date
@@ -236,7 +247,7 @@ mod tests {
             retention_days: 5,
             ..Default::default()
         };
-        let compactor = ParquetCompactor::new(pm, config);
+        let compactor = ParquetCompactor::new(Arc::new(pm), config);
 
         let removed = compactor.cleanup_expired().unwrap();
         assert!(!removed.is_empty());

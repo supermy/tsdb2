@@ -179,12 +179,75 @@ pub type Fields = BTreeMap<String, FieldValue>;
 /// - Integer → Int64
 /// - String → Utf8
 /// - Boolean → Boolean
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum FieldValue {
     Float(f64),
     Integer(i64),
     String(String),
     Boolean(bool),
+}
+
+impl<'de> serde::Deserialize<'de> for FieldValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, MapAccess, Visitor};
+        use std::fmt;
+
+        struct FieldValueVisitor;
+
+        impl<'de> Visitor<'de> for FieldValueVisitor {
+            type Value = FieldValue;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a FieldValue (plain value or tagged object)")
+            }
+
+            fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<FieldValue, E> {
+                Ok(FieldValue::Float(v))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<FieldValue, E> {
+                Ok(FieldValue::Integer(v))
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<FieldValue, E> {
+                Ok(FieldValue::Integer(v as i64))
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<FieldValue, E> {
+                Ok(FieldValue::String(v.to_string()))
+            }
+
+            fn visit_bool<E: de::Error>(self, v: bool) -> std::result::Result<FieldValue, E> {
+                Ok(FieldValue::Boolean(v))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<FieldValue, A::Error> {
+                let (key, value): (String, serde_json::Value) = map.next_entry()?.ok_or_else(|| {
+                    de::Error::custom("empty map is not a valid FieldValue")
+                })?;
+                match key.as_str() {
+                    "Float" => value.as_f64().map(FieldValue::Float).ok_or_else(|| {
+                        de::Error::custom("invalid Float value")
+                    }),
+                    "Integer" => value.as_i64().map(FieldValue::Integer).ok_or_else(|| {
+                        de::Error::custom("invalid Integer value")
+                    }),
+                    "String" => value.as_str().map(|s| FieldValue::String(s.to_string())).ok_or_else(|| {
+                        de::Error::custom("invalid String value")
+                    }),
+                    "Boolean" => value.as_bool().map(FieldValue::Boolean).ok_or_else(|| {
+                        de::Error::custom("invalid Boolean value")
+                    }),
+                    other => Err(de::Error::custom(format!("unknown FieldValue variant: {}", other))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(FieldValueVisitor)
+    }
 }
 
 impl FieldValue {
@@ -291,5 +354,192 @@ impl From<&FieldValue> for FieldType {
             FieldValue::String(_) => FieldType::String,
             FieldValue::Boolean(_) => FieldType::Boolean,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_field_value_as_f64() {
+        assert_eq!(FieldValue::Float(3.14).as_f64(), Some(3.14));
+        assert_eq!(FieldValue::Integer(42).as_f64(), Some(42.0));
+        assert_eq!(FieldValue::String("hello".into()).as_f64(), None);
+        assert_eq!(FieldValue::Boolean(true).as_f64(), None);
+    }
+
+    #[test]
+    fn test_field_value_as_i64() {
+        assert_eq!(FieldValue::Integer(42).as_i64(), Some(42));
+        assert_eq!(FieldValue::Float(3.14).as_i64(), Some(3));
+        assert_eq!(FieldValue::String("hello".into()).as_i64(), None);
+        assert_eq!(FieldValue::Boolean(false).as_i64(), None);
+    }
+
+    #[test]
+    fn test_field_value_as_str() {
+        assert_eq!(FieldValue::String("hello".into()).as_str(), Some("hello"));
+        assert_eq!(FieldValue::Float(3.14).as_str(), None);
+        assert_eq!(FieldValue::Integer(42).as_str(), None);
+        assert_eq!(FieldValue::Boolean(true).as_str(), None);
+    }
+
+    #[test]
+    fn test_field_value_as_bool() {
+        assert_eq!(FieldValue::Boolean(true).as_bool(), Some(true));
+        assert_eq!(FieldValue::Boolean(false).as_bool(), Some(false));
+        assert_eq!(FieldValue::Float(3.14).as_bool(), None);
+        assert_eq!(FieldValue::Integer(42).as_bool(), None);
+    }
+
+    #[test]
+    fn test_field_value_serde_roundtrip_float() {
+        let original = FieldValue::Float(3.14);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: FieldValue = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, FieldValue::Float(v) if (v - 3.14).abs() < f64::EPSILON));
+    }
+
+    #[test]
+    fn test_field_value_serde_roundtrip_integer() {
+        let original = FieldValue::Integer(42);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: FieldValue = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, FieldValue::Integer(42)));
+    }
+
+    #[test]
+    fn test_field_value_serde_roundtrip_string() {
+        let original = FieldValue::String("hello".into());
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: FieldValue = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, FieldValue::String(s) if s == "hello"));
+    }
+
+    #[test]
+    fn test_field_value_serde_roundtrip_boolean() {
+        let original = FieldValue::Boolean(true);
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: FieldValue = serde_json::from_str(&json).unwrap();
+        assert!(matches!(restored, FieldValue::Boolean(true)));
+    }
+
+    #[test]
+    fn test_field_value_deserialize_tagged_object() {
+        let json = r#"{"Float": 2.71}"#;
+        let fv: FieldValue = serde_json::from_str(json).unwrap();
+        assert!(matches!(fv, FieldValue::Float(v) if (v - 2.71).abs() < f64::EPSILON));
+
+        let json = r#"{"Integer": 99}"#;
+        let fv: FieldValue = serde_json::from_str(json).unwrap();
+        assert!(matches!(fv, FieldValue::Integer(99)));
+
+        let json = r#"{"String": "test"}"#;
+        let fv: FieldValue = serde_json::from_str(json).unwrap();
+        assert!(matches!(fv, FieldValue::String(s) if s == "test"));
+
+        let json = r#"{"Boolean": true}"#;
+        let fv: FieldValue = serde_json::from_str(json).unwrap();
+        assert!(matches!(fv, FieldValue::Boolean(true)));
+    }
+
+    #[test]
+    fn test_field_value_deserialize_unknown_variant() {
+        let json = r#"{"Unknown": 42}"#;
+        let result: Result<FieldValue, _> = serde_json::from_str(json);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_field_type_from_field_value() {
+        assert_eq!(FieldType::from(&FieldValue::Float(0.0)), FieldType::Float);
+        assert_eq!(FieldType::from(&FieldValue::Integer(0)), FieldType::Integer);
+        assert_eq!(FieldType::from(&FieldValue::String("".into())), FieldType::String);
+        assert_eq!(FieldType::from(&FieldValue::Boolean(false)), FieldType::Boolean);
+    }
+
+    #[test]
+    fn test_series_key_with_tags() {
+        let dp = DataPoint::new("cpu", 1000)
+            .with_tag("host", "server01")
+            .with_tag("region", "us-west");
+        let key = dp.series_key();
+        assert_eq!(key, "cpu,host=server01,region=us-west");
+    }
+
+    #[test]
+    fn test_series_key_no_tags() {
+        let dp = DataPoint::new("cpu", 1000);
+        let key = dp.series_key();
+        assert_eq!(key, "cpu,");
+    }
+
+    #[test]
+    fn test_series_key_single_tag() {
+        let dp = DataPoint::new("mem", 2000)
+            .with_tag("host", "srv1");
+        let key = dp.series_key();
+        assert_eq!(key, "mem,host=srv1");
+    }
+
+    #[test]
+    fn test_schema_builder_compact_all_types() {
+        let schema = TsdbSchemaBuilder::new("test")
+            .with_tag_key("host")
+            .with_float_field("f1")
+            .with_int_field("i1")
+            .with_string_field("s1")
+            .with_bool_field("b1")
+            .compact()
+            .build();
+
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(field_names.contains(&"timestamp"));
+        assert!(field_names.contains(&"tag_host"));
+        assert!(field_names.contains(&"f1"));
+        assert!(field_names.contains(&"i1"));
+        assert!(field_names.contains(&"s1"));
+        assert!(field_names.contains(&"b1"));
+    }
+
+    #[test]
+    fn test_schema_builder_extended_mode() {
+        let schema = TsdbSchemaBuilder::new("test")
+            .with_tag_key("region")
+            .with_float_field("value")
+            .build();
+
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(field_names.contains(&"timestamp"));
+        assert!(field_names.contains(&"tags_hash"));
+        assert!(field_names.contains(&"tag_keys"));
+        assert!(field_names.contains(&"tag_values"));
+        assert!(field_names.contains(&"value"));
+    }
+
+    #[test]
+    fn test_compact_tsdb_schema() {
+        let schema = compact_tsdb_schema(
+            "cpu",
+            &["host".to_string(), "region".to_string()],
+            &[
+                ("usage".to_string(), arrow::datatypes::DataType::Float64),
+                ("count".to_string(), arrow::datatypes::DataType::Int64),
+            ],
+        );
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(field_names.contains(&"tag_host"));
+        assert!(field_names.contains(&"tag_region"));
+        assert!(field_names.contains(&"usage"));
+        assert!(field_names.contains(&"count"));
+    }
+
+    #[test]
+    fn test_field_value_to_data_type() {
+        assert_eq!(field_value_to_data_type(&FieldValue::Float(0.0)), arrow::datatypes::DataType::Float64);
+        assert_eq!(field_value_to_data_type(&FieldValue::Integer(0)), arrow::datatypes::DataType::Int64);
+        assert_eq!(field_value_to_data_type(&FieldValue::String("".into())), arrow::datatypes::DataType::Utf8);
+        assert_eq!(field_value_to_data_type(&FieldValue::Boolean(false)), arrow::datatypes::DataType::Boolean);
     }
 }

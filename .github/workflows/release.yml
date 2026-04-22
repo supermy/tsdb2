@@ -118,12 +118,17 @@ jobs:
 
             ### 变更
 
-            - 首个公开版本
-            - RocksDB + Parquet 双存储引擎
-            - DataFusion SQL 查询
-            - CLI 工具 (status/query/bench/compact/import/archive/export/doctor)
-            - 三级 TTL 清理
-            - 一致性快照
+            详见 [CHANGELOG.md](https://github.com/supermy/tsdb2/blob/main/CHANGELOG.md)
+
+            ### v0.2.0 主要变更
+
+            - Arrow Flight SQL 服务端 (do_get/do_put/do_action)
+            - 列投影下推 + 谓词下推 + Limit 下推
+            - WAL BufWriter 常驻句柄优化
+            - Compaction 原子替换 (tmp+rename)
+            - INI 配置策略 (5种预设)
+            - 业务场景测试 (IoT/金融/APM)
+            - 360 个测试全部通过
           files: |
             artifacts/**/*
           draft: false

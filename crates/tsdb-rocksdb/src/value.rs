@@ -159,6 +159,59 @@ pub fn decode_fields(data: &[u8]) -> Result<tsdb_arrow::schema::Fields> {
     Ok(fields)
 }
 
+/// 列投影解码: 只解码指定字段名的字段, 跳过不需要的列
+///
+/// 比全量 decode_fields + 过滤更高效: 跳过不需要的字段值解码,
+/// 减少内存分配和 CPU 开销。适用于只需要部分字段的查询场景。
+pub fn decode_fields_projection(
+    data: &[u8],
+    projection: &std::collections::HashSet<&str>,
+) -> Result<tsdb_arrow::schema::Fields> {
+    let mut cursor = 0;
+    let num_fields = decode_u16(data, &mut cursor)?;
+    let mut fields = tsdb_arrow::schema::Fields::new();
+    for _ in 0..num_fields {
+        let name = decode_str(data, &mut cursor)?;
+        if projection.contains(name.as_str()) {
+            let value = decode_field_value(data, &mut cursor)?;
+            fields.insert(name, value);
+        } else {
+            skip_field_value(data, &mut cursor)?;
+        }
+    }
+    Ok(fields)
+}
+
+/// 跳过单个字段值 (不解码), 推进游标
+fn skip_field_value(data: &[u8], cursor: &mut usize) -> Result<()> {
+    if *cursor >= data.len() {
+        return Err(TsdbRocksDbError::InvalidValue(
+            "truncated field type".to_string(),
+        ));
+    }
+    let field_type = data[*cursor];
+    *cursor += 1;
+    match field_type {
+        FIELD_TYPE_FLOAT64 | FIELD_TYPE_INT64 => {
+            *cursor += 8;
+        }
+        FIELD_TYPE_UTF8 => {
+            let len = decode_u16(data, cursor)? as usize;
+            *cursor += len;
+        }
+        FIELD_TYPE_BOOLEAN => {
+            *cursor += 1;
+        }
+        _ => {
+            return Err(TsdbRocksDbError::InvalidValue(format!(
+                "unknown field type: {}",
+                field_type
+            )))
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +312,97 @@ mod tests {
         let data: Vec<u8> = vec![0x00, 0x01, 0x00, 0x01, 0x61, 0xFF];
         let result = decode_fields(&data);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_projection_decode_single_field() {
+        let fields = make_fields(&[
+            ("usage", FieldValue::Float(2.71)),
+            ("idle", FieldValue::Float(0.29)),
+            ("count", FieldValue::Integer(42)),
+            ("host", FieldValue::String("server01".to_string())),
+        ]);
+        let encoded = encode_fields(&fields);
+
+        let projection: std::collections::HashSet<&str> = ["usage"].into();
+        let decoded = decode_fields_projection(&encoded, &projection).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(*decoded.get("usage").unwrap(), FieldValue::Float(2.71));
+        assert!(!decoded.contains_key("idle"));
+        assert!(!decoded.contains_key("count"));
+    }
+
+    #[test]
+    fn test_projection_decode_multiple_fields() {
+        let fields = make_fields(&[
+            ("usage", FieldValue::Float(2.71)),
+            ("idle", FieldValue::Float(0.29)),
+            ("count", FieldValue::Integer(42)),
+        ]);
+        let encoded = encode_fields(&fields);
+
+        let projection: std::collections::HashSet<&str> = ["usage", "count"].into();
+        let decoded = decode_fields_projection(&encoded, &projection).unwrap();
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(*decoded.get("usage").unwrap(), FieldValue::Float(2.71));
+        assert_eq!(*decoded.get("count").unwrap(), FieldValue::Integer(42));
+        assert!(!decoded.contains_key("idle"));
+    }
+
+    #[test]
+    fn test_projection_decode_empty_projection() {
+        let fields = make_fields(&[
+            ("usage", FieldValue::Float(2.71)),
+            ("count", FieldValue::Integer(42)),
+        ]);
+        let encoded = encode_fields(&fields);
+
+        let projection: std::collections::HashSet<&str> = [].into();
+        let decoded = decode_fields_projection(&encoded, &projection).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_projection_decode_nonexistent_field() {
+        let fields = make_fields(&[("usage", FieldValue::Float(2.71))]);
+        let encoded = encode_fields(&fields);
+
+        let projection: std::collections::HashSet<&str> = ["nonexistent"].into();
+        let decoded = decode_fields_projection(&encoded, &projection).unwrap();
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_projection_decode_all_fields() {
+        let fields = make_fields(&[
+            ("usage", FieldValue::Float(2.71)),
+            ("count", FieldValue::Integer(42)),
+        ]);
+        let encoded = encode_fields(&fields);
+
+        let projection: std::collections::HashSet<&str> = ["usage", "count"].into();
+        let decoded = decode_fields_projection(&encoded, &projection).unwrap();
+        let full_decoded = decode_fields(&encoded).unwrap();
+        assert_eq!(decoded.len(), full_decoded.len());
+    }
+
+    #[test]
+    fn test_projection_decode_consistency_with_full_decode() {
+        let fields = make_fields(&[
+            ("f1", FieldValue::Float(1.0)),
+            ("f2", FieldValue::Integer(2)),
+            ("f3", FieldValue::String("hello".to_string())),
+            ("f4", FieldValue::Boolean(true)),
+            ("f5", FieldValue::Float(3.15)),
+        ]);
+        let encoded = encode_fields(&fields);
+
+        let projection: std::collections::HashSet<&str> = ["f2", "f5"].into();
+        let projected = decode_fields_projection(&encoded, &projection).unwrap();
+        let full = decode_fields(&encoded).unwrap();
+
+        assert_eq!(*projected.get("f2").unwrap(), *full.get("f2").unwrap());
+        assert_eq!(*projected.get("f5").unwrap(), *full.get("f5").unwrap());
     }
 }
 

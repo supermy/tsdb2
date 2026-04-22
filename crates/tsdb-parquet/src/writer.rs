@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::encoding::{cold_writer_props, hot_writer_props};
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
@@ -48,7 +49,7 @@ struct PartitionBuffer {
 /// 2. 按日期分区缓冲
 /// 3. 缓冲区满或 flush 时, 选择 hot/cold 编码写入 Parquet 文件
 pub struct TsdbParquetWriter {
-    partition_manager: PartitionManager,
+    partition_manager: Arc<PartitionManager>,
     config: WriteBufferConfig,
     /// 日期分区 → 缓冲区
     buffers: BTreeMap<NaiveDate, PartitionBuffer>,
@@ -60,7 +61,7 @@ pub struct TsdbParquetWriter {
 
 impl TsdbParquetWriter {
     /// 创建写入器
-    pub fn new(partition_manager: PartitionManager, config: WriteBufferConfig) -> Self {
+    pub fn new(partition_manager: Arc<PartitionManager>, config: WriteBufferConfig) -> Self {
         Self {
             partition_manager,
             config,
@@ -248,7 +249,7 @@ mod tests {
     fn test_writer_basic() {
         let dir = TempDir::new().unwrap();
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
 
         let dps = make_test_datapoints(10);
         for dp in &dps {
@@ -270,7 +271,7 @@ mod tests {
     fn test_writer_batch() {
         let dir = TempDir::new().unwrap();
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
 
         let dps = make_test_datapoints(100);
         writer.write_batch(&dps).unwrap();
@@ -287,7 +288,7 @@ mod tests {
             max_buffer_rows: 5,
             ..Default::default()
         };
-        let mut writer = TsdbParquetWriter::new(pm, config);
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), config);
 
         let dps = make_test_datapoints(10);
         for dp in &dps {

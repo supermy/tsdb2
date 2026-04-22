@@ -1,24 +1,24 @@
 [package]
-name = "tsdb-integration-tests"
+name = "tsdb-flight"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 tsdb-arrow = { workspace = true }
-tsdb-parquet = { workspace = true }
-tsdb-datafusion = { workspace = true }
-tsdb-storage-arrow = { workspace = true }
 tsdb-rocksdb = { workspace = true }
-tsdb-flight = { path = "../tsdb-flight" }
-rocksdb = { workspace = true }
+tsdb-datafusion = { workspace = true }
 arrow = { workspace = true }
 arrow-flight = { workspace = true }
-parquet = { workspace = true }
+arrow-ipc = { workspace = true }
 datafusion = { workspace = true }
 tonic = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
-tempfile = { workspace = true }
-chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
 serde_json = { workspace = true }
+chrono = { workspace = true }
 futures = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }

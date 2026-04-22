@@ -16,7 +16,8 @@
 | T6 CLI 测试覆盖 | 11 | ≥10 (91%) | ⏳ 待验证 |
 | T7 多平台兼容性 | 8 | ≥7 (87%) | ⏳ 待验证 |
 | T8 CI/CD 增强 | 10 | ≥9 (90%) | ⏳ 待验证 |
-| **合计** | **96** | **≥88 (91%)** | **⏳** |
+| T9 Flight SQL 集成 | 18 | ≥16 (89%) | ✅ 大部分完成 |
+| **合计** | **114** | **≥104 (91%)** | **⏳** |
 
 ---
 
@@ -264,6 +265,60 @@
 - [ ] `.github/dependabot.yml` 存在
 - [ ] weekly 依赖更新配置
 - [ ] audit-check 通过
+
+---
+
+## T9: Flight SQL 集成验收
+
+### T9.1 Flight SQL 服务端
+
+- [x] `TsdbFlightServer::new()`: 创建 Flight 服务端
+- [x] `do_get`: SQL 查询 → Arrow Flight Data 流式返回
+- [x] `do_put`: Arrow Flight Data 流式写入 → RocksDB
+- [x] `do_action("list_measurements")`: 列出所有 measurement
+- [x] `list_actions`: 返回支持的 action 列表
+- [x] `get_flight_info`: 返回查询的 FlightInfo
+- [x] `get_schema`: 返回查询的 SchemaResult
+- [x] `poll_flight_info`: 长查询轮询
+- [x] Arrow IPC 编解码正确 (Arrow 54 兼容)
+
+### T9.2 TsdbTableProvider 优化
+
+- [x] 列投影下推: 只读取查询所需的列
+- [x] 谓词下推: timestamp 范围条件下推到 Parquet 扫描层
+- [x] Limit 下推: 在扫描层直接截断数据
+- [x] Parquet 原生扫描: 直接读取 Parquet 为 RecordBatch
+- [x] `extract_timestamp_range()`: 从 DataFusion Expr 中提取时间范围
+
+### T9.3 Flight E2E 集成测试
+
+- [x] `test_flight_server_creation`: 服务端创建
+- [x] `test_flight_server_with_rocksdb`: RocksDB 集成
+- [x] `test_flight_list_actions`: list_actions RPC
+- [x] `test_flight_do_get_sql_query`: SQL 查询 via do_get
+- [x] `test_flight_get_flight_info`: get_flight_info RPC
+- [x] `test_flight_get_schema`: get_schema RPC
+- [x] `test_flight_do_action_list_measurements`: list_measurements action
+- [x] `test_datafusion_sql_aggregation`: DataFusion 聚合查询
+- [x] `test_datafusion_sql_filter`: DataFusion 过滤查询
+- [x] `test_datafusion_sql_group_by`: DataFusion 分组查询
+- [x] `test_datafusion_sql_limit`: DataFusion LIMIT 查询
+- [x] `test_arrow_roundtrip`: Arrow 编解码往返
+- [x] `test_arrow_projection`: Arrow 列投影
+- [x] `test_parquet_write_read_roundtrip`: Parquet 读写往返
+- [x] `test_parquet_range_read`: Parquet 范围查询
+- [x] `test_rocksdb_write_and_query`: RocksDB 写入+查询
+- [x] `test_rocksdb_multi_get`: RocksDB 批量查询
+- [x] `test_full_pipeline_rocksdb_to_datafusion`: 全链路
+
+### T9.4 Flight gRPC 端到端测试
+
+- [ ] 启动 tonic gRPC 服务器
+- [ ] Arrow Flight 客户端连接
+- [ ] do_get SQL 查询
+- [ ] do_put 数据写入
+- [ ] get_flight_info 元数据查询
+- [ ] do_action list_measurements
 
 ---
 

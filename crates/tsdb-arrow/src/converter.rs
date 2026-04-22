@@ -205,8 +205,6 @@ pub fn record_batch_to_datapoints(batch: &RecordBatch) -> Result<Vec<DataPoint>>
     let schema = batch.schema();
     let row_count = batch.num_rows();
 
-    let _has_compact_tags = schema.fields().iter().any(|f| f.name().starts_with("tag_"));
-
     let timestamp_col = schema
         .index_of("timestamp")
         .map_err(|_| TsdbArrowError::Conversion("timestamp column not found".into()))?;
@@ -253,12 +251,16 @@ pub fn record_batch_to_datapoints(batch: &RecordBatch) -> Result<Vec<DataPoint>>
             }
 
             if let Some(tag_key) = name.strip_prefix("tag_") {
-                if let Some(col) = batch.column(idx).as_any().downcast_ref::<StringArray>() {
-                    if !col.is_null(i) {
-                        tags.insert(tag_key.to_string(), col.value(i).to_string());
+                if field.metadata().get("tsdb_role").map(|r| r == "tag").unwrap_or(false)
+                    || (field.metadata().is_empty() && name.starts_with("tag_"))
+                {
+                    if let Some(col) = batch.column(idx).as_any().downcast_ref::<StringArray>() {
+                        if !col.is_null(i) {
+                            tags.insert(tag_key.to_string(), col.value(i).to_string());
+                        }
                     }
+                    continue;
                 }
-                continue;
             }
 
             let col = batch.column(idx);

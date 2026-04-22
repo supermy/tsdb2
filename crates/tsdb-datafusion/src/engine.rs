@@ -186,7 +186,7 @@ mod tests {
         use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 
         let pm = PartitionManager::new(dir, PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
         writer.write_batch(dps).unwrap();
         writer.flush_all().unwrap();
     }

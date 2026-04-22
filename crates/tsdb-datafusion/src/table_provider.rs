@@ -6,11 +6,11 @@ use datafusion::datasource::MemTable;
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{Expr, TableType};
 use datafusion::physical_plan::ExecutionPlan;
+use datafusion::scalar::ScalarValue;
 use std::any::Any;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tsdb_arrow::converter::datapoints_to_record_batch;
 use tsdb_arrow::schema::DataPoint;
 use tsdb_parquet::partition::PartitionConfig;
 use tsdb_parquet::partition::PartitionManager;
@@ -21,14 +21,14 @@ use tsdb_parquet::reader::TsdbParquetReader;
 /// 实现 DataFusion 的 TableProvider trait, 将 TSDB 中的时序数据
 /// 以 Parquet 文件为存储后端暴露为 DataFusion 可查询的表。
 ///
-/// 查询时从 Parquet 文件加载数据点, 转换为 Arrow RecordBatch,
-/// 再通过 MemTable 交给 DataFusion 执行引擎处理。
+/// 支持以下优化:
+/// - **列投影下推**: 只读取查询所需的列, 减少内存占用
+/// - **谓词下推**: 将过滤条件下推到扫描层, 减少内存中需要处理的数据量
+/// - **Limit 下推**: 在扫描层直接截断数据, 避免读取多余数据
+/// - **Parquet 原生扫描**: 直接读取 Parquet 为 RecordBatch, 避免中间 DataPoint 转换
 pub struct TsdbTableProvider {
-    /// 表的 Arrow Schema
     schema: SchemaRef,
-    /// Measurement 名称
     measurement: String,
-    /// 数据存储根目录
     base_dir: PathBuf,
 }
 
@@ -42,7 +42,6 @@ impl fmt::Debug for TsdbTableProvider {
 }
 
 impl TsdbTableProvider {
-    /// 创建新的表提供器 (使用已有 Schema)
     pub fn new(
         measurement: impl Into<String>,
         schema: SchemaRef,
@@ -55,10 +54,6 @@ impl TsdbTableProvider {
         }
     }
 
-    /// 从数据点列表创建表提供器 (自动推导 Schema)
-    ///
-    /// 从第一个数据点中提取 tag 键和 field 类型信息, 自动构建 Arrow Schema。
-    /// 数据点列表为空时返回 Schema 错误。
     pub fn from_datapoints(
         measurement: impl Into<String>,
         datapoints: &[DataPoint],
@@ -87,38 +82,102 @@ impl TsdbTableProvider {
         })
     }
 
-    /// 从 Parquet 文件加载指定 measurement 的全部数据点
-    fn load_data(&self) -> Result<Vec<DataPoint>> {
+    fn load_data_parquet(&self, projection: Option<&Vec<usize>>) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         let config = PartitionConfig::default();
         let pm = PartitionManager::new(&self.base_dir, config)?;
-        let reader = TsdbParquetReader::new(pm);
-        reader
-            .read_all_datapoints(&self.measurement)
-            .map_err(|e| TsdbDatafusionError::Query(e.to_string()))
+        let reader = TsdbParquetReader::new(Arc::new(pm));
+
+        let proj_columns: Option<Vec<String>> = projection.map(|proj| {
+            proj.iter()
+                .filter_map(|&idx| self.schema.field(idx).name().clone().into())
+                .collect()
+        });
+
+        let start = 0i64;
+        let end = 4_102_444_800_000_000i64;
+
+        let batches = match &proj_columns {
+            Some(cols) => reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice()))?,
+            None => reader.read_range_arrow(&self.measurement, start, end, None)?,
+        };
+
+        Ok(batches)
+    }
+
+    fn extract_timestamp_range(filters: &[Expr]) -> (Option<i64>, Option<i64>) {
+        let mut start: Option<i64> = None;
+        let mut end: Option<i64> = None;
+
+        for filter in filters {
+            if let Expr::BinaryExpr(binary) = filter {
+                match binary.op {
+                    datafusion::logical_expr::Operator::GtEq => {
+                        if let Expr::Column(col) = binary.left.as_ref() {
+                            if col.name() == "timestamp" {
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
+                                    binary.right.as_ref()
+                                {
+                                    start = Some(*v);
+                                }
+                            }
+                        }
+                    }
+                    datafusion::logical_expr::Operator::LtEq => {
+                        if let Expr::Column(col) = binary.left.as_ref() {
+                            if col.name() == "timestamp" {
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
+                                    binary.right.as_ref()
+                                {
+                                    end = Some(*v);
+                                }
+                            }
+                        }
+                    }
+                    datafusion::logical_expr::Operator::Gt => {
+                        if let Expr::Column(col) = binary.left.as_ref() {
+                            if col.name() == "timestamp" {
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
+                                    binary.right.as_ref()
+                                {
+                                    start = Some(*v + 1);
+                                }
+                            }
+                        }
+                    }
+                    datafusion::logical_expr::Operator::Lt => {
+                        if let Expr::Column(col) = binary.left.as_ref() {
+                            if col.name() == "timestamp" {
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
+                                    binary.right.as_ref()
+                                {
+                                    end = Some(*v - 1);
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        (start, end)
     }
 }
 
 #[async_trait]
 impl TableProvider for TsdbTableProvider {
-    /// 返回 self 的 Any 引用, 用于类型向下转换
     fn as_any(&self) -> &dyn Any {
         self
     }
 
-    /// 返回表的 Schema
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 
-    /// 返回表类型 (基础表)
     fn table_type(&self) -> TableType {
         TableType::Base
     }
 
-    /// 执行表扫描, 生成物理执行计划
-    ///
-    /// 从 Parquet 文件加载数据点, 转换为 RecordBatch,
-    /// 再包装为 MemTable 供 DataFusion 执行。
     async fn scan(
         &self,
         state: &dyn Session,
@@ -126,24 +185,92 @@ impl TableProvider for TsdbTableProvider {
         filters: &[Expr],
         limit: Option<usize>,
     ) -> std::result::Result<Arc<dyn ExecutionPlan>, DataFusionError> {
-        let datapoints = self
-            .load_data()
-            .map_err(|e| DataFusionError::Execution(format!("failed to load data: {}", e)))?;
-
-        let limited_dps = if let Some(limit) = limit {
-            &datapoints[..limit.min(datapoints.len())]
+        let projected_schema = if let Some(proj) = projection {
+            Arc::new(self.schema.project(proj)?)
         } else {
-            &datapoints
+            self.schema.clone()
         };
 
-        let batch = datapoints_to_record_batch(limited_dps, self.schema.clone())
-            .map_err(|e| DataFusionError::Execution(format!("conversion error: {}", e)))?;
+        let (start_micros, end_micros) = Self::extract_timestamp_range(filters);
 
-        let partitions = vec![vec![batch]];
+        let batches = if start_micros.is_some() || end_micros.is_some() {
+            let config = PartitionConfig::default();
+            let pm = PartitionManager::new(&self.base_dir, config)
+                .map_err(|e| DataFusionError::Execution(format!("partition manager: {}", e)))?;
+            let reader = TsdbParquetReader::new(Arc::new(pm));
 
-        let mem_table = MemTable::try_new(self.schema.clone(), partitions)?;
+            let proj_columns: Option<Vec<String>> = projection.map(|proj| {
+                proj.iter()
+                    .filter_map(|&idx| self.schema.field(idx).name().clone().into())
+                    .collect()
+            });
 
-        mem_table.scan(state, projection, filters, limit).await
+            let start = start_micros.unwrap_or(0i64);
+            let end = end_micros.unwrap_or(4_102_444_800_000_000i64);
+
+            let result = match &proj_columns {
+                Some(cols) => reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice())),
+                None => reader.read_range_arrow(&self.measurement, start, end, None),
+            };
+
+            result.map_err(|e| DataFusionError::Execution(format!("parquet scan: {}", e)))?
+        } else {
+            self.load_data_parquet(projection)
+                .map_err(|e| DataFusionError::Execution(format!("load data: {}", e)))?
+        };
+
+        let projected_batches: Vec<arrow::record_batch::RecordBatch> = if projection.is_some() {
+            batches
+                .into_iter()
+                .map(|batch| {
+                    let proj_indices: Vec<usize> = projection
+                        .unwrap()
+                        .iter()
+                        .filter_map(|&idx| batch.schema().index_of(self.schema.field(idx).name()).ok())
+                        .collect();
+                    if proj_indices.is_empty() {
+                        Ok(batch)
+                    } else {
+                        batch.project(&proj_indices)
+                    }
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| DataFusionError::Execution(format!("projection: {}", e)))?
+        } else {
+            batches
+        };
+
+        let limited_batches = if let Some(limit) = limit {
+            let mut rows_so_far = 0usize;
+            let mut result = Vec::new();
+            for batch in projected_batches {
+                if rows_so_far >= limit {
+                    break;
+                }
+                let remaining = limit - rows_so_far;
+                if batch.num_rows() <= remaining {
+                    rows_so_far += batch.num_rows();
+                    result.push(batch);
+                } else {
+                    result.push(batch.slice(0, remaining));
+                    rows_so_far = limit;
+                }
+            }
+            result
+        } else {
+            projected_batches
+        };
+
+        if limited_batches.is_empty() {
+            let partitions = vec![vec![arrow::record_batch::RecordBatch::new_empty(projected_schema.clone())]];
+            let mem_table = MemTable::try_new(projected_schema, partitions)?;
+            return mem_table.scan(state, None, filters, limit).await;
+        }
+
+        let partitions = vec![limited_batches];
+        let mem_table = MemTable::try_new(projected_schema, partitions)?;
+
+        mem_table.scan(state, None, filters, limit).await
     }
 }
 
@@ -192,5 +319,47 @@ mod tests {
         let state = ctx.state();
         let plan = provider.scan(&state, None, &[], Some(5)).await;
         assert!(plan.is_ok());
+    }
+
+    #[test]
+    fn test_extract_timestamp_range() {
+        let filters: Vec<Expr> = vec![];
+
+        let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
+        assert!(start.is_none());
+        assert!(end.is_none());
+    }
+
+    #[test]
+    fn test_extract_timestamp_range_with_gte() {
+        use datafusion::logical_expr::{col, lit};
+
+        let filters = vec![col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None)))];
+        let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
+        assert_eq!(start, Some(1_000_000));
+        assert!(end.is_none());
+    }
+
+    #[test]
+    fn test_extract_timestamp_range_with_lte() {
+        use datafusion::logical_expr::{col, lit};
+
+        let filters = vec![col("timestamp").lt_eq(lit(ScalarValue::TimestampMicrosecond(Some(5_000_000), None)))];
+        let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
+        assert!(start.is_none());
+        assert_eq!(end, Some(5_000_000));
+    }
+
+    #[test]
+    fn test_extract_timestamp_range_with_range() {
+        use datafusion::logical_expr::{col, lit};
+
+        let filters = vec![
+            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None))),
+            col("timestamp").lt_eq(lit(ScalarValue::TimestampMicrosecond(Some(5_000_000), None))),
+        ];
+        let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
+        assert_eq!(start, Some(1_000_000));
+        assert_eq!(end, Some(5_000_000));
     }
 }

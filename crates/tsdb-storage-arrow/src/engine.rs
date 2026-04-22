@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::buffer::{AsyncWriteBuffer, WriteBuffer};
 use crate::config::ArrowStorageConfig;
 use crate::error::{Result, TsdbStorageArrowError};
@@ -24,8 +25,8 @@ use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 /// [维护] → ParquetCompactor (合并/清理)
 /// ```
 pub struct ArrowStorageEngine {
-    partition_manager: PartitionManager,
-    _reader: TsdbParquetReader,
+    partition_manager: Arc<PartitionManager>,
+    reader: TsdbParquetReader,
     compactor: ParquetCompactor,
     wal: Option<TsdbWAL>,
     async_writer: AsyncWriteBuffer,
@@ -48,11 +49,11 @@ impl ArrowStorageEngine {
             ..Default::default()
         };
 
-        let partition_manager = PartitionManager::new(&path, partition_config)?;
+        let partition_manager = Arc::new(PartitionManager::new(&path, partition_config)?);
         let reader =
-            TsdbParquetReader::new(PartitionManager::new(&path, PartitionConfig::default())?);
+            TsdbParquetReader::new(partition_manager.clone());
         let compactor = ParquetCompactor::new(
-            PartitionManager::new(&path, PartitionConfig::default())?,
+            partition_manager.clone(),
             CompactionConfig::default(),
         );
 
@@ -64,13 +65,12 @@ impl ArrowStorageEngine {
             None
         };
 
-        let writer_pm = PartitionManager::new(&path, PartitionConfig::default())?;
         let writer_config = WriteBufferConfig {
             max_buffer_rows: config.max_buffer_rows,
             flush_interval_ms: config.flush_interval_ms,
             ..Default::default()
         };
-        let writer = TsdbParquetWriter::new(writer_pm, writer_config);
+        let writer = TsdbParquetWriter::new(partition_manager.clone(), writer_config);
 
         let buffer = std::sync::Mutex::new(WriteBuffer::new(config.max_buffer_rows));
         let async_writer = AsyncWriteBuffer::new(buffer, writer, config.flush_interval_ms);
@@ -79,7 +79,7 @@ impl ArrowStorageEngine {
 
         Ok(Self {
             partition_manager,
-            _reader: reader,
+            reader,
             compactor,
             wal,
             async_writer,
@@ -123,14 +123,10 @@ impl ArrowStorageEngine {
         end_micros: i64,
     ) -> Result<Vec<DataPoint>> {
         self.async_writer.flush()?;
-
-        let pm = PartitionManager::new(&self.base_dir, PartitionConfig::default())?;
-        let reader = TsdbParquetReader::new(pm);
-        let points = reader.read_range(measurement, tags, start_micros, end_micros)?;
+        let points = self.reader.read_range(measurement, tags, start_micros, end_micros)?;
         Ok(points)
     }
 
-    /// 读取单个数据点
     pub fn get_point(
         &self,
         measurement: &str,
@@ -138,14 +134,10 @@ impl ArrowStorageEngine {
         timestamp: i64,
     ) -> Result<Option<DataPoint>> {
         self.async_writer.flush()?;
-
-        let pm = PartitionManager::new(&self.base_dir, PartitionConfig::default())?;
-        let reader = TsdbParquetReader::new(pm);
-        let point = reader.get_point(measurement, tags, timestamp)?;
+        let point = self.reader.get_point(measurement, tags, timestamp)?;
         Ok(point)
     }
 
-    /// 范围读取 Arrow RecordBatch
     pub fn read_range_arrow(
         &self,
         measurement: &str,
@@ -154,10 +146,7 @@ impl ArrowStorageEngine {
         projection: Option<&[String]>,
     ) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         self.async_writer.flush()?;
-
-        let pm = PartitionManager::new(&self.base_dir, PartitionConfig::default())?;
-        let reader = TsdbParquetReader::new(pm);
-        let batches = reader.read_range_arrow(measurement, start_micros, end_micros, projection)?;
+        let batches = self.reader.read_range_arrow(measurement, start_micros, end_micros, projection)?;
         Ok(batches)
     }
 

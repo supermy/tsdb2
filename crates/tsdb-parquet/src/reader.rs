@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
 use arrow::record_batch::RecordBatch;
@@ -12,12 +13,12 @@ use tsdb_arrow::schema::{DataPoint, Tags};
 /// 按日期分区读取 Parquet 文件, 支持范围查询和标签过滤。
 /// 读取流程: 时间范围 → 日期分区列表 → 遍历 Parquet 文件 → 解码 RecordBatch → 过滤标签
 pub struct TsdbParquetReader {
-    partition_manager: PartitionManager,
+    partition_manager: Arc<PartitionManager>,
 }
 
 impl TsdbParquetReader {
     /// 创建读取器
-    pub fn new(partition_manager: PartitionManager) -> Self {
+    pub fn new(partition_manager: Arc<PartitionManager>) -> Self {
         Self { partition_manager }
     }
 
@@ -83,9 +84,8 @@ impl TsdbParquetReader {
             let files = self.partition_manager.list_parquet_files(partition.date)?;
 
             for file_path in files {
-                if let Ok(file_batches) = self.read_parquet_file(&file_path, projection) {
-                    batches.extend(file_batches);
-                }
+                let file_batches = self.read_parquet_file(&file_path, projection)?;
+                batches.extend(file_batches);
             }
         }
 
@@ -152,19 +152,18 @@ impl TsdbParquetReader {
             let files = self.partition_manager.list_parquet_files(partition.date)?;
 
             for file_path in files {
-                if let Ok(batches) = self.read_parquet_file(&file_path, None) {
-                    for batch in batches {
-                        let mut points = record_batch_to_datapoints(&batch)?;
-                        for dp in &mut points {
-                            if dp.measurement.is_empty() && !measurement.is_empty() {
-                                dp.measurement = measurement.to_string();
-                            }
+                let file_batches = self.read_parquet_file(&file_path, None)?;
+                for batch in file_batches {
+                    let mut points = record_batch_to_datapoints(&batch)?;
+                    for dp in &mut points {
+                        if dp.measurement.is_empty() && !measurement.is_empty() {
+                            dp.measurement = measurement.to_string();
                         }
-                        if !measurement.is_empty() {
-                            points.retain(|dp| dp.measurement == measurement);
-                        }
-                        all_points.append(&mut points);
                     }
+                    if !measurement.is_empty() {
+                        points.retain(|dp| dp.measurement == measurement);
+                    }
+                    all_points.append(&mut points);
                 }
             }
         }
@@ -185,7 +184,7 @@ mod tests {
 
     fn write_test_data(dir: &TempDir) -> PartitionManager {
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
 
         let dps: Vec<DataPoint> = (0..50)
             .map(|i| {
@@ -207,7 +206,7 @@ mod tests {
     fn test_read_range() {
         let dir = TempDir::new().unwrap();
         let pm = write_test_data(&dir);
-        let reader = TsdbParquetReader::new(pm);
+        let reader = TsdbParquetReader::new(Arc::new(pm));
 
         let tags: Tags = BTreeMap::new();
         let points = reader
@@ -224,7 +223,7 @@ mod tests {
     fn test_read_with_tag_filter() {
         let dir = TempDir::new().unwrap();
         let pm = write_test_data(&dir);
-        let reader = TsdbParquetReader::new(pm);
+        let reader = TsdbParquetReader::new(Arc::new(pm));
 
         let mut tags = Tags::new();
         tags.insert("host".to_string(), "server01".to_string());
@@ -243,7 +242,7 @@ mod tests {
     fn test_read_parquet_file() {
         let dir = TempDir::new().unwrap();
         let pm = write_test_data(&dir);
-        let reader = TsdbParquetReader::new(pm);
+        let reader = TsdbParquetReader::new(Arc::new(pm));
 
         let date = micros_to_date(1_000_000_000);
         let files = reader.partition_manager.list_parquet_files(date).unwrap();

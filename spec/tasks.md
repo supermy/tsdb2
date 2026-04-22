@@ -16,7 +16,8 @@
 | T6             | CLI 测试覆盖   | 3            | P1     | T5   |
 | T7             | 多平台兼容性   | 3            | P2     | T1   |
 | T8             | CI/CD 增强     | 4            | P1     | T1   |
-| **合计** |                | **32** |        |      |
+| T9             | Flight SQL 集成| 4            | P0     | T1   |
+| **合计** |                | **36** |        |      |
 
 ---
 
@@ -435,6 +436,83 @@
 
 ---
 
+## T9: Flight SQL 集成 [P0]
+
+### T9.1 Flight SQL 服务端完善
+
+**文件**: `crates/tsdb-flight/src/server.rs`
+
+当前状态: ✅ 已实现 do_get/do_put/do_action/list_actions/get_flight_info/get_schema/poll_flight_info
+
+- [x] `TsdbFlightServer::new()`: 创建 Flight 服务端
+- [x] `do_get`: SQL 查询 → Arrow Flight Data 流式返回
+- [x] `do_put`: Arrow Flight Data 流式写入 → RocksDB
+- [x] `do_action("list_measurements")`: 列出所有 measurement
+- [x] `list_actions`: 返回支持的 action 列表
+- [x] `get_flight_info`: 返回查询的 FlightInfo (schema + endpoint)
+- [x] `get_schema`: 返回查询的 SchemaResult
+- [x] `poll_flight_info`: 长查询轮询
+
+- **验收**: 所有 Flight RPC 方法可调用, Arrow IPC 编解码正确
+
+### T9.2 TsdbTableProvider 优化
+
+**文件**: `crates/tsdb-datafusion/src/table_provider.rs`
+
+当前状态: ✅ 已实现谓词下推+列投影+Limit下推+Parquet原生扫描
+
+- [x] 列投影下推: 只读取查询所需的列
+- [x] 谓词下推: timestamp 范围条件下推到 Parquet 扫描层
+- [x] Limit 下推: 在扫描层直接截断数据
+- [x] Parquet 原生扫描: 直接读取 Parquet 为 RecordBatch, 避免 DataPoint 中间转换
+- [x] `extract_timestamp_range()`: 从 DataFusion Expr 中提取时间范围
+
+- **验收**: 查询性能相比无优化版本提升 3x+
+
+### T9.3 Flight E2E 集成测试
+
+**文件**: `crates/tsdb-integration-tests/src/flight_e2e.rs`
+
+当前状态: ✅ 18 个测试全部通过
+
+- [x] `test_flight_server_creation`: 服务端创建
+- [x] `test_flight_server_with_rocksdb`: RocksDB 集成
+- [x] `test_flight_list_actions`: list_actions RPC
+- [x] `test_flight_do_get_sql_query`: SQL 查询 via do_get
+- [x] `test_flight_get_flight_info`: get_flight_info RPC
+- [x] `test_flight_get_schema`: get_schema RPC
+- [x] `test_flight_do_action_list_measurements`: list_measurements action
+- [x] `test_datafusion_sql_aggregation`: DataFusion 聚合查询
+- [x] `test_datafusion_sql_filter`: DataFusion 过滤查询
+- [x] `test_datafusion_sql_group_by`: DataFusion 分组查询
+- [x] `test_datafusion_sql_limit`: DataFusion LIMIT 查询
+- [x] `test_arrow_roundtrip`: Arrow 编解码往返
+- [x] `test_arrow_projection`: Arrow 列投影
+- [x] `test_parquet_write_read_roundtrip`: Parquet 读写往返
+- [x] `test_parquet_range_read`: Parquet 范围查询
+- [x] `test_rocksdb_write_and_query`: RocksDB 写入+查询
+- [x] `test_rocksdb_multi_get`: RocksDB 批量查询
+- [x] `test_full_pipeline_rocksdb_to_datafusion`: 全链路: RocksDB→Parquet→DataFusion
+
+- **验收**: 18 个测试全部通过
+
+### T9.4 Flight gRPC 端到端测试
+
+**文件**: `crates/tsdb-integration-tests/src/flight_grpc_e2e.rs`
+
+当前状态: 待实现
+
+- [ ] 启动 tonic gRPC 服务器
+- [ ] 使用 Arrow Flight 客户端连接
+- [ ] 测试 do_get SQL 查询
+- [ ] 测试 do_put 数据写入
+- [ ] 测试 get_flight_info 元数据查询
+- [ ] 测试 do_action list_measurements
+
+- **验收**: gRPC 端到端测试通过
+
+---
+
 ## 执行顺序
 
 ```
@@ -456,6 +534,12 @@ T1 (单元测试增强)
      │    ├── T3.1 SQL 集成
      │    ├── T3.2 引擎对比
      │    └── T3.3 空结果测试
+     │
+     ├──▶ T9 (Flight SQL 集成) ✅ 大部分完成
+     │    ├── T9.1 Flight SQL 服务端 ✅
+     │    ├── T9.2 TsdbTableProvider 优化 ✅
+     │    ├── T9.3 Flight E2E 测试 ✅
+     │    └── T9.4 Flight gRPC E2E (待实现)
      │
      ├──▶ T5 (CLI 子命令实现)
      │    ├── T5.1 status

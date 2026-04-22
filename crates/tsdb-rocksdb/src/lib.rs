@@ -30,6 +30,7 @@
 //! - `config` — 配置项
 
 pub mod arrow_adapter;
+pub mod archiver;
 pub mod cleanup;
 pub mod compaction_filter;
 pub mod comparator;
@@ -45,6 +46,8 @@ pub mod value;
 
 /// Arrow 适配器: DataPoint ↔ RecordBatch 转换
 pub use arrow_adapter::ArrowAdapter;
+/// 数据归档器: RocksDB → Parquet/JSON 迁移
+pub use archiver::DataArchiver;
 /// TTL 清理管理器: 三级策略 (drop_cf / delete_range / CompactionFilter)
 pub use cleanup::TtlManager;
 /// CompactionFilter 工厂: TTL 过期数据自动过滤
@@ -56,4 +59,6 @@ pub use db::TsdbRocksDb;
 /// 错误类型与 Result 别名
 pub use error::{Result, TsdbRocksDbError};
 /// 键编解码与常量
-pub use key::{TsdbKey, TAGS_HASH_SIZE, TIMESTAMP_SIZE};
+pub use key::{TsdbKey, KEY_SIZE, TAGS_HASH_SIZE, TIMESTAMP_SIZE};
+/// 值编解码 (含列投影)
+pub use value::{decode_fields, decode_fields_projection, encode_fields};

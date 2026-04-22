@@ -67,6 +67,13 @@ impl WriteBuffer {
     pub fn buffer_count(&self) -> usize {
         self.buffers.len()
     }
+
+    pub fn reinsert(&mut self, data: Vec<(chrono::NaiveDate, Vec<DataPoint>)>) {
+        for (date, datapoints) in data {
+            self.total_rows += datapoints.len();
+            self.buffers.entry(date).or_default().extend(datapoints);
+        }
+    }
 }
 
 /// 异步写入缓冲区
@@ -150,16 +157,23 @@ impl AsyncWriteBuffer {
         }
 
         let mut writer_guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-        for (_date, datapoints) in drained {
+        let mut failed = Vec::new();
+        for (date, datapoints) in drained {
             if !datapoints.is_empty() {
                 if let Err(e) = writer_guard.write_batch(&datapoints) {
                     tracing::error!("async flush write_batch failed: {}", e);
+                    failed.push((date, datapoints));
                 }
             }
         }
 
         if let Err(e) = writer_guard.flush_all() {
             tracing::error!("async flush flush_all failed: {}", e);
+        }
+
+        if !failed.is_empty() {
+            let mut guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            guard.reinsert(failed);
         }
     }
 
@@ -233,7 +247,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
         let writer_config = WriteBufferConfig::default();
-        let writer = TsdbParquetWriter::new(pm, writer_config);
+        let writer = TsdbParquetWriter::new(Arc::new(pm), writer_config);
 
         let buffer = Mutex::new(WriteBuffer::new(100));
         let mut async_buf = AsyncWriteBuffer::new(buffer, writer, 100);

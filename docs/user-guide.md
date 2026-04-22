@@ -4,7 +4,7 @@
 
 ### 前置要求
 
-- Rust 1.80.0+
+- Rust 1.85.0+
 - Cargo
 
 ### 构建
@@ -18,14 +18,24 @@ cargo build --release
 ### 运行测试
 
 ```bash
-cargo test --all
-cargo test -p tsdb-stress
-cargo bench -p tsdb-bench
+cargo test --workspace --exclude tsdb-stress-rocksdb
+cargo test -p tsdb-stress-rocksdb
+cargo clippy --workspace -- -D warnings
 ```
 
 ## 基本使用
 
 ### 1. 打开存储引擎
+
+#### RocksDB 引擎 (推荐, 高吞吐写入)
+
+```rust
+use tsdb_rocksdb::{TsdbRocksDb, RocksDbConfig};
+
+let db = TsdbRocksDb::open("./data", RocksDbConfig::default())?;
+```
+
+#### Parquet 引擎 (批量分析)
 
 ```rust
 use tsdb_storage_arrow::engine::ArrowStorageEngine;
@@ -44,84 +54,109 @@ let engine = ArrowStorageEngine::open("/data/tsdb", config)?;
 ### 2. 写入数据
 
 ```rust
-use tsdb_arrow::schema::{DataPoint, FieldValue};
+use tsdb_arrow::schema::{DataPoint, FieldValue, Tags};
+use tsdb_rocksdb::{TsdbRocksDb, RocksDbConfig};
 
-let dp = DataPoint::new("cpu", 1_700_000_000_000_000)
-    .with_tag("host", "server01")
-    .with_tag("region", "us-west")
-    .with_field("usage", FieldValue::Float(0.75))
-    .with_field("idle", FieldValue::Float(0.25))
-    .with_field("count", FieldValue::Integer(42));
+let db = TsdbRocksDb::open("./data", RocksDbConfig::default())?;
 
-engine.write(&dp)?;
+// 单点写入
+let mut tags = Tags::new();
+tags.insert("host".to_string(), "server01".to_string());
 
-let dps: Vec<DataPoint> = (0..1000)
+let mut fields = tsdb_arrow::schema::Fields::new();
+fields.insert("usage".to_string(), FieldValue::Float(0.85));
+fields.insert("count".to_string(), FieldValue::Integer(42));
+
+db.put("cpu", &tags, timestamp, &fields)?;
+
+// 批量写入 (推荐, Tags 自动去重)
+let datapoints: Vec<DataPoint> = (0..1000)
     .map(|i| {
-        DataPoint::new("cpu", 1_700_000_000_000_000 + i as i64 * 10_000_000)
+        DataPoint::new("cpu", base_ts + i as i64 * 10_000_000)
             .with_tag("host", "server01")
             .with_field("usage", FieldValue::Float(0.5 + i as f64 * 0.001))
     })
     .collect();
 
-engine.write_batch(&dps)?;
-engine.flush()?;
+db.write_batch(&datapoints)?;
 ```
 
 ### 3. 读取数据
 
 ```rust
-use tsdb_arrow::schema::Tags;
+// 单点查询
+let result = db.get("cpu", &tags, timestamp)?;
+match result {
+    Some(dp) => println!("usage = {:?}", dp.fields.get("usage")),
+    None => println!("not found"),
+}
 
-let tags = Tags::new();
-let results = engine.read_range("cpu", &tags, 1_700_000_000_000_000, 1_700_003_600_000_000)?;
+// 批量点查 (MultiGET, 比逐个 get 快 3x)
+let keys = vec![
+    (tags1.clone(), ts1),
+    (tags2.clone(), ts2),
+    (tags3.clone(), ts3),
+];
+let results = db.multi_get("cpu", &keys)?;
+for (i, result) in results.iter().enumerate() {
+    match result {
+        Some(dp) => println!("[{}] usage = {:?}", i, dp.fields.get("usage")),
+        None => println!("[{}] not found", i),
+    }
+}
 
+// 范围读取
+let results = db.read_range("cpu", start_ts, end_ts)?;
 for dp in &results {
     println!("ts={}, host={:?}, usage={:?}",
         dp.timestamp,
         dp.tags.get("host"),
         dp.fields.get("usage"));
 }
+
+// 前缀扫描 (指定标签)
+let tags = Tags::from_iter([("host".to_string(), "server01".to_string())]);
+let results = db.prefix_scan("cpu", &tags, start_ts, end_ts)?;
 ```
 
-### 4. Tag 过滤读取
+### 4. SQL 查询
 
 ```rust
-let mut tags = Tags::new();
-tags.insert("host".to_string(), "server01".to_string());
+use tsdb_datafusion::DataFusionQueryEngine;
 
-let results = engine.read_range("cpu", &tags, start_ts, end_ts)?;
-```
+let engine = DataFusionQueryEngine::new("./data");
+engine.register_from_datapoints("cpu", &results)?;
 
-### 5. 单点查询
-
-```rust
-let tags = Tags::new();
-let point = engine.get_point("cpu", &tags, 1_700_000_000_000_000)?;
-```
-
-### 6. SQL 查询
-
-```rust
-let result = engine.execute_sql(
-    "SELECT AVG(usage) as avg_usage, COUNT(*) as cnt FROM cpu",
-    "cpu",
-    &datapoints,
-).await?;
-
+let result = engine.execute("SELECT AVG(usage) as avg_usage, COUNT(*) as cnt FROM cpu").await?;
 println!("columns: {:?}", result.columns);
 for row in &result.rows {
     println!("{:?}", row);
 }
 ```
 
-### 7. time_bucket 聚合
+### 5. time_bucket 聚合
 
 ```rust
-let result = engine.execute_sql(
-    "SELECT time_bucket(timestamp, 3600000000) as bucket, AVG(usage) as avg_usage FROM cpu GROUP BY bucket ORDER BY bucket",
-    "cpu",
-    &datapoints,
+let result = engine.execute(
+    "SELECT time_bucket(timestamp, 3600000000) as bucket, AVG(usage) as avg_usage FROM cpu GROUP BY bucket ORDER BY bucket"
 ).await?;
+```
+
+### 6. 管理操作
+
+```rust
+// 手动 Compaction
+db.compact_cf("ts_cpu_20260418")?;
+
+// 删除过期 CF
+tsdb_rocksdb::TtlManager::drop_expired_cfs(&db, today, retention_days)?;
+
+// 一致性快照
+let snapshot = db.snapshot();
+// 快照创建后的写入不可见
+
+// 健康检查 (CLI)
+// tsdb-cli doctor --data-dir ./data
 ```
 
 ## 配置参数详解

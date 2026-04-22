@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use tsdb_arrow::schema::Tags;
 use tsdb_parquet::partition::{PartitionConfig, PartitionManager};
@@ -8,13 +9,13 @@ use tsdb_test_utils::make_simple_datapoints;
 fn bench_read_range(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-    let mut writer = TsdbParquetWriter::new(pm, WriteBufferConfig::default());
+    let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
     let dps = make_simple_datapoints(10_000);
     writer.write_batch(&dps).unwrap();
     writer.flush_all().unwrap();
 
     let pm2 = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-    let reader = TsdbParquetReader::new(pm2);
+    let reader = TsdbParquetReader::new(Arc::new(pm2));
 
     c.bench_function("read_range_10k", |b| {
         b.iter(|| {
