@@ -1,8 +1,7 @@
 use crate::error::{Result, TsdbArrowError};
-use crate::schema::{DataPoint, FieldValue, Tags};
+use crate::schema::{DataPoint, FieldValue, Fields, Tags};
 use arrow::array::*;
 use arrow::datatypes::{DataType, SchemaRef};
-use std::collections::BTreeMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
@@ -52,7 +51,7 @@ fn build_column_array(
     datapoints: &[DataPoint],
 ) -> Result<Arc<dyn Array>> {
     match name {
-        "timestamp" => build_timestamp_array(datapoints),
+        "timestamp" => build_timestamp_array(dtype, datapoints),
         "measurement" => build_measurement_array(datapoints),
         "tags_hash" => build_tags_hash_array(datapoints),
         "tag_keys" => build_tag_keys_array(datapoints),
@@ -67,13 +66,20 @@ fn build_column_array(
     }
 }
 
-/// 构建时间戳列 (TimestampMicrosecond)
-fn build_timestamp_array(datapoints: &[DataPoint]) -> Result<Arc<dyn Array>> {
+fn build_timestamp_array(dtype: &DataType, datapoints: &[DataPoint]) -> Result<Arc<dyn Array>> {
+    let tz = match dtype {
+        DataType::Timestamp(_, Some(tz)) => Some(tz.clone()),
+        _ => None,
+    };
     let mut builder = TimestampMicrosecondBuilder::new();
     for dp in datapoints {
         builder.append_value(dp.timestamp);
     }
-    Ok(Arc::new(builder.finish()))
+    let mut arr = builder.finish();
+    if let Some(tz) = tz {
+        arr = arr.with_timezone(tz);
+    }
+    Ok(Arc::new(arr))
 }
 
 /// 构建 measurement 列 (Utf8)
@@ -238,7 +244,7 @@ pub fn record_batch_to_datapoints(batch: &RecordBatch) -> Result<Vec<DataPoint>>
         };
 
         let mut tags = Tags::new();
-        let mut fields = BTreeMap::new();
+        let mut fields = Fields::new();
 
         for (idx, field) in schema.fields().iter().enumerate() {
             let name = field.name();
@@ -251,7 +257,11 @@ pub fn record_batch_to_datapoints(batch: &RecordBatch) -> Result<Vec<DataPoint>>
             }
 
             if let Some(tag_key) = name.strip_prefix("tag_") {
-                if field.metadata().get("tsdb_role").map(|r| r == "tag").unwrap_or(false)
+                if field
+                    .metadata()
+                    .get("tsdb_role")
+                    .map(|r| r == "tag")
+                    .unwrap_or(false)
                     || (field.metadata().is_empty() && name.starts_with("tag_"))
                 {
                     if let Some(col) = batch.column(idx).as_any().downcast_ref::<StringArray>() {

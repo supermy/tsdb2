@@ -1,10 +1,10 @@
-use std::sync::Arc;
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
 use arrow::record_batch::RecordBatch;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use std::fs::File;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tsdb_arrow::converter::record_batch_to_datapoints;
 use tsdb_arrow::schema::{DataPoint, Tags};
 
@@ -109,14 +109,32 @@ impl TsdbParquetReader {
         path: &PathBuf,
         projection: Option<&[String]>,
     ) -> Result<Vec<RecordBatch>> {
-        let file = File::open(path).map_err(|e| {
+        let metadata = std::fs::metadata(path).map_err(|e| {
             TsdbParquetError::Io(std::io::Error::other(format!(
                 "parquet file not found: {}",
                 e
             )))
         })?;
 
-        let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+        if metadata.len() < 8 {
+            tracing::warn!("skipping invalid parquet file (too small): {:?}", path);
+            return Ok(Vec::new());
+        }
+
+        let file = File::open(path).map_err(|e| {
+            TsdbParquetError::Io(std::io::Error::other(format!(
+                "parquet file open failed: {}",
+                e
+            )))
+        })?;
+
+        let builder = match ParquetRecordBatchReaderBuilder::try_new(file) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!("skipping corrupt parquet file {:?}: {}", path, e);
+                return Ok(Vec::new());
+            }
+        };
 
         let reader = builder.build()?;
 
@@ -178,7 +196,6 @@ mod tests {
     use super::*;
     use crate::partition::PartitionConfig;
     use crate::writer::{TsdbParquetWriter, WriteBufferConfig};
-    use std::collections::BTreeMap;
     use tempfile::TempDir;
     use tsdb_arrow::schema::FieldValue;
 
@@ -208,7 +225,7 @@ mod tests {
         let pm = write_test_data(&dir);
         let reader = TsdbParquetReader::new(Arc::new(pm));
 
-        let tags: Tags = BTreeMap::new();
+        let tags = Tags::new();
         let points = reader
             .read_range("cpu", &tags, 1_000_000_000, 1_000_050_000_000)
             .unwrap();

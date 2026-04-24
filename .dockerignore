@@ -1,0 +1,7 @@
+target/
+.git/
+.github/
+*.md
+spec/
+stress-test-output.log
+bench-results.txt

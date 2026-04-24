@@ -9,11 +9,7 @@ impl DataArchiver {
     ///
     /// 每行一个 DataPoint 的 JSON 序列化, 可被 Parquet 引擎导入。
     /// 导出完成后可选择删除源 CF。
-    pub fn export_cf_to_json(
-        db: &TsdbRocksDb,
-        cf_name: &str,
-        output_path: &Path,
-    ) -> Result<usize> {
+    pub fn export_cf_to_json(db: &TsdbRocksDb, cf_name: &str, output_path: &Path) -> Result<usize> {
         let data_cf = db
             .db()
             .cf_handle(cf_name)
@@ -42,7 +38,14 @@ impl DataArchiver {
 
             let measurement = cf_name
                 .strip_prefix("ts_")
-                .and_then(|s| s.split('_').next())
+                .and_then(|s| {
+                    let date_part = s.rsplit_once('_').map(|(_, d)| d)?;
+                    if date_part.len() == 8 && date_part.chars().all(|c| c.is_ascii_digit()) {
+                        s.rsplit_once('_').map(|(m, _)| m)
+                    } else {
+                        None
+                    }
+                })
                 .unwrap_or("unknown");
 
             let dp = tsdb_arrow::schema::DataPoint {
@@ -79,10 +82,7 @@ impl DataArchiver {
         let mut total_points = 0usize;
 
         for cf_name in &cfs {
-            let date_str = cf_name
-                .rsplit_once('_')
-                .map(|(_, d)| d)
-                .unwrap_or("");
+            let date_str = cf_name.rsplit_once('_').map(|(_, d)| d).unwrap_or("");
 
             let cf_date = chrono::NaiveDate::parse_from_str(date_str, "%Y%m%d");
             if let Ok(cf_date) = cf_date {
@@ -109,13 +109,104 @@ impl DataArchiver {
         for entry in std::fs::read_dir(archive_dir)? {
             let entry = entry?;
             if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".jsonl") {
+                if name.ends_with(".jsonl") || name.ends_with(".parquet") {
                     files.push(name.to_string());
                 }
             }
         }
         files.sort();
         Ok(files)
+    }
+
+    pub fn export_cf_to_parquet(
+        db: &TsdbRocksDb,
+        cf_name: &str,
+        output_dir: &Path,
+        batch_size: usize,
+    ) -> Result<usize> {
+        let data_cf = db
+            .db()
+            .cf_handle(cf_name)
+            .ok_or_else(|| crate::error::TsdbRocksDbError::CfNotFound(cf_name.to_string()))?;
+
+        let meta_cf = db.db().cf_handle("_series_meta");
+        let iter = db.db().iterator_cf(&data_cf, rocksdb::IteratorMode::Start);
+
+        let measurement = cf_name
+            .strip_prefix("ts_")
+            .and_then(|s| {
+                let date_part = s.rsplit_once('_').map(|(_, d)| d)?;
+                if date_part.len() == 8 && date_part.chars().all(|c| c.is_ascii_digit()) {
+                    s.rsplit_once('_').map(|(m, _)| m)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or("unknown");
+
+        let mut all_dps: Vec<tsdb_arrow::schema::DataPoint> = Vec::new();
+        for item in iter {
+            let (raw_key, raw_value) = item?;
+            let ts_key = crate::key::TsdbKey::decode(&raw_key)?;
+            let fields = crate::value::decode_fields(&raw_value)?;
+            let tags = if let Some(ref meta_cf) = meta_cf {
+                db.db()
+                    .get_pinned_cf(meta_cf, ts_key.tags_hash.to_be_bytes())?
+                    .and_then(|v| crate::tags::decode_tags(&v).ok())
+                    .unwrap_or_default()
+            } else {
+                tsdb_arrow::schema::Tags::new()
+            };
+            all_dps.push(tsdb_arrow::schema::DataPoint {
+                measurement: measurement.to_string(),
+                tags,
+                fields,
+                timestamp: ts_key.timestamp,
+            });
+        }
+
+        if all_dps.is_empty() {
+            return Ok(0);
+        }
+
+        std::fs::create_dir_all(output_dir)?;
+
+        let tag_keys: Vec<String> = all_dps[0].tags.keys().cloned().collect();
+        let field_types: Vec<(String, _)> = all_dps[0]
+            .fields
+            .iter()
+            .map(|(k, v)| (k.clone(), tsdb_arrow::schema::field_value_to_data_type(v)))
+            .collect();
+
+        let schema = tsdb_arrow::schema::compact_tsdb_schema(measurement, &tag_keys, &field_types);
+
+        let total = all_dps.len();
+        for (file_idx, chunk) in all_dps.chunks(batch_size).enumerate() {
+            let batch = tsdb_arrow::converter::datapoints_to_record_batch(chunk, schema.clone())?;
+            let file_path = output_dir.join(format!("part-{:08}.parquet", file_idx));
+            let file = std::fs::File::create(&file_path)?;
+            let props = parquet::file::properties::WriterProperties::builder()
+                .set_compression(parquet::basic::Compression::ZSTD(
+                    parquet::basic::ZstdLevel::default(),
+                ))
+                .build();
+            let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(
+                file,
+                schema.clone(),
+                Some(props),
+            )
+            .map_err(|e| {
+                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
+            })?;
+            writer.write(&batch).map_err(|e| {
+                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
+            })?;
+            writer.close().map_err(|e| {
+                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
+            })?;
+        }
+
+        Ok(total)
     }
 }
 
@@ -178,7 +269,9 @@ mod tests {
 
     #[test]
     fn test_list_archives_nonexistent_dir() {
-        let result = DataArchiver::list_archives(std::path::Path::new("/tmp/nonexistent_tsdb_test_dir")).unwrap();
+        let result =
+            DataArchiver::list_archives(std::path::Path::new("/tmp/nonexistent_tsdb_test_dir"))
+                .unwrap();
         assert!(result.is_empty());
     }
 

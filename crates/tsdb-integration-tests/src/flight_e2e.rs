@@ -36,7 +36,11 @@ mod tests {
 
     fn make_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Microsecond, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
             Field::new("tag_host", DataType::Utf8, true),
             Field::new("tag_region", DataType::Utf8, true),
             Field::new("usage", DataType::Float64, true),
@@ -50,7 +54,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
         let ctx = SessionContext::new();
-        let server = TsdbFlightServer::new(db, ctx, "127.0.0.1", 50051);
+        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50051);
         assert!(std::mem::size_of_val(&server) > 0);
     }
 
@@ -74,9 +78,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
         let ctx = SessionContext::new();
-        let server = TsdbFlightServer::new(db, ctx, "127.0.0.1", 50053);
+        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50053);
 
-        let result = server.list_actions(Request::new(arrow_flight::Empty {})).await;
+        let result = server
+            .list_actions(Request::new(arrow_flight::Empty {}))
+            .await;
         assert!(result.is_ok());
 
         let mut stream = result.unwrap().into_inner();
@@ -103,7 +109,7 @@ mod tests {
         let provider = TsdbTableProvider::new("cpu", schema, dir.path());
         ctx.register_table("cpu", Arc::new(provider)).unwrap();
 
-        let server = TsdbFlightServer::new(db, ctx, "127.0.0.1", 50054);
+        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50054);
 
         let ticket = arrow_flight::Ticket::new("SELECT * FROM cpu LIMIT 10");
         let result = server.do_get(Request::new(ticket)).await;
@@ -130,9 +136,10 @@ mod tests {
         let provider = TsdbTableProvider::new("cpu", schema, dir.path());
         ctx.register_table("cpu", Arc::new(provider)).unwrap();
 
-        let server = TsdbFlightServer::new(db, ctx, "127.0.0.1", 50055);
+        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50055);
 
-        let descriptor = arrow_flight::FlightDescriptor::new_path(vec!["SELECT * FROM cpu".to_string()]);
+        let descriptor =
+            arrow_flight::FlightDescriptor::new_path(vec!["SELECT * FROM cpu".to_string()]);
         let result = server.get_flight_info(Request::new(descriptor)).await;
         assert!(result.is_ok());
 
@@ -156,9 +163,10 @@ mod tests {
         let provider = TsdbTableProvider::new("cpu", schema, dir.path());
         ctx.register_table("cpu", Arc::new(provider)).unwrap();
 
-        let server = TsdbFlightServer::new(db, ctx, "127.0.0.1", 50056);
+        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50056);
 
-        let descriptor = arrow_flight::FlightDescriptor::new_path(vec!["SELECT * FROM cpu".to_string()]);
+        let descriptor =
+            arrow_flight::FlightDescriptor::new_path(vec!["SELECT * FROM cpu".to_string()]);
         let result = server.get_schema(Request::new(descriptor)).await;
         assert!(result.is_ok());
     }
@@ -181,7 +189,7 @@ mod tests {
         db.write_batch(&dps).unwrap();
 
         let ctx = SessionContext::new();
-        let server = TsdbFlightServer::new(db, ctx, "127.0.0.1", 50057);
+        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50057);
 
         let action = arrow_flight::Action {
             r#type: "list_measurements".to_string(),
@@ -257,10 +265,7 @@ mod tests {
         let engine = tsdb_datafusion::DataFusionQueryEngine::new(dir.path());
         engine.register_from_datapoints("cpu", &dps).unwrap();
 
-        let result = engine
-            .execute("SELECT * FROM cpu LIMIT 5")
-            .await
-            .unwrap();
+        let result = engine.execute("SELECT * FROM cpu LIMIT 5").await.unwrap();
         assert!(result.rows.len() <= 5);
     }
 
@@ -276,7 +281,10 @@ mod tests {
         assert_eq!(restored.len(), 100);
 
         assert_eq!(restored[0].timestamp, dps[0].timestamp);
-        assert_eq!(restored[0].tags.get("host").unwrap(), dps[0].tags.get("host").unwrap());
+        assert_eq!(
+            restored[0].tags.get("host").unwrap(),
+            dps[0].tags.get("host").unwrap()
+        );
     }
 
     #[test]
@@ -315,8 +323,10 @@ mod tests {
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
         let reader = TsdbParquetReader::new(Arc::new(pm));
 
-        let tags = std::collections::BTreeMap::new();
-        let result = reader.read_range("cpu", &tags, 1_000_000_000, 1_000_050_000_000).unwrap();
+        let tags = tsdb_arrow::schema::Tags::new();
+        let result = reader
+            .read_range("cpu", &tags, 1_000_000_000, 1_000_050_000_000)
+            .unwrap();
 
         assert!(!result.is_empty());
         for dp in &result {
@@ -384,14 +394,18 @@ mod tests {
 
         db.write_batch(&dps).unwrap();
 
-        let read_result = db.read_range("cpu", 1_000_000_000, 1_000_100_000_000).unwrap();
+        let read_result = db
+            .read_range("cpu", 1_000_000_000, 1_000_100_000_000)
+            .unwrap();
         assert!(!read_result.is_empty());
 
         let parquet_dir = TempDir::new().unwrap();
         write_datapoints_to_parquet(parquet_dir.path(), &read_result);
 
         let engine = tsdb_datafusion::DataFusionQueryEngine::new(parquet_dir.path());
-        engine.register_from_datapoints("cpu", &read_result).unwrap();
+        engine
+            .register_from_datapoints("cpu", &read_result)
+            .unwrap();
 
         let result = engine
             .execute("SELECT AVG(usage) as avg_usage FROM cpu")

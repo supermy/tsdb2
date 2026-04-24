@@ -10,7 +10,11 @@ mod tests {
         chrono::Utc::now().timestamp_micros()
     }
 
-    fn generate_iot_sensor_data(device_count: usize, interval_secs: i64, points_per_device: usize) -> Vec<DataPoint> {
+    fn generate_iot_sensor_data(
+        device_count: usize,
+        interval_secs: i64,
+        points_per_device: usize,
+    ) -> Vec<DataPoint> {
         let base_ts = ts_now() - (points_per_device as i64 * interval_secs * 1_000_000);
         let mut dps = Vec::new();
 
@@ -36,11 +40,17 @@ mod tests {
                 match device_type {
                     "temperature" => {
                         fields.insert("value".to_string(), FieldValue::Float(22.0 + noise * 10.0));
-                        fields.insert("unit".to_string(), FieldValue::String("celsius".to_string()));
+                        fields.insert(
+                            "unit".to_string(),
+                            FieldValue::String("celsius".to_string()),
+                        );
                     }
                     "humidity" => {
                         fields.insert("value".to_string(), FieldValue::Float(55.0 + noise * 20.0));
-                        fields.insert("unit".to_string(), FieldValue::String("percent".to_string()));
+                        fields.insert(
+                            "unit".to_string(),
+                            FieldValue::String("percent".to_string()),
+                        );
                     }
                     "pressure" => {
                         fields.insert("value".to_string(), FieldValue::Float(1013.0 + noise * 5.0));
@@ -51,8 +61,14 @@ mod tests {
                         fields.insert("unit".to_string(), FieldValue::String("mm_s".to_string()));
                     }
                 }
-                fields.insert("battery".to_string(), FieldValue::Float(100.0 - point as f64 * 0.1));
-                fields.insert("signal_dbm".to_string(), FieldValue::Integer(-40 - (point % 20) as i64));
+                fields.insert(
+                    "battery".to_string(),
+                    FieldValue::Float(100.0 - point as f64 * 0.1),
+                );
+                fields.insert(
+                    "signal_dbm".to_string(),
+                    FieldValue::Integer(-40 - (point % 20) as i64),
+                );
 
                 let mut tags = Tags::new();
                 tags.insert("device_id".to_string(), device_id.clone());
@@ -76,7 +92,9 @@ mod tests {
         measurement: &str,
         datapoints: &[DataPoint],
     ) {
-        engine.register_from_datapoints(measurement, datapoints).unwrap();
+        engine
+            .register_from_datapoints(measurement, datapoints)
+            .unwrap();
 
         let table = engine
             .session_context()
@@ -91,7 +109,10 @@ mod tests {
         let schema = table.schema();
         let batch = datapoints_to_record_batch(datapoints, schema.clone()).unwrap();
         let mem_table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
-        engine.session_context().deregister_table(measurement).unwrap();
+        engine
+            .session_context()
+            .deregister_table(measurement)
+            .unwrap();
         engine
             .session_context()
             .register_table(measurement, Arc::new(mem_table))
@@ -110,9 +131,18 @@ mod tests {
         db.write_batch(&dps).unwrap();
         let elapsed = start.elapsed();
         let qps = dps.len() as f64 / elapsed.as_secs_f64();
-        eprintln!("IoT write: {} points in {:.2}s ({:.0} pts/s)", dps.len(), elapsed.as_secs_f64(), qps);
+        eprintln!(
+            "IoT write: {} points in {:.2}s ({:.0} pts/s)",
+            dps.len(),
+            elapsed.as_secs_f64(),
+            qps
+        );
 
-        assert!(qps > 1000.0, "IoT write QPS should be > 1000, got {:.0}", qps);
+        assert!(
+            qps > 1000.0,
+            "IoT write QPS should be > 1000, got {:.0}",
+            qps
+        );
     }
 
     #[test]
@@ -127,10 +157,14 @@ mod tests {
         let result = db.read_range("iot_sensor", base_ts, ts_now()).unwrap();
         assert!(!result.is_empty());
 
-        let device_ids: std::collections::HashSet<_> = result.iter()
+        let device_ids: std::collections::HashSet<_> = result
+            .iter()
             .filter_map(|dp| dp.tags.get("device_id").cloned())
             .collect();
-        assert!(device_ids.len() >= 10, "should have data from multiple devices");
+        assert!(
+            device_ids.len() >= 10,
+            "should have data from multiple devices"
+        );
     }
 
     #[tokio::test]
@@ -152,7 +186,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.rows.is_empty(), "should have aggregation results per location");
+        assert!(
+            !result.rows.is_empty(),
+            "should have aggregation results per location"
+        );
         assert!(result.columns.contains(&"avg_value".to_string()));
         assert!(result.columns.contains(&"tag_location".to_string()));
     }
@@ -187,8 +224,14 @@ mod tests {
         let dps = generate_iot_sensor_data(10, 10, 100);
         db.write_batch(&dps).unwrap();
 
-        let keys: Vec<(Tags, i64)> = dps.iter()
-            .filter(|dp| dp.tags.get("device_id").map(|d| d.starts_with("sensor_000")).unwrap_or(false))
+        let keys: Vec<(Tags, i64)> = dps
+            .iter()
+            .filter(|dp| {
+                dp.tags
+                    .get("device_id")
+                    .map(|d| d.starts_with("sensor_000"))
+                    .unwrap_or(false)
+            })
             .take(5)
             .map(|dp| (dp.tags.clone(), dp.timestamp))
             .collect();
@@ -209,13 +252,24 @@ mod tests {
         db.write_batch(&dps).unwrap();
 
         let base_ts = ts_now() - 20 * 60 * 1_000_000;
-        let result = db.read_range_projection("iot_sensor", base_ts, ts_now(), &["value", "battery"]).unwrap();
+        let result = db
+            .read_range_projection("iot_sensor", base_ts, ts_now(), &["value", "battery"])
+            .unwrap();
         assert!(!result.is_empty());
 
         for dp in &result {
-            assert!(dp.fields.contains_key("value"), "should contain projected field 'value'");
-            assert!(dp.fields.contains_key("battery"), "should contain projected field 'battery'");
-            assert!(!dp.fields.contains_key("signal_dbm"), "should not contain non-projected field");
+            assert!(
+                dp.fields.contains_key("value"),
+                "should contain projected field 'value'"
+            );
+            assert!(
+                dp.fields.contains_key("battery"),
+                "should contain projected field 'battery'"
+            );
+            assert!(
+                !dp.fields.contains_key("signal_dbm"),
+                "should not contain non-projected field"
+            );
         }
     }
 
@@ -241,7 +295,9 @@ mod tests {
         writer.flush_all().unwrap();
 
         let engine = tsdb_datafusion::DataFusionQueryEngine::new(parquet_dir.path());
-        engine.register_from_datapoints("iot_sensor", &rocks_result).unwrap();
+        engine
+            .register_from_datapoints("iot_sensor", &rocks_result)
+            .unwrap();
 
         let result = engine
             .execute("SELECT tag_device_type, AVG(value) as avg_val, COUNT(*) as cnt FROM iot_sensor GROUP BY tag_device_type")
@@ -267,7 +323,11 @@ mod tests {
             tags.insert("device_id".to_string(), "sensor_0001".to_string());
             let mut fields = tsdb_arrow::schema::Fields::new();
             fields.insert("value".to_string(), FieldValue::Float(22.0 + day as f64));
-            dps.push(DataPoint::new("iot_sensor", ts).with_tag("device_id", "sensor_0001").with_field("value", FieldValue::Float(22.0 + day as f64)));
+            dps.push(
+                DataPoint::new("iot_sensor", ts)
+                    .with_tag("device_id", "sensor_0001")
+                    .with_field("value", FieldValue::Float(22.0 + day as f64)),
+            );
         }
 
         db.write_batch(&dps).unwrap();

@@ -3719,7 +3719,9 @@ dependencies = [
  "tracing-subscriber",
  "tsdb-arrow",
  "tsdb-datafusion",
+ "tsdb-iceberg",
  "tsdb-rocksdb",
+ "tsdb-storage-arrow",
 ]
 
 [[package]]
@@ -3760,6 +3762,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tsdb-iceberg"
+version = "0.2.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "chrono",
+ "datafusion",
+ "futures",
+ "parquet",
+ "rocksdb",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tsdb-arrow",
+ "tsdb-parquet",
+ "uuid",
+]
+
+[[package]]
 name = "tsdb-integration-tests"
 version = "0.2.0"
 dependencies = [
@@ -3778,6 +3802,7 @@ dependencies = [
  "tsdb-arrow",
  "tsdb-datafusion",
  "tsdb-flight",
+ "tsdb-iceberg",
  "tsdb-parquet",
  "tsdb-rocksdb",
  "tsdb-storage-arrow",
@@ -3809,6 +3834,7 @@ dependencies = [
  "chrono",
  "fxhash",
  "num_cpus",
+ "parquet",
  "proptest",
  "rocksdb",
  "serde_json",

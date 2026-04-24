@@ -100,15 +100,48 @@ impl RocksDbConfig {
                 let value = value.trim();
                 match current_section.as_str() {
                     "rocksdb" => match key {
-                        "cache_size" => config.cache_size = value.parse().map_err(|e| format!("cache_size: {}", e))?,
-                        "block_size" => config.block_size = value.parse().map_err(|e| format!("block_size: {}", e))?,
-                        "write_buffer_size" => config.write_buffer_size = value.parse().map_err(|e| format!("write_buffer_size: {}", e))?,
-                        "allow_stall" => config.allow_stall = value.parse().map_err(|e| format!("allow_stall: {}", e))?,
-                        "cf_write_buffer_size" => config.cf_write_buffer_size = value.parse().map_err(|e| format!("cf_write_buffer_size: {}", e))?,
-                        "max_write_buffer_number" => config.max_write_buffer_number = value.parse().map_err(|e| format!("max_write_buffer_number: {}", e))?,
-                        "cf_max_bytes_for_level_base" => config.cf_max_bytes_for_level_base = value.parse().map_err(|e| format!("cf_max_bytes_for_level_base: {}", e))?,
-                        "default_retention_secs" => config.default_retention_secs = value.parse().map_err(|e| format!("default_retention_secs: {}", e))?,
-                        "default_ttl_secs" => config.default_ttl_secs = value.parse().map_err(|e| format!("default_ttl_secs: {}", e))?,
+                        "cache_size" => {
+                            config.cache_size =
+                                value.parse().map_err(|e| format!("cache_size: {}", e))?
+                        }
+                        "block_size" => {
+                            config.block_size =
+                                value.parse().map_err(|e| format!("block_size: {}", e))?
+                        }
+                        "write_buffer_size" => {
+                            config.write_buffer_size = value
+                                .parse()
+                                .map_err(|e| format!("write_buffer_size: {}", e))?
+                        }
+                        "allow_stall" => {
+                            config.allow_stall =
+                                value.parse().map_err(|e| format!("allow_stall: {}", e))?
+                        }
+                        "cf_write_buffer_size" => {
+                            config.cf_write_buffer_size = value
+                                .parse()
+                                .map_err(|e| format!("cf_write_buffer_size: {}", e))?
+                        }
+                        "max_write_buffer_number" => {
+                            config.max_write_buffer_number = value
+                                .parse()
+                                .map_err(|e| format!("max_write_buffer_number: {}", e))?
+                        }
+                        "cf_max_bytes_for_level_base" => {
+                            config.cf_max_bytes_for_level_base = value
+                                .parse()
+                                .map_err(|e| format!("cf_max_bytes_for_level_base: {}", e))?
+                        }
+                        "default_retention_secs" => {
+                            config.default_retention_secs = value
+                                .parse()
+                                .map_err(|e| format!("default_retention_secs: {}", e))?
+                        }
+                        "default_ttl_secs" => {
+                            config.default_ttl_secs = value
+                                .parse()
+                                .map_err(|e| format!("default_ttl_secs: {}", e))?
+                        }
                         _ => {}
                     },
                     "rocksdb.compression" => match key {
@@ -117,20 +150,42 @@ impl RocksDbConfig {
                         _ => {}
                     },
                     "rocksdb.bloom_filter" => match key {
-                        "bits_per_key" => config.bloom_filter_bits_per_key = value.parse().map_err(|e| format!("bits_per_key: {}", e))?,
-                        "block_based" => config.bloom_filter_block_based = value.parse().map_err(|e| format!("block_based: {}", e))?,
-                        "memtable_prefix_bloom_ratio" => config.memtable_prefix_bloom_ratio = value.parse().map_err(|e| format!("memtable_prefix_bloom_ratio: {}", e))?,
+                        "bits_per_key" => {
+                            config.bloom_filter_bits_per_key =
+                                value.parse().map_err(|e| format!("bits_per_key: {}", e))?
+                        }
+                        "block_based" => {
+                            config.bloom_filter_block_based =
+                                value.parse().map_err(|e| format!("block_based: {}", e))?
+                        }
+                        "memtable_prefix_bloom_ratio" => {
+                            config.memtable_prefix_bloom_ratio = value
+                                .parse()
+                                .map_err(|e| format!("memtable_prefix_bloom_ratio: {}", e))?
+                        }
                         _ => {}
                     },
                     "rocksdb.level0" => match key {
-                        "compaction_trigger" => config.level0_file_num_compaction_trigger = value.parse().map_err(|e| format!("compaction_trigger: {}", e))?,
-                        "slowdown_trigger" => config.level0_slowdown_writes_trigger = value.parse().map_err(|e| format!("slowdown_trigger: {}", e))?,
-                        "stop_trigger" => config.level0_stop_writes_trigger = value.parse().map_err(|e| format!("stop_trigger: {}", e))?,
+                        "compaction_trigger" => {
+                            config.level0_file_num_compaction_trigger = value
+                                .parse()
+                                .map_err(|e| format!("compaction_trigger: {}", e))?
+                        }
+                        "slowdown_trigger" => {
+                            config.level0_slowdown_writes_trigger = value
+                                .parse()
+                                .map_err(|e| format!("slowdown_trigger: {}", e))?
+                        }
+                        "stop_trigger" => {
+                            config.level0_stop_writes_trigger =
+                                value.parse().map_err(|e| format!("stop_trigger: {}", e))?
+                        }
                         _ => {}
                     },
                     "rocksdb.meta_cf" => {
                         if key == "optimize" {
-                            config.optimize_meta_cf = value.parse().map_err(|e| format!("optimize: {}", e))?;
+                            config.optimize_meta_cf =
+                                value.parse().map_err(|e| format!("optimize: {}", e))?;
                         }
                     }
                     _ => {}
@@ -347,7 +402,10 @@ l0_l2 = invalid
     #[test]
     fn test_parse_compression_all_types() {
         assert_eq!(parse_compression("none").unwrap(), DBCompressionType::None);
-        assert_eq!(parse_compression("snappy").unwrap(), DBCompressionType::Snappy);
+        assert_eq!(
+            parse_compression("snappy").unwrap(),
+            DBCompressionType::Snappy
+        );
         assert_eq!(parse_compression("zstd").unwrap(), DBCompressionType::Zstd);
         assert_eq!(parse_compression("lz4").unwrap(), DBCompressionType::Lz4);
         assert_eq!(parse_compression("ZSTD").unwrap(), DBCompressionType::Zstd);

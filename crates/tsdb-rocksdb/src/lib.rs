@@ -29,8 +29,8 @@
 //! - `arrow_adapter` — Arrow RecordBatch 适配层
 //! - `config` — 配置项
 
-pub mod arrow_adapter;
 pub mod archiver;
+pub mod arrow_adapter;
 pub mod cleanup;
 pub mod compaction_filter;
 pub mod comparator;
@@ -39,15 +39,16 @@ pub mod cpu_features;
 pub mod db;
 pub mod error;
 pub mod key;
+pub mod last_cache;
 pub mod merge;
 pub mod snapshot;
 pub mod tags;
 pub mod value;
 
-/// Arrow 适配器: DataPoint ↔ RecordBatch 转换
-pub use arrow_adapter::ArrowAdapter;
 /// 数据归档器: RocksDB → Parquet/JSON 迁移
 pub use archiver::DataArchiver;
+/// Arrow 适配器: DataPoint ↔ RecordBatch 转换
+pub use arrow_adapter::ArrowAdapter;
 /// TTL 清理管理器: 三级策略 (drop_cf / delete_range / CompactionFilter)
 pub use cleanup::TtlManager;
 /// CompactionFilter 工厂: TTL 过期数据自动过滤
@@ -60,5 +61,7 @@ pub use db::TsdbRocksDb;
 pub use error::{Result, TsdbRocksDbError};
 /// 键编解码与常量
 pub use key::{TsdbKey, KEY_SIZE, TAGS_HASH_SIZE, TIMESTAMP_SIZE};
+/// LastCache 缓存
+pub use last_cache::LastCache;
 /// 值编解码 (含列投影)
 pub use value::{decode_fields, decode_fields_projection, encode_fields};

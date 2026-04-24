@@ -1,0 +1,22 @@
+pub mod catalog;
+pub mod commit;
+pub mod error;
+pub mod manifest;
+pub mod partition;
+pub mod scan;
+pub mod schema;
+pub mod snapshot;
+pub mod stats;
+pub mod table;
+pub mod table_provider;
+
+pub use catalog::{IcebergCatalog, TableMetadata};
+pub use error::{IcebergError, Result};
+pub use manifest::{DataFile, ManifestEntry, ManifestMeta};
+pub use partition::PartitionSpec;
+pub use scan::{IcebergScan, IcebergScanBuilder, Predicate, PredicateValue};
+pub use schema::{Field, IcebergType, Schema, SchemaChange};
+pub use snapshot::{Ref, RefType, Snapshot, SnapshotSummary};
+pub use stats::ColumnStats;
+pub use table::IcebergTable;
+pub use table_provider::IcebergTableProvider;

@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::sync::Arc;
 use tsdb_parquet::partition::{PartitionConfig, PartitionManager};
 use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 use tsdb_test_utils::make_simple_datapoints;

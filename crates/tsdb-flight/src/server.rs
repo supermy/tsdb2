@@ -1,7 +1,7 @@
 use arrow_flight::{
     flight_service_server::FlightService, Action, ActionType, Criteria, Empty, FlightData,
-    FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse,
-    PollInfo, PutResult, SchemaAsIpc, Ticket,
+    FlightDescriptor, FlightEndpoint, FlightInfo, HandshakeRequest, HandshakeResponse, PollInfo,
+    PutResult, SchemaAsIpc, Ticket,
 };
 use arrow_ipc::writer::IpcWriteOptions;
 use datafusion::execution::context::SessionContext;
@@ -9,27 +9,31 @@ use futures::Stream;
 use std::pin::Pin;
 use std::sync::Arc;
 use tonic::{Request, Response, Status, Streaming};
+use tsdb_arrow::engine::StorageEngine;
+use tsdb_arrow::schema::Tags;
 
 pub struct TsdbFlightServer {
-    ctx: SessionContext,
-    db: Arc<tsdb_rocksdb::TsdbRocksDb>,
+    pub(crate) ctx: SessionContext,
+    engine: Arc<dyn StorageEngine>,
     pub(crate) host: String,
     pub(crate) port: u16,
 }
 
 impl TsdbFlightServer {
     pub fn new(
-        db: tsdb_rocksdb::TsdbRocksDb,
+        engine: Arc<dyn StorageEngine>,
         ctx: SessionContext,
         host: impl Into<String>,
         port: u16,
     ) -> Self {
-        Self {
+        let server = Self {
             ctx,
-            db: Arc::new(db),
+            engine,
             host: host.into(),
             port,
-        }
+        };
+        server.register_existing_measurements();
+        server
     }
 
     pub fn with_rocksdb(
@@ -40,13 +44,11 @@ impl TsdbFlightServer {
     ) -> crate::error::Result<Self> {
         let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, config)?;
         let ctx = SessionContext::new();
-        let server = Self::new(db, ctx, host, port);
-        server.register_existing_measurements();
-        Ok(server)
+        Ok(Self::new(Arc::new(db), ctx, host, port))
     }
 
     fn register_existing_measurements(&self) {
-        let measurements = self.db.list_measurements();
+        let measurements = self.engine.list_measurements();
         for measurement in &measurements {
             if let Ok(()) = self.register_measurement_from_db(measurement) {
                 tracing::info!("auto-registered measurement: {}", measurement);
@@ -57,7 +59,9 @@ impl TsdbFlightServer {
     fn register_measurement_from_db(&self, measurement: &str) -> crate::error::Result<()> {
         let now = chrono::Utc::now().timestamp_micros();
         let start = now - 7 * 86_400_000_000i64;
-        let datapoints = self.db.read_range(measurement, start, now)?;
+        let datapoints = self
+            .engine
+            .read_range(measurement, &Tags::new(), start, now)?;
 
         if datapoints.is_empty() {
             return Ok(());
@@ -71,7 +75,7 @@ impl TsdbFlightServer {
 
         self.ctx
             .register_table(measurement, Arc::new(provider))
-            .map_err(crate::error::TsdbFlightError::DataFusion)?;
+            .map_err(|e| crate::error::TsdbFlightError::DataFusion(Box::new(e)))?;
 
         Ok(())
     }
@@ -110,7 +114,11 @@ impl FlightService for TsdbFlightServer {
         let descriptor = request.into_inner();
         let sql = match &descriptor.path {
             path if !path.is_empty() => path[0].clone(),
-            _ => return Err(Status::invalid_argument("missing SQL in flight descriptor path")),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "missing SQL in flight descriptor path",
+                ))
+            }
         };
 
         let plan = self
@@ -145,9 +153,7 @@ impl FlightService for TsdbFlightServer {
             .get_flight_info(Request::new(descriptor.clone()))
             .await?
             .into_inner();
-        let poll_info = PollInfo::new()
-            .with_info(info)
-            .with_descriptor(descriptor);
+        let poll_info = PollInfo::new().with_info(info).with_descriptor(descriptor);
         Ok(Response::new(poll_info))
     }
 
@@ -186,8 +192,7 @@ impl FlightService for TsdbFlightServer {
         Ok(Response::new(Box::pin(futures::stream::iter(results))))
     }
 
-    type DoPutStream =
-        Pin<Box<dyn Stream<Item = std::result::Result<PutResult, Status>> + Send>>;
+    type DoPutStream = Pin<Box<dyn Stream<Item = std::result::Result<PutResult, Status>> + Send>>;
 
     async fn do_put(
         &self,
@@ -211,7 +216,7 @@ impl FlightService for TsdbFlightServer {
                 datapoints.extend(dps);
 
                 if datapoints.len() >= 10000 {
-                    self.db
+                    self.engine
                         .write_batch(&datapoints)
                         .map_err(|e| Status::internal(format!("write: {}", e)))?;
                     datapoints.clear();
@@ -219,7 +224,7 @@ impl FlightService for TsdbFlightServer {
             }
 
             if !datapoints.is_empty() {
-                self.db
+                self.engine
                     .write_batch(&datapoints)
                     .map_err(|e| Status::internal(format!("write: {}", e)))?;
             }
@@ -253,7 +258,7 @@ impl FlightService for TsdbFlightServer {
         let action = request.into_inner();
         match action.r#type.as_str() {
             "list_measurements" => {
-                let measurements = self.db.list_measurements();
+                let measurements = self.engine.list_measurements();
                 let body = serde_json::to_vec(&measurements).unwrap_or_default();
                 let result = arrow_flight::Result { body: body.into() };
                 Ok(Response::new(Box::pin(futures::stream::iter(vec![Ok(
@@ -290,7 +295,11 @@ impl FlightService for TsdbFlightServer {
         let descriptor = request.into_inner();
         let sql = match &descriptor.path {
             path if !path.is_empty() => path[0].clone(),
-            _ => return Err(Status::invalid_argument("missing SQL in flight descriptor path")),
+            _ => {
+                return Err(Status::invalid_argument(
+                    "missing SQL in flight descriptor path",
+                ))
+            }
         };
 
         let plan = self

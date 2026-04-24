@@ -25,7 +25,7 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: tsdb-cli-macos-arm64
-          - os: macos-latest
+          - os: macos-13
             target: x86_64-apple-darwin
             artifact: tsdb-cli-macos-amd64
           - os: windows-latest
@@ -44,6 +44,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
+          mkdir -p .cargo
+          cat >> .cargo/config.toml << EOF
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
 
       - name: Build
         run: cargo build --release -p tsdb-cli --target ${{ matrix.target }}
@@ -81,11 +86,26 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git tag --sort=-version:refname | head -2 | tail -1)
+          if [ -z "$PREV_TAG" ]; then
+            CHANGELOG=$(git log --pretty=format:"- %s" HEAD~20..HEAD)
+          else
+            CHANGELOG=$(git log --pretty=format:"- %s" ${PREV_TAG}..HEAD)
+          fi
+          echo "changelog<<EOF" >> $GITHUB_OUTPUT
+          echo "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -118,17 +138,9 @@ jobs:
 
             ### 变更
 
+            ${{ steps.changelog.outputs.changelog }}
+
             详见 [CHANGELOG.md](https://github.com/supermy/tsdb2/blob/main/CHANGELOG.md)
-
-            ### v0.2.0 主要变更
-
-            - Arrow Flight SQL 服务端 (do_get/do_put/do_action)
-            - 列投影下推 + 谓词下推 + Limit 下推
-            - WAL BufWriter 常驻句柄优化
-            - Compaction 原子替换 (tmp+rename)
-            - INI 配置策略 (5种预设)
-            - 业务场景测试 (IoT/金融/APM)
-            - 360 个测试全部通过
           files: |
             artifacts/**/*
           draft: false

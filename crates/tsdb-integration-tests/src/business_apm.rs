@@ -12,34 +12,65 @@ mod tests {
 
     fn generate_apm_trace_data(service_count: usize, traces_per_service: usize) -> Vec<DataPoint> {
         let base_ts = ts_now() - traces_per_service as i64 * 10_000_000;
-        let services = vec!["api-gateway", "user-service", "order-service", "payment-service", "inventory-service"];
+        let services = [
+            "api-gateway",
+            "user-service",
+            "order-service",
+            "payment-service",
+            "inventory-service",
+        ];
         let mut dps = Vec::new();
 
         for svc_idx in 0..service_count {
             let service = services[svc_idx % services.len()];
-            let env = if svc_idx % 2 == 0 { "production" } else { "staging" };
+            let env = if svc_idx % 2 == 0 {
+                "production"
+            } else {
+                "staging"
+            };
             let version = format!("v{}.{}.{}", 1 + svc_idx / 3, svc_idx % 3, svc_idx % 5);
 
             for trace in 0..traces_per_service {
                 let ts = base_ts + trace as i64 * 10_000_000;
                 let duration_ms = 5 + (trace % 200) as i64;
-                let status_code = if trace % 20 == 0 { 500 } else if trace % 10 == 0 { 404 } else { 200 };
+                let status_code = if trace % 20 == 0 {
+                    500
+                } else if trace % 10 == 0 {
+                    404
+                } else {
+                    200
+                };
                 let is_error = status_code >= 400;
 
                 let mut tags = Tags::new();
                 tags.insert("service".to_string(), service.to_string());
                 tags.insert("env".to_string(), env.to_string());
                 tags.insert("version".to_string(), version.clone());
-                tags.insert("endpoint".to_string(), format!("/api/{}", service.replace('-', "_")));
+                tags.insert(
+                    "endpoint".to_string(),
+                    format!("/api/{}", service.replace('-', "_")),
+                );
 
                 let mut fields = tsdb_arrow::schema::Fields::new();
                 fields.insert("duration_ms".to_string(), FieldValue::Integer(duration_ms));
                 fields.insert("status_code".to_string(), FieldValue::Integer(status_code));
                 fields.insert("is_error".to_string(), FieldValue::Boolean(is_error));
-                fields.insert("request_size".to_string(), FieldValue::Integer(128 + (trace % 1024) as i64));
-                fields.insert("response_size".to_string(), FieldValue::Integer(256 + (trace % 2048) as i64));
-                fields.insert("cpu_usage".to_string(), FieldValue::Float(0.1 + (trace % 50) as f64 * 0.01));
-                fields.insert("memory_mb".to_string(), FieldValue::Float(128.0 + (trace % 100) as f64));
+                fields.insert(
+                    "request_size".to_string(),
+                    FieldValue::Integer(128 + (trace % 1024) as i64),
+                );
+                fields.insert(
+                    "response_size".to_string(),
+                    FieldValue::Integer(256 + (trace % 2048) as i64),
+                );
+                fields.insert(
+                    "cpu_usage".to_string(),
+                    FieldValue::Float(0.1 + (trace % 50) as f64 * 0.01),
+                );
+                fields.insert(
+                    "memory_mb".to_string(),
+                    FieldValue::Float(128.0 + (trace % 100) as f64),
+                );
 
                 dps.push(DataPoint {
                     measurement: "apm_trace".to_string(),
@@ -69,13 +100,34 @@ mod tests {
                 tags.insert("az".to_string(), az.clone());
 
                 let mut fields = tsdb_arrow::schema::Fields::new();
-                fields.insert("cpu_percent".to_string(), FieldValue::Float(10.0 + (point % 80) as f64));
-                fields.insert("memory_percent".to_string(), FieldValue::Float(40.0 + (point % 50) as f64));
-                fields.insert("disk_io_read_mb".to_string(), FieldValue::Float((point % 100) as f64));
-                fields.insert("disk_io_write_mb".to_string(), FieldValue::Float((point % 50) as f64 * 0.5));
-                fields.insert("network_in_kb".to_string(), FieldValue::Integer(100 + (point % 5000) as i64));
-                fields.insert("network_out_kb".to_string(), FieldValue::Integer(50 + (point % 2000) as i64));
-                fields.insert("load_1m".to_string(), FieldValue::Float((point % 16) as f64 * 0.25));
+                fields.insert(
+                    "cpu_percent".to_string(),
+                    FieldValue::Float(10.0 + (point % 80) as f64),
+                );
+                fields.insert(
+                    "memory_percent".to_string(),
+                    FieldValue::Float(40.0 + (point % 50) as f64),
+                );
+                fields.insert(
+                    "disk_io_read_mb".to_string(),
+                    FieldValue::Float((point % 100) as f64),
+                );
+                fields.insert(
+                    "disk_io_write_mb".to_string(),
+                    FieldValue::Float((point % 50) as f64 * 0.5),
+                );
+                fields.insert(
+                    "network_in_kb".to_string(),
+                    FieldValue::Integer(100 + (point % 5000) as i64),
+                );
+                fields.insert(
+                    "network_out_kb".to_string(),
+                    FieldValue::Integer(50 + (point % 2000) as i64),
+                );
+                fields.insert(
+                    "load_1m".to_string(),
+                    FieldValue::Float((point % 16) as f64 * 0.25),
+                );
 
                 dps.push(DataPoint {
                     measurement: "apm_metric".to_string(),
@@ -94,7 +146,9 @@ mod tests {
         measurement: &str,
         datapoints: &[DataPoint],
     ) {
-        engine.register_from_datapoints(measurement, datapoints).unwrap();
+        engine
+            .register_from_datapoints(measurement, datapoints)
+            .unwrap();
 
         let table = engine
             .session_context()
@@ -109,7 +163,10 @@ mod tests {
         let schema = table.schema();
         let batch = datapoints_to_record_batch(datapoints, schema.clone()).unwrap();
         let mem_table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
-        engine.session_context().deregister_table(measurement).unwrap();
+        engine
+            .session_context()
+            .deregister_table(measurement)
+            .unwrap();
         engine
             .session_context()
             .register_table(measurement, Arc::new(mem_table))
@@ -130,7 +187,12 @@ mod tests {
         db.write_batch(&metric_dps).unwrap();
         let elapsed = start.elapsed();
         let qps = total as f64 / elapsed.as_secs_f64();
-        eprintln!("APM write: {} points in {:.2}s ({:.0} pts/s)", total, elapsed.as_secs_f64(), qps);
+        eprintln!(
+            "APM write: {} points in {:.2}s ({:.0} pts/s)",
+            total,
+            elapsed.as_secs_f64(),
+            qps
+        );
 
         assert!(qps > 1000.0);
     }
@@ -221,7 +283,11 @@ mod tests {
         let dps = generate_apm_trace_data(3, 50);
         db.write_batch(&dps).unwrap();
 
-        let keys: Vec<(Tags, i64)> = dps.iter().take(10).map(|dp| (dp.tags.clone(), dp.timestamp)).collect();
+        let keys: Vec<(Tags, i64)> = dps
+            .iter()
+            .take(10)
+            .map(|dp| (dp.tags.clone(), dp.timestamp))
+            .collect();
         let results = db.multi_get("apm_trace", &keys).unwrap();
         assert_eq!(results.len(), 10);
 
@@ -241,7 +307,9 @@ mod tests {
         let target_tags = first_dp.tags.clone();
 
         let base_ts = ts_now() - 50 * 10_000_000;
-        let result = db.prefix_scan("apm_trace", &target_tags, base_ts, ts_now()).unwrap();
+        let result = db
+            .prefix_scan("apm_trace", &target_tags, base_ts, ts_now())
+            .unwrap();
         assert!(!result.is_empty());
 
         for dp in &result {
@@ -260,8 +328,14 @@ mod tests {
         let base_ts = ts_now() - 30 * 60_000_000;
         let tag_keys: Vec<String> = vec!["host".to_string(), "az".to_string()];
         let field_types: Vec<(String, arrow::datatypes::DataType)> = vec![
-            ("cpu_percent".to_string(), arrow::datatypes::DataType::Float64),
-            ("memory_percent".to_string(), arrow::datatypes::DataType::Float64),
+            (
+                "cpu_percent".to_string(),
+                arrow::datatypes::DataType::Float64,
+            ),
+            (
+                "memory_percent".to_string(),
+                arrow::datatypes::DataType::Float64,
+            ),
         ];
         let schema = tsdb_arrow::compact_tsdb_schema("apm_metric", &tag_keys, &field_types);
 
@@ -322,10 +396,12 @@ mod tests {
         assert!(!trace_result.is_empty(), "should have trace data");
         assert!(!metric_result.is_empty(), "should have metric data");
 
-        let trace_services: std::collections::HashSet<_> = trace_result.iter()
+        let trace_services: std::collections::HashSet<_> = trace_result
+            .iter()
             .filter_map(|dp| dp.tags.get("service").cloned())
             .collect();
-        let metric_hosts: std::collections::HashSet<_> = metric_result.iter()
+        let metric_hosts: std::collections::HashSet<_> = metric_result
+            .iter()
             .filter_map(|dp| dp.tags.get("host").cloned())
             .collect();
 

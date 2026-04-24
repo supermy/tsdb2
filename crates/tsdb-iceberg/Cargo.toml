@@ -1,0 +1,24 @@
+[package]
+name = "tsdb-iceberg"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-parquet = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+datafusion = { workspace = true }
+rocksdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = { workspace = true }

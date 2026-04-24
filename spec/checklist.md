@@ -1,333 +1,602 @@
-# TSDB2 验收检查清单
+# TSDB2 Iceberg 模拟功能 — 验收检查清单
 
-> 基于 spec.md 规格和 tasks.md 任务，逐项验收
+> 基于 spec/spec.md 规格和 tasks.md 任务，逐项验收
 
 ---
 
 ## 验收总览
 
-| 类别 | 检查项 | 通过门槛 | 当前状态 |
-|------|--------|---------|---------|
-| T1 单元测试增强 | 30 | ≥28 (93%) | ⏳ 待验证 |
-| T2 压力测试增强 | 10 | ≥9 (90%) | ⏳ 待验证 |
-| T3 集成测试增强 | 6 | ≥6 (100%) | ⏳ 待验证 |
-| T4 真实数据生成器 | 9 | ≥8 (89%) | ⏳ 待验证 |
-| T5 CLI 子命令实现 | 12 | ≥11 (92%) | ⏳ 待验证 |
-| T6 CLI 测试覆盖 | 11 | ≥10 (91%) | ⏳ 待验证 |
-| T7 多平台兼容性 | 8 | ≥7 (87%) | ⏳ 待验证 |
-| T8 CI/CD 增强 | 10 | ≥9 (90%) | ⏳ 待验证 |
-| T9 Flight SQL 集成 | 18 | ≥16 (89%) | ✅ 大部分完成 |
-| **合计** | **114** | **≥104 (91%)** | **⏳** |
+| Phase | 名称 | 检查项 | 通过门槛 | 当前状态 |
+|-------|------|--------|---------|---------|
+| P1 | Catalog + TableMetadata + Schema | 22 | ≥20 (91%) | ⏳ 待验证 |
+| P2 | Snapshot + Manifest + DataFile | 20 | ≥18 (90%) | ⏳ 待验证 |
+| P3 | Append 写入 + 列统计收集 | 18 | ≥16 (89%) | ⏳ 待验证 |
+| P4 | Scan + 谓词下推 (三级过滤) | 18 | ≥16 (89%) | ⏳ 待验证 |
+| P5 | IcebergTableProvider (DataFusion) | 16 | ≥14 (88%) | ⏳ 待验证 |
+| P6 | Time Travel 查询 | 12 | ≥11 (92%) | ⏳ 待验证 |
+| P7 | Compaction (Iceberg 风格) | 12 | ≥11 (92%) | ⏳ 待验证 |
+| P8 | Snapshot 过期清理 | 10 | ≥9 (90%) | ⏳ 待验证 |
+| P9 | Schema 演化 | 13 | ≥12 (92%) | ⏳ 待验证 |
+| P10 | 分区演化 | 10 | ≥9 (90%) | ⏳ 待验证 |
+| **合计** | | **151** | **≥136 (90%)** | **⏳** |
 
 ---
 
-## T1: 单元测试增强验收
+## P1: Catalog + TableMetadata + Schema 验收
 
-### T1.1 merge.rs 独立测试
+### P1.1 tsdb-iceberg crate 骨架
 
-- [ ] `test_full_merge_single_operand`: full_merge(空, [op1]) == op1
-- [ ] `test_full_merge_multiple_operands`: 字段 union 正确
-- [ ] `test_full_merge_field_override`: 同名字段后者覆盖
-- [ ] `test_full_merge_5_plus_operands`: 5+ operands 与逐次合并一致
-- [ ] `test_full_merge_empty_operands`: 空 operands 不 panic
-- [ ] `test_partial_merge_returns_none`: partial_merge 返回 None
-- [ ] `test_full_merge_empty_fields_union`: 空字段集合并
-- [ ] 覆盖率 ≥85%
-- [ ] clippy 零警告
+- [ ] `Cargo.toml` 创建完成，依赖声明正确
+- [ ] `src/lib.rs` 入口文件存在，重导出公共 API
+- [ ] `src/error.rs` 包含 IcebergError 枚举 (Catalog, TableNotFound, CommitConflict, Schema, Manifest, Io, Json, Rocksdb)
+- [ ] workspace `Cargo.toml` 包含 tsdb-iceberg 条目
+- [ ] `cargo check -p tsdb-iceberg` 无错误
 
-### T1.2 snapshot.rs 独立测试
+### P1.2 Schema 数据结构
 
-- [ ] `test_snapshot_get_after_write_invisible`: 新写入不可见
-- [ ] `test_snapshot_read_range_consistency`: 读取一致性
-- [ ] `test_snapshot_multiple_independent`: 多快照独立
-- [ ] `test_snapshot_cross_cf_read`: 跨 CF 读取
-- [ ] 覆盖率 ≥85%
+- [ ] `Schema` 结构体包含 schema_id, fields
+- [ ] `Field` 结构体包含 id, name, required, field_type, doc, initial_default, write_default
+- [ ] `IcebergType` 枚举覆盖: Boolean, Int, Long, Float, Double, Decimal, Date, Time, Timestamp, Timestamptz, String, Uuid, Binary, Struct, List, Map
+- [ ] `Schema::arrow_schema()` 正确转换为 Arrow Schema
+- [ ] `Schema::field_by_id()` / `field_by_name()` 查找正确
+- [ ] Serialize/Deserialize 实现正确
+- [ ] `test_schema_serde_roundtrip` 通过
+- [ ] `test_schema_to_arrow` 通过
+- [ ] `test_field_lookup` 通过
 
-### T1.3 error.rs 全路径覆盖
+### P1.3 PartitionSpec 数据结构
 
-- [ ] `test_invalid_key_construction`: InvalidKey 构造和 Display
-- [ ] `test_invalid_value_construction`: InvalidValue 构造和 Display
-- [ ] `test_cf_not_found_construction`: CfNotFound 变体
-- [ ] `test_arrow_conversion_error_chain`: From<TsdbArrowError> 映射
-- [ ] `test_error_source_chain`: source() 追溯
-- [ ] 覆盖率 ≥90%
+- [ ] `PartitionSpec` 结构体包含 spec_id, fields
+- [ ] `PartitionField` 结构体包含 source_id, field_id, name, transform
+- [ ] `Transform` 枚举覆盖: Identity, Bucket, Truncate, Year, Month, Day, Hour, Void
+- [ ] `Transform::apply()` 对值执行正确转换
+- [ ] `PartitionSpec::partition_path()` 生成正确路径
+- [ ] `test_transform_day` 通过
+- [ ] `test_transform_identity` 通过
+- [ ] `test_partition_path` 通过
 
-### T1.4 key.rs 属性测试
+### P1.4 TableMetadata 数据结构
 
-- [ ] proptest 依赖已添加到 Cargo.toml
-- [ ] `proptest_key_encode_decode_roundtrip`: 256 cases 通过
-- [ ] `proptest_key_ordering_invariant`: 256 cases 通过
-- [ ] `proptest_prefix_encode_is_prefix`: 256 cases 通过
-- [ ] `proptest_key_size_constant`: 256 cases 通过
+- [ ] `TableMetadata` 包含所有字段 (format_version, table_uuid, location, last_sequence_number, last_updated_ms, last_column_id, current_schema_id, schemas, default_spec_id, partition_specs, current_snapshot_id, snapshots, snapshot_log, properties)
+- [ ] `SnapshotLogEntry` 结构体包含 snapshot_id, timestamp_ms
+- [ ] Serialize/Deserialize 实现正确
+- [ ] `TableMetadata::new()` 创建空表元数据，current_snapshot_id = -1
+- [ ] `test_table_metadata_new` 通过
+- [ ] `test_table_metadata_serde_roundtrip` 通过
 
-### T1.5 value.rs 属性测试
+### P1.5 IcebergCatalog 实现
 
-- [ ] `proptest_value_encode_decode_roundtrip`: 256 cases 通过
-- [ ] `proptest_value_all_field_types`: 256 cases 通过
-- [ ] `proptest_value_special_floats`: NaN/Inf/-Inf 语义保留
+- [ ] `IcebergCatalog` 结构体包含 db, base_dir
+- [ ] RocksDB CF 正确创建: `_catalog`, `_table_meta`, `_snapshot`, `_manifest_list`, `_manifest`, `_refs`
+- [ ] `IcebergCatalog::open(path)` 打开/创建成功
+- [ ] `IcebergCatalog::create_table(name, schema, partition_spec)` 创建表成功
+- [ ] `IcebergCatalog::load_table(name)` 加载表成功
+- [ ] `IcebergCatalog::drop_table(name)` 删除表成功
+- [ ] `IcebergCatalog::list_tables()` 列出所有表
+- [ ] `IcebergCatalog::rename_table(old, new)` 重命名表
+- [ ] `test_catalog_create_load_table` 通过
+- [ ] `test_catalog_list_tables` 通过
+- [ ] `test_catalog_drop_table` 通过
+- [ ] `test_catalog_rename_table` 通过
 
-### T1.6 comparator.rs 不变量测试
+### P1.6 Catalog 辅助方法
 
-- [ ] `test_comparator_transitivity`: 10000 组随机数据
-- [ ] `test_comparator_antisymmetry`: a<b → !(b<a)
-- [ ] `test_comparator_reflexivity`: !(a<a)
-- [ ] `test_comparator_different_length_keys`: 安全比较
-- [ ] 覆盖率 ≥95%
+- [ ] `load_metadata(table_name)` 正确读取 TableMetadata
+- [ ] `save_metadata(table_name, metadata)` 正确写入 TableMetadata
+- [ ] `next_sequence_number()` 单调递增
+- [ ] Key 编码函数正确: `meta_key`, `schema_key`, `part_spec_key`
+- [ ] `test_key_encoding` 通过
+- [ ] `test_sequence_number_monotonic` 通过
 
----
+### P1.7 DataPoint ↔ Schema 映射
 
-## T2: 压力测试增强验收
+- [ ] `Schema::from_datapoint_schema()` 从 DataPoint 推导 Schema
+- [ ] DataPoint → Arrow RecordBatch 转换正确 (复用 tsdb-arrow)
+- [ ] 列 ID 分配规则: timestamp=1, tags 从 2, fields 从 1000
+- [ ] `test_schema_from_datapoint` 通过
+- [ ] `test_column_id_assignment` 通过
 
-### T2.1 写入吞吐增强
+### P1.8 P1 集成测试
 
-- [ ] `stress_rocksdb_write_1M_single_thread`: 1M points, >40K pts/s
-- [ ] `stress_rocksdb_write_batch_sizes`: batch=1/100/1000/10000 对比
-- [ ] StressTestReport JSON 输出
-- [ ] 1M 版本 CI 中 <120s
-
-### T2.2 并发读写增强
-
-- [ ] `stress_concurrent_write_8_threads`: 8 线程无数据丢失
-- [ ] `stress_concurrent_snapshot_consistency`: 快照一致性 100%
-- [ ] 无 panic, 无 deadlock
-
-### T2.3 读取性能增强
-
-- [ ] `stress_rocksdb_batched_multi_get`: P99 < 20ms
-- [ ] `stress_rocksdb_cross_day_scan_30days`: 无退化
-- [ ] 性能不退化超过 20%
-
-### T2.4 长时间稳定性测试
-
-- [ ] `stress_long_running_5min`: 内存稳定
-- [ ] `stress_long_running_cf_creation`: 延迟稳定
-- [ ] lib.rs 包含 `pub mod stability_stress;`
-
----
-
-## T3: 集成测试增强验收
-
-### T3.1 DataFusion + RocksDB SQL 集成
-
-- [ ] `test_e2e_rocksdb_sql_select`: SELECT * 查询正确
-- [ ] `test_e2e_rocksdb_sql_aggregation`: AVG/SUM/COUNT/MIN/MAX 正确
-- [ ] `test_e2e_rocksdb_sql_where_tag`: WHERE tag 过滤正确
-
-### T3.2 引擎对比测试
-
-- [ ] `test_e2e_parquet_vs_rocksdb_consistency`: 查询结果一致
-- [ ] `test_e2e_rocksdb_performance_baseline`: 基线已记录
-
-### T3.3 Arrow 适配空结果测试
-
-- [ ] `test_e2e_rocksdb_empty_result_arrow`: 空 RecordBatch schema 正确
+- [ ] `test_catalog_full_lifecycle` 通过
+- [ ] `test_catalog_persistence` 通过
+- [ ] `test_schema_datapoint_roundtrip` 通过
+- [ ] `test_partition_spec_day_transform` 通过
 
 ---
 
-## T4: 真实数据生成器验收
+## P2: Snapshot + Manifest + DataFile 验收
 
-### T4.1 DevOps Generator
+### P2.1 Snapshot 数据结构
 
-- [ ] `make_devops_datapoints_enhanced`: hosts/ranges/measurements 可配置
-- [ ] 周期性模式: 白天值 > 夜间值
-- [ ] 异常注入: spike/dropout/gap 可控
-- [ ] Tags/Fields/DataPoint 结构合法
+- [ ] `Snapshot` 包含所有字段 (snapshot_id, parent_snapshot_id, sequence_number, timestamp_ms, manifest_list, summary, schema_id)
+- [ ] `SnapshotSummary` 包含所有字段 (operation, added_data_files, deleted_data_files, added_records, deleted_records, total_data_files, total_records, extra)
+- [ ] `SnapshotOperation` 枚举: Append, Replace, Overwrite, Delete
+- [ ] Serialize/Deserialize 实现正确
+- [ ] `Snapshot::new_append()` / `Snapshot::new_replace()` 构造正确
+- [ ] `test_snapshot_serde_roundtrip` 通过
+- [ ] `test_snapshot_new_append` 通过
+- [ ] `test_snapshot_new_replace` 通过
 
-### T4.2 IoT Generator
+### P2.2 DataFile 数据结构
 
-- [ ] `make_iot_datapoints`: 高频数据生成
-- [ ] 设备分组: region/type 标签正确
-- [ ] 离线模拟: gap 分布可控
-- [ ] 大规模 (100K devices) 不 OOM
+- [ ] `DataFile` 包含所有字段 (content, file_path, file_format, partition, record_count, file_size_in_bytes, column_sizes, value_counts, null_value_counts, lower_bounds, upper_bounds, split_offsets, sort_order_id)
+- [ ] `DataContentType` 枚举: Data, PositionDeletes, EqualityDeletes
+- [ ] `PartitionData` 类型定义正确
+- [ ] 列统计访问方法正确
+- [ ] Serialize/Deserialize 实现正确
+- [ ] `test_data_file_serde_roundtrip` 通过
+- [ ] `test_data_file_bounds_access` 通过
 
-### T4.3 Financial Generator
+### P2.3 ManifestEntry 数据结构
 
-- [ ] `make_financial_ohlcv`: OHLCV 数据
-- [ ] high >= low, open/close 在 [low, high]
-- [ ] 时间戳对齐到 bar interval
-- [ ] 不同 volatility 产生不同分布
+- [ ] `ManifestEntry` 包含所有字段 (status, snapshot_id, sequence_number, file_sequence_number, data_file)
+- [ ] `EntryStatus` 枚举: Existing=0, Added=1, Deleted=2
+- [ ] `ManifestMeta` 包含所有字段 (manifest_id, schema_id, partition_spec_id, added_files_count, existing_files_count, deleted_files_count, partitions_summary)
+- [ ] Serialize/Deserialize 实现正确
+- [ ] `test_manifest_entry_serde_roundtrip` 通过
+- [ ] `test_entry_status_values` 通过
 
----
+### P2.4 Manifest 读写
 
-## T5: CLI 子命令实现验收
+- [ ] `ManifestWriter` 写入 `_manifest` CF 正确
+- [ ] `ManifestReader` 读取 `_manifest` CF 正确
+- [ ] `ManifestListWriter` 写入 `_manifest_list` CF 正确
+- [ ] `ManifestListReader` 读取 `_manifest_list` CF 正确
+- [ ] Key 编码一致: `{table}\x00{manifest_id}\x00{file_idx}`, `{table}\x00{snap_id}\x00{seq}`
+- [ ] `test_manifest_write_read_roundtrip` 通过
+- [ ] `test_manifest_list_write_read_roundtrip` 通过
 
-### T5.1 status 子命令
+### P2.5 Snapshot 管理
 
-- [ ] `tsdb-cli status --data-dir ./data` 输出格式化状态
-- [ ] 包含: 版本、CF 列表、内存信息
-- [ ] `--storage-engine` 参数支持
+- [ ] `SnapshotManager` 管理快照创建/提交/查询
+- [ ] `create_snapshot()` 创建新快照正确
+- [ ] `commit_snapshot()` 提交快照到 RocksDB 正确
+- [ ] `load_snapshot()` 加载指定快照正确
+- [ ] `load_current_snapshot()` 加载当前快照正确
+- [ ] `test_create_snapshot` 通过
+- [ ] `test_commit_snapshot` 通过
+- [ ] `test_load_snapshot` 通过
 
-### T5.2 query 子命令
+### P2.6 Refs 管理
 
-- [ ] `tsdb-cli query --sql "SELECT * FROM cpu"` 返回 JSON
-- [ ] `--format table` 表格输出
-- [ ] `--format csv` CSV 输出
-- [ ] SQL 聚合查询正确
+- [ ] `Ref` 结构体包含 snapshot_id, type, min_snapshots_to_keep, max_snapshot_age_ms, max_ref_age_ms
+- [ ] `RefsManager` 管理快照引用
+- [ ] `create_ref()` 创建引用正确
+- [ ] `load_ref()` 加载引用正确
+- [ ] Key 编码: `{table}\x00{ref_name}` → `_refs` CF
+- [ ] `test_create_ref` 通过
+- [ ] `test_load_ref` 通过
+- [ ] `test_main_ref_auto_created` 通过
 
-### T5.3 compact 子命令
+### P2.7 原子提交协议
 
-- [ ] `tsdb-cli compact --data-dir ./data` 全部 CF compact
-- [ ] `--cf ts_cpu_20260417` 指定 CF compact
-- [ ] compact 后数据可读
+- [ ] `CommitConflict` 错误类型定义
+- [ ] `atomic_commit()` 乐观并发提交实现
+- [ ] WriteBatch 包含: Snapshot + ManifestList + Manifest entries + TableMetadata
+- [ ] 冲突检测: `current.last_updated_ms != old.last_updated_ms`
+- [ ] 重试逻辑: 最多 3 次
+- [ ] `test_atomic_commit_success` 通过
+- [ ] `test_atomic_commit_conflict_retry` 通过
+- [ ] `test_atomic_commit_batch_integrity` 通过
 
-### T5.4 bench 子命令增强
+### P2.8 P2 集成测试
 
-- [ ] `tsdb-cli bench write --points 100000` 输出报告
-- [ ] report 包含: ops/sec, p50/p99 latency
-- [ ] `--workers` 参数支持
-- [ ] bench read 模式
-
-### T5.5 import 子命令
-
-- [ ] `tsdb-cli import --file test.json --format json` 导入成功
-- [ ] `--batch-size` 参数支持
-- [ ] 导入后数据可查询
-
-### T5.6 archive 子命令
-
-- [ ] `archive create --older-than 30d` 生成归档文件
-- [ ] `archive restore` 恢复成功
-- [ ] `archive list` 列出归档
-- [ ] 归档→删除→恢复→查询 数据完整
-
----
-
-## T6: CLI 测试覆盖验收
-
-### T6.1 CLI 集成测试
-
-- [ ] `test_cli_status_output`: 输出包含 "Column Families"
-- [ ] `test_cli_query_output`: 输出 JSON 格式
-- [ ] `test_cli_compact_success`: 成功执行
-- [ ] `test_cli_bench_write_output`: 输出性能报告
-- [ ] `test_cli_import_json`: 导入成功
-
-### T6.2 CLI 参数解析测试
-
-- [ ] `test_cli_help_output`: --help 显示子命令
-- [ ] `test_cli_version_output`: --version 显示版本
-- [ ] `test_cli_missing_data_dir`: 缺少参数报错
-- [ ] `test_cli_unknown_subcommand`: 未知命令报错
-
-### T6.3 CLI 配置加载测试
-
-- [ ] `test_cli_config_file_loading`: tsdb.toml 加载
-- [ ] `test_cli_default_config`: 默认值正确
+- [ ] `test_snapshot_lifecycle` 通过
+- [ ] `test_manifest_write_read` 通过
+- [ ] `test_atomic_commit_full` 通过
+- [ ] `test_concurrent_commit_conflict` 通过
+- [ ] `test_refs_management` 通过
 
 ---
 
-## T7: 多平台兼容性验收
+## P3: Append 写入 + 列统计收集 验收
 
-### T7.1 CPU 特性检测模块
+### P3.1 IcebergTable 基础
 
-- [ ] `detect_cpu_features()` 在 x86_64 上返回 has_avx2/has_sse42
-- [ ] `detect_cpu_features()` 在 aarch64 上返回 has_neon
-- [ ] `optimized_config()` 返回平台最优配置
-- [ ] lib.rs 包含 `pub mod cpu_features;`
+- [ ] `IcebergTable` 结构体包含 catalog, name, metadata
+- [ ] `name()` / `schema()` / `partition_spec()` / `current_snapshot()` / `snapshots()` / `history()` 访问方法正确
+- [ ] `test_table_accessors` 通过
 
-### T7.2 RISC-V cross-compile
+### P3.2 列统计收集
 
-- [ ] CI: `cargo check --target riscv64gc-unknown-linux-gnu` 通过
-- [ ] 无 x86-specific intrinsic/inline asm
+- [ ] `collect_column_stats()` 正确收集列统计
+- [ ] `ColumnStats` 包含 column_sizes, value_counts, null_value_counts, lower_bounds, upper_bounds
+- [ ] `value_to_iceberg_bytes()` 编码正确
+- [ ] 支持 Int/Long/Float/Double/Timestamp/String/Boolean 类型
+- [ ] `test_collect_stats_numeric` 通过
+- [ ] `test_collect_stats_string` 通过
+- [ ] `test_collect_stats_nulls` 通过
+- [ ] `test_collect_stats_empty_batch` 通过
 
-### T7.3 Docker 多架构
+### P3.3 Parquet 文件写入
 
-- [ ] `docker buildx bake` linux/amd64 成功
-- [ ] `docker buildx bake` linux/arm64 成功
-- [ ] 容器内 `tsdb-cli --version` 正常
+- [ ] `write_parquet_file()` 写入正确
+- [ ] DataPoint → Arrow RecordBatch → Parquet 转换链正确
+- [ ] 列统计收集 → DataFile 构建正确
+- [ ] 文件路径: `{location}/data/{partition_path}/part-{uuid}.parquet`
+- [ ] `build_partition_data()` 正确生成分区数据
+- [ ] `test_write_parquet_file` 通过
+- [ ] `test_build_partition_data` 通过
 
----
+### P3.4 Append 写入
 
-## T8: CI/CD 验收
+- [ ] `IcebergTable::append()` 实现完整
+- [ ] 按 partition_spec 分组 DataPoint 正确
+- [ ] ManifestEntry (status=Added) 创建正确
+- [ ] 新 Snapshot (operation=append) 创建正确
+- [ ] 原子提交 (WriteBatch) 正确
+- [ ] 空表首次 append 处理正确 (current_snapshot_id = -1)
+- [ ] TableMetadata 更新正确
+- [ ] `test_append_to_empty_table` 通过
+- [ ] `test_append_multiple_times` 通过
+- [ ] `test_append_with_partition` 通过
 
-### T8.1 覆盖率阈值门禁
+### P3.5 WriteBuffer 批量优化
 
-- [ ] tarpaulin 命令包含 `--fail-under 80`
-- [ ] 覆盖率 ≥80% 时 job pass
-- [ ] 覆盖率 <80% 时 job fail
-- [ ] Codecov 上传成功
+- [ ] `IcebergTable::append_batch()` 实现完整
+- [ ] 按 target_file_size 切分数据正确
+- [ ] 单个 WriteBatch 包含所有新条目
+- [ ] `test_append_batch_large_dataset` 通过
+- [ ] `test_append_batch_file_size_limit` 通过
 
-### T8.2 性能回归检测
+### P3.6 DataPoint 读取验证
 
-- [ ] PR 触发 bench job
-- [ ] 回归 ≤10%: pass
-- [ ] 回归 10~25%: warn
-- [ ] 回归 >25%: fail
+- [ ] `IcebergTable::read_data_file()` 正确读取 Parquet 文件
+- [ ] 写入 → 读取 → 比对一致
+- [ ] `test_read_data_file` 通过
+- [ ] `test_append_then_read_roundtrip` 通过
 
-### T8.3 压力测试 Gate
+### P3.7 P3 集成测试
 
-- [ ] main 分支 push 触发 stress job
-- [ ] 每个 test timeout ≤10min
-- [ ] 结果存档为 artifact
-
-### T8.4 Dependabot
-
-- [ ] `.github/dependabot.yml` 存在
-- [ ] weekly 依赖更新配置
-- [ ] audit-check 通过
-
----
-
-## T9: Flight SQL 集成验收
-
-### T9.1 Flight SQL 服务端
-
-- [x] `TsdbFlightServer::new()`: 创建 Flight 服务端
-- [x] `do_get`: SQL 查询 → Arrow Flight Data 流式返回
-- [x] `do_put`: Arrow Flight Data 流式写入 → RocksDB
-- [x] `do_action("list_measurements")`: 列出所有 measurement
-- [x] `list_actions`: 返回支持的 action 列表
-- [x] `get_flight_info`: 返回查询的 FlightInfo
-- [x] `get_schema`: 返回查询的 SchemaResult
-- [x] `poll_flight_info`: 长查询轮询
-- [x] Arrow IPC 编解码正确 (Arrow 54 兼容)
-
-### T9.2 TsdbTableProvider 优化
-
-- [x] 列投影下推: 只读取查询所需的列
-- [x] 谓词下推: timestamp 范围条件下推到 Parquet 扫描层
-- [x] Limit 下推: 在扫描层直接截断数据
-- [x] Parquet 原生扫描: 直接读取 Parquet 为 RecordBatch
-- [x] `extract_timestamp_range()`: 从 DataFusion Expr 中提取时间范围
-
-### T9.3 Flight E2E 集成测试
-
-- [x] `test_flight_server_creation`: 服务端创建
-- [x] `test_flight_server_with_rocksdb`: RocksDB 集成
-- [x] `test_flight_list_actions`: list_actions RPC
-- [x] `test_flight_do_get_sql_query`: SQL 查询 via do_get
-- [x] `test_flight_get_flight_info`: get_flight_info RPC
-- [x] `test_flight_get_schema`: get_schema RPC
-- [x] `test_flight_do_action_list_measurements`: list_measurements action
-- [x] `test_datafusion_sql_aggregation`: DataFusion 聚合查询
-- [x] `test_datafusion_sql_filter`: DataFusion 过滤查询
-- [x] `test_datafusion_sql_group_by`: DataFusion 分组查询
-- [x] `test_datafusion_sql_limit`: DataFusion LIMIT 查询
-- [x] `test_arrow_roundtrip`: Arrow 编解码往返
-- [x] `test_arrow_projection`: Arrow 列投影
-- [x] `test_parquet_write_read_roundtrip`: Parquet 读写往返
-- [x] `test_parquet_range_read`: Parquet 范围查询
-- [x] `test_rocksdb_write_and_query`: RocksDB 写入+查询
-- [x] `test_rocksdb_multi_get`: RocksDB 批量查询
-- [x] `test_full_pipeline_rocksdb_to_datafusion`: 全链路
-
-### T9.4 Flight gRPC 端到端测试
-
-- [ ] 启动 tonic gRPC 服务器
-- [ ] Arrow Flight 客户端连接
-- [ ] do_get SQL 查询
-- [ ] do_put 数据写入
-- [ ] get_flight_info 元数据查询
-- [ ] do_action list_measurements
+- [ ] `test_append_full_lifecycle` 通过
+- [ ] `test_append_multiple_snapshots` 通过
+- [ ] `test_append_partitioned_data` 通过
+- [ ] `test_column_stats_accuracy` 通过
+- [ ] `test_append_large_batch` 通过
 
 ---
 
-## 辅助函数提取验收
+## P4: Scan + 谓词下推 (三级过滤) 验收
 
-- [ ] `make_tags()`, `make_fields()`, `ts_today()`, `ts_days_ago()` 在 tsdb-test-utils 中
-- [ ] stress 模块使用 `use tsdb_test_utils::*`
-- [ ] 无重复辅助函数
-- [ ] 全部 stress 测试通过
+### P4.1 IcebergScanBuilder
+
+- [ ] `IcebergScanBuilder` 包含 table, snapshot_id, predicate, projection, case_sensitive
+- [ ] `predicate()` / `projection()` / `case_insensitive()` / `build()` 方法正确
+- [ ] `build()` 返回 `IcebergScan`
+- [ ] `test_scan_builder_default` 通过
+- [ ] `test_scan_builder_with_predicate` 通过
+
+### P4.2 IcebergScan 文件规划
+
+- [ ] `IcebergScan` 包含 data_files, predicate, projection
+- [ ] `plan()` 返回匹配的 DataFile 列表
+- [ ] 文件规划核心逻辑正确: snapshot → manifest_list → entries → 过滤
+- [ ] `test_scan_plan_all_files` 通过
+- [ ] `test_scan_plan_with_no_predicate` 通过
+
+### P4.3 Level 1: Manifest 级别过滤
+
+- [ ] `manifest_matches_predicate()` 使用分区统计过滤
+- [ ] 利用 partitions_summary (contains_null, lower_bound, upper_bound)
+- [ ] 跳过不匹配的整个 Manifest
+- [ ] `test_manifest_filter_day_partition` 通过
+- [ ] `test_manifest_filter_no_match` 通过
+
+### P4.4 Level 2: DataFile 级别过滤
+
+- [ ] `file_matches_predicate()` 使用列统计过滤
+- [ ] 利用 lower_bounds / upper_bounds
+- [ ] 支持等值、范围、IN 条件
+- [ ] 跳过列值范围不匹配的文件
+- [ ] `test_file_filter_timestamp_range` 通过
+- [ ] `test_file_filter_tag_equals` 通过
+- [ ] `test_file_filter_no_match` 通过
+
+### P4.5 Level 3: RowGroup 级别过滤
+
+- [ ] `row_group_matches_predicate()` 使用 RowGroup 统计
+- [ ] 读取 Parquet 元数据正确
+- [ ] 利用 RowGroup column_chunk 统计 (min/max)
+- [ ] 跳过不匹配的 RowGroup
+- [ ] `test_row_group_filter` 通过
+- [ ] `test_row_group_filter_all_skipped` 通过
+
+### P4.6 IcebergScan 执行
+
+- [ ] `IcebergScan::execute()` 返回 RecordBatch
+- [ ] 流程: plan → 遍历 data_files → 读取 Parquet → RowGroup 过滤 → 合并
+- [ ] 列投影: 只读取 projection 指定的列
+- [ ] `to_record_batches()` 同步版本正确
+- [ ] `test_scan_execute_full` 通过
+- [ ] `test_scan_execute_with_projection` 通过
+- [ ] `test_scan_execute_with_predicate` 通过
+
+### P4.7 P4 集成测试
+
+- [ ] `test_scan_full_lifecycle` 通过
+- [ ] `test_scan_predicate_pushdown_timestamp` 通过
+- [ ] `test_scan_predicate_pushdown_tag` 通过
+- [ ] `test_scan_projection` 通过
+- [ ] `test_scan_three_level_filter` 通过
+- [ ] `test_scan_empty_result` 通过
+
+---
+
+## P5: IcebergTableProvider (DataFusion) 验收
+
+### P5.1 IcebergTableProvider 结构
+
+- [ ] `IcebergTableProvider` 包含 table, schema
+- [ ] `IcebergTableProvider::new()` 从 IcebergTable 创建成功
+- [ ] Iceberg Schema → DataFusion Schema 转换正确
+- [ ] `test_provider_creation` 通过
+- [ ] `test_provider_schema` 通过
+
+### P5.2 TableProvider trait 实现
+
+- [ ] `as_any()` 实现正确
+- [ ] `schema()` 返回正确 Schema
+- [ ] `table_type()` 返回 Base
+- [ ] `scan()` 将 filters 转为 Iceberg 谓词 → IcebergScan → IcebergScanExec
+- [ ] `test_table_provider_scan` 通过
+
+### P5.3 IcebergScanExec
+
+- [ ] `IcebergScanExec` 包含 data_files, predicate, projection, schema, limit
+- [ ] `ExecutionPlan` trait 实现完整: schema, children, with_new_children, execute
+- [ ] `test_scan_exec_creation` 通过
+- [ ] `test_scan_exec_schema` 通过
+
+### P5.4 IcebergScanStream
+
+- [ ] `IcebergScanStream` 实现 `SendableRecordBatchStream`
+- [ ] 流式读取: 逐文件 → 逐 RowGroup 过滤 → yield RecordBatch
+- [ ] 列投影支持
+- [ ] limit 支持
+- [ ] `test_scan_stream_single_file` 通过
+- [ ] `test_scan_stream_multiple_files` 通过
+- [ ] `test_scan_stream_with_limit` 通过
+
+### P5.5 DataFusion filters → Iceberg 谓词
+
+- [ ] `filters_to_predicate()` 转换正确
+- [ ] 支持: Eq, Gt, GtEq, Lt, LtEq, InList, And, Or, Not
+- [ ] `Predicate` 枚举定义完整
+- [ ] `test_filter_to_predicate_eq` 通过
+- [ ] `test_filter_to_predicate_range` 通过
+- [ ] `test_filter_to_predicate_and_or` 通过
+
+### P5.6 P5 集成测试
+
+- [ ] `test_datafusion_sql_select` 通过
+- [ ] `test_datafusion_sql_where_timestamp` 通过
+- [ ] `test_datafusion_sql_where_tag` 通过
+- [ ] `test_datafusion_sql_aggregation` 通过
+- [ ] `test_datafusion_sql_group_by` 通过
+- [ ] `test_datafusion_sql_limit` 通过
+- [ ] `test_datafusion_predicate_pushdown` 通过
+
+---
+
+## P6: Time Travel 查询验收
+
+### P6.1 scan_at_snapshot
+
+- [ ] `scan_at_snapshot(snapshot_id)` 指定快照查询正确
+- [ ] `scan_at_timestamp(timestamp_ms)` 指定时间点查询正确
+- [ ] `snapshot_by_id()` / `snapshot_by_timestamp()` 查找正确
+- [ ] `test_scan_at_snapshot` 通过
+- [ ] `test_scan_at_timestamp` 通过
+
+### P6.2 快照历史查询
+
+- [ ] `history()` 返回 SnapshotLogEntry 列表
+- [ ] `snapshot_diff()` 返回两个快照之间的差异
+- [ ] 差异包含: added_files, deleted_files, added_records, deleted_records
+- [ ] `test_history` 通过
+- [ ] `test_snapshot_diff` 通过
+
+### P6.3 Rollback
+
+- [ ] `rollback_to_snapshot()` 回滚正确
+- [ ] `rollback_to_timestamp()` 回滚正确
+- [ ] Rollback 创建新 Snapshot 指向旧数据文件
+- [ ] 原子提交更新 current_snapshot_id
+- [ ] `test_rollback_to_snapshot` 通过
+- [ ] `test_rollback_then_query` 通过
+
+### P6.4 Branch/Tag 查询
+
+- [ ] `scan_ref(ref_name)` 按引用名查询正确
+- [ ] `create_branch()` 创建分支正确
+- [ ] `create_tag()` 创建标签正确
+- [ ] `test_scan_branch` 通过
+- [ ] `test_scan_tag` 通过
+
+### P6.5 P6 集成测试
+
+- [ ] `test_time_travel_full` 通过
+- [ ] `test_time_travel_by_timestamp` 通过
+- [ ] `test_rollback_and_query` 通过
+- [ ] `test_branch_tag_query` 通过
+- [ ] `test_snapshot_diff` 通过
+
+---
+
+## P7: Compaction (Iceberg 风格) 验收
+
+### P7.1 小文件选择策略
+
+- [ ] `find_compaction_candidates()` 选择小文件正确
+- [ ] 策略: file_size < target_file_size
+- [ ] 按分区分组候选文件
+- [ ] `test_find_compaction_candidates` 通过
+
+### P7.2 文件合并
+
+- [ ] `compact_partition()` 合并正确
+- [ ] 读取小文件 → 合并 RecordBatch → 写入大文件
+- [ ] 列统计收集 → DataFile 构建正确
+- [ ] `test_compact_partition` 通过
+
+### P7.3 Compaction 提交
+
+- [ ] `IcebergTable::compact()` 实现完整
+- [ ] 旧文件标记 DELETED，新文件标记 ADDED
+- [ ] 新 Snapshot operation=replace
+- [ ] 原子提交正确
+- [ ] `test_compact_commit` 通过
+- [ ] `test_compact_snapshot_operation` 通过
+
+### P7.4 Compaction 后验证
+
+- [ ] compact 后查询结果不变
+- [ ] compact 后文件数减少
+- [ ] compact 后总数据量不变
+- [ ] `test_compact_query_consistency` 通过
+- [ ] `test_compact_file_count_reduction` 通过
+
+### P7.5 P7 集成测试
+
+- [ ] `test_compact_full_lifecycle` 通过
+- [ ] `test_compact_multiple_partitions` 通过
+- [ ] `test_compact_with_concurrent_reads` 通过
+- [ ] `test_compact_snapshot_history` 通过
+
+---
+
+## P8: Snapshot 过期清理验收
+
+### P8.1 过期快照选择
+
+- [ ] `expire_snapshots()` 选择过期快照正确
+- [ ] 保留至少 min_snapshots 个快照
+- [ ] 不删除被 branch/tag 引用的快照
+- [ ] `test_expire_snapshots_by_age` 通过
+- [ ] `test_expire_snapshots_min_retention` 通过
+
+### P8.2 孤立文件清理
+
+- [ ] `remove_orphan_files()` 清理孤立文件正确
+- [ ] 扫描数据目录 → 对比有效快照引用 → 删除
+- [ ] `test_remove_orphan_files` 通过
+
+### P8.3 过期提交验证
+
+- [ ] 过期后当前快照仍可查询
+- [ ] 过期后快照历史正确截断
+- [ ] 过期后 TableMetadata 更新正确
+- [ ] `test_expire_then_query` 通过
+- [ ] `test_expire_metadata_update` 通过
+
+### P8.4 P8 集成测试
+
+- [ ] `test_expire_snapshots_full` 通过
+- [ ] `test_expire_with_branch_protection` 通过
+- [ ] `test_orphan_file_cleanup` 通过
+- [ ] `test_expire_then_time_travel` 通过
+
+---
+
+## P9: Schema 演化验收
+
+### P9.1 SchemaChange 定义
+
+- [ ] `SchemaChange` 枚举包含: AddField, DeleteField, RenameField, PromoteType, MoveField
+- [ ] 每个变体字段完整
+- [ ] `test_schema_change_variants` 通过
+
+### P9.2 Schema 演化应用
+
+- [ ] `Schema::apply_change()` 应用单个变更正确
+- [ ] `Schema::apply_changes()` 应用多个变更正确
+- [ ] 新 Schema 分配新 schema_id
+- [ ] last_column_id 递增 (AddField)
+- [ ] `test_apply_add_field` 通过
+- [ ] `test_apply_delete_field` 通过
+- [ ] `test_apply_rename_field` 通过
+- [ ] `test_apply_promote_type` 通过
+
+### P9.3 update_schema 实现
+
+- [ ] `update_schema()` 应用变更 + 更新 Metadata + 原子提交
+- [ ] `test_update_schema_commit` 通过
+- [ ] `test_update_schema_history` 通过
+
+### P9.4 Schema 演化后查询兼容
+
+- [ ] Scan 根据 schema_id 选择正确 Schema
+- [ ] 新增列: 旧文件返回 null
+- [ ] 删除列: 旧文件忽略该列
+- [ ] 重命名列: 旧名映射到新名
+- [ ] `test_scan_after_add_field` 通过
+- [ ] `test_scan_after_delete_field` 通过
+- [ ] `test_scan_after_rename_field` 通过
+
+### P9.5 P9 集成测试
+
+- [ ] `test_schema_evolution_add_field` 通过
+- [ ] `test_schema_evolution_delete_field` 通过
+- [ ] `test_schema_evolution_rename_field` 通过
+- [ ] `test_schema_evolution_promote_type` 通过
+- [ ] `test_schema_evolution_multiple_changes` 通过
+
+---
+
+## P10: 分区演化验收
+
+### P10.1 PartitionSpec 变更
+
+- [ ] `PartitionSpec::evolve()` 演化正确
+- [ ] `PartitionSpecChange` 枚举: AddField, RemoveField, RenameField
+- [ ] 新 PartitionSpec 分配新 spec_id
+- [ ] `test_partition_spec_evolve` 通过
+
+### P10.2 update_partition_spec 实现
+
+- [ ] `update_partition_spec()` 验证 + 更新 Metadata + 原子提交
+- [ ] `test_update_partition_spec` 通过
+
+### P10.3 分区演化后查询兼容
+
+- [ ] Scan 根据 partition_spec_id 选择正确 PartitionSpec
+- [ ] 旧分区数据可查询
+- [ ] 新分区数据可查询
+- [ ] `test_scan_after_partition_evolution` 通过
+
+### P10.4 P10 集成测试
+
+- [ ] `test_partition_evolution_full` 通过
+- [ ] `test_partition_evolution_compact` 通过
+- [ ] `test_partition_evolution_time_travel` 通过
+- [ ] `test_partition_evolution_schema_compat` 通过
+
+---
+
+## 跨 Phase 验收
+
+### 与现有系统集成
+
+- [ ] tsdb-arrow: DataPoint ↔ Arrow RecordBatch 转换兼容
+- [ ] tsdb-rocksdb: RocksDB CF 管理和 WriteBatch 兼容
+- [ ] tsdb-parquet: Parquet 文件读写兼容
+- [ ] tsdb-datafusion: IcebergTableProvider 注册和查询兼容
+- [ ] tsdb-flight: Flight SQL 查询 Iceberg 表兼容
+
+### 数据一致性
+
+- [ ] 同一批数据通过 Iceberg 写入和直接 Parquet 写入，查询结果一致
+- [ ] 多次 append 后查询结果与直接写入全部数据一致
+- [ ] compact 后查询结果与 compact 前一致
+- [ ] rollback 后查询结果与目标快照一致
+
+### 性能基线
+
+- [ ] Append 吞吐: ≥10K DataPoint/s (单线程)
+- [ ] Scan 全表: 100K 行 < 1s
+- [ ] 谓词下推: 跳过率 ≥50% (典型查询)
+- [ ] Compaction: 10 个小文件合并 < 5s
 
 ---
 
@@ -335,15 +604,13 @@
 
 ### 发布前必须全部 ✅
 
-- [ ] `cargo test --workspace` 全部通过 (0 failed)
-- [ ] `cargo clippy --all-targets -- -D warnings` 零警告
-- [ ] `cargo fmt --all -- --check` 格式正确
-- [ ] 覆盖率 ≥80%
-- [ ] Linux/macOS/Windows 三平台 CI 绿色
-- [ ] AArch64 cross-compile 通过
-- [ ] ARMv7 cross-compile 通过
-- [ ] MSRV (1.85.0) check 通过
-- [ ] 安全审计零漏洞
-- [ ] CLI `--help` / `--version` 正常
-- [ ] 压力测试基线已记录
-- [ ] 所有 spec 中的缺失测试项已补充
+- [ ] `cargo test -p tsdb-iceberg` 全部通过 (0 failed)
+- [ ] `cargo clippy -p tsdb-iceberg -- -D warnings` 零警告
+- [ ] `cargo fmt -p tsdb-iceberg -- --check` 格式正确
+- [ ] P1-P5 (P0) 全部验收项通过
+- [ ] P6-P8 (P1) 验收项 ≥90% 通过
+- [ ] P9-P10 (P2) 验收项 ≥85% 通过
+- [ ] 数据一致性测试全部通过
+- [ ] 性能基线达标
+- [ ] 与现有系统集成测试通过
+- [ ] 无 unsafe 代码 (或所有 unsafe 有安全注释)

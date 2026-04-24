@@ -13,6 +13,7 @@ members = [
     "crates/tsdb-rocksdb",
     "crates/tsdb-stress-rocksdb",
     "crates/tsdb-cli",
+    "crates/tsdb-iceberg",
 ]
 
 [workspace.package]
@@ -48,3 +49,4 @@ criterion = { version = "0.5", features = ["html_reports"] }
 rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
 fxhash = "0.2"
 tsdb-rocksdb = { path = "crates/tsdb-rocksdb" }
+tsdb-iceberg = { path = "crates/tsdb-iceberg" }

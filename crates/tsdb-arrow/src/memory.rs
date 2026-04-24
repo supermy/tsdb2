@@ -43,15 +43,21 @@ impl TsdbMemoryPool {
 
     /// 释放指定大小的内存
     pub fn release(&self, size: usize) {
-        let result = self.used.fetch_update(Ordering::SeqCst, Ordering::Relaxed, |current| {
-            if current >= size {
-                Some(current - size)
-            } else {
-                Some(0)
-            }
-        });
+        let result = self
+            .used
+            .fetch_update(Ordering::SeqCst, Ordering::Relaxed, |current| {
+                if current >= size {
+                    Some(current - size)
+                } else {
+                    Some(0)
+                }
+            });
         if result.is_err() {
-            tracing::warn!("memory pool release underflow: tried to release {} but only {} used", size, self.used());
+            tracing::warn!(
+                "memory pool release underflow: tried to release {} but only {} used",
+                size,
+                self.used()
+            );
         }
     }
 

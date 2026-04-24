@@ -79,6 +79,34 @@ pub fn compact_tsdb_schema(
     Arc::new(schema)
 }
 
+pub fn compact_tsdb_schema_from_datapoints(datapoints: &[DataPoint]) -> SchemaRef {
+    if datapoints.is_empty() {
+        return compact_tsdb_schema("unknown", &[], &[]);
+    }
+
+    let measurement = &datapoints[0].measurement;
+
+    let mut tag_key_set = std::collections::BTreeSet::new();
+    let mut field_type_map: std::collections::BTreeMap<String, DataType> =
+        std::collections::BTreeMap::new();
+
+    for dp in datapoints {
+        for k in dp.tags.keys() {
+            tag_key_set.insert(k.clone());
+        }
+        for (k, v) in &dp.fields {
+            field_type_map
+                .entry(k.clone())
+                .or_insert_with(|| field_value_to_data_type(v));
+        }
+    }
+
+    let tag_keys: Vec<String> = tag_key_set.into_iter().collect();
+    let field_types: Vec<(String, DataType)> = field_type_map.into_iter().collect();
+
+    compact_tsdb_schema(measurement, &tag_keys, &field_types)
+}
+
 /// 时序 Schema 构建器
 ///
 /// 支持链式调用构建扩展模式或紧凑模式的 Schema。
@@ -166,11 +194,183 @@ pub fn field_value_to_data_type(value: &FieldValue) -> DataType {
 }
 
 use std::collections::BTreeMap;
+use std::ops::{Deref, DerefMut};
 
 /// 标签集合: 有序键值对 (BTreeMap 保证序列化顺序一致)
-pub type Tags = BTreeMap<String, String>;
+///
+/// 封装 BTreeMap 提供验证和领域语义。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Tags(BTreeMap<String, String>);
+
+impl Tags {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.0.insert(key.into(), value.into());
+    }
+
+    pub fn get(&self, key: &str) -> Option<&String> {
+        self.0.get(key)
+    }
+
+    pub fn keys(&self) -> std::collections::btree_map::Keys<'_, String, String> {
+        self.0.keys()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, String> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
+impl Default for Tags {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deref for Tags {
+    type Target = BTreeMap<String, String>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Tags {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<BTreeMap<String, String>> for Tags {
+    fn from(map: BTreeMap<String, String>) -> Self {
+        Self(map)
+    }
+}
+
+impl FromIterator<(String, String)> for Tags {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for Tags {
+    type Item = (String, String);
+    type IntoIter = std::collections::btree_map::IntoIter<String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Tags {
+    type Item = (&'a String, &'a String);
+    type IntoIter = std::collections::btree_map::Iter<'a, String, String>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
 /// 字段集合: 有序键值对
-pub type Fields = BTreeMap<String, FieldValue>;
+///
+/// 封装 BTreeMap 提供验证和领域语义。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Fields(BTreeMap<String, FieldValue>);
+
+impl Fields {
+    pub fn new() -> Self {
+        Self(BTreeMap::new())
+    }
+
+    pub fn insert(&mut self, key: impl Into<String>, value: FieldValue) {
+        self.0.insert(key.into(), value);
+    }
+
+    pub fn get(&self, key: &str) -> Option<&FieldValue> {
+        self.0.get(key)
+    }
+
+    pub fn keys(&self) -> std::collections::btree_map::Keys<'_, String, FieldValue> {
+        self.0.keys()
+    }
+
+    pub fn iter(&self) -> std::collections::btree_map::Iter<'_, String, FieldValue> {
+        self.0.iter()
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+}
+
+impl Default for Fields {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Deref for Fields {
+    type Target = BTreeMap<String, FieldValue>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for Fields {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl From<BTreeMap<String, FieldValue>> for Fields {
+    fn from(map: BTreeMap<String, FieldValue>) -> Self {
+        Self(map)
+    }
+}
+
+impl FromIterator<(String, FieldValue)> for Fields {
+    fn from_iter<I: IntoIterator<Item = (String, FieldValue)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl IntoIterator for Fields {
+    type Item = (String, FieldValue);
+    type IntoIter = std::collections::btree_map::IntoIter<String, FieldValue>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Fields {
+    type Item = (&'a String, &'a FieldValue);
+    type IntoIter = std::collections::btree_map::Iter<'a, String, FieldValue>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
 
 /// 字段值枚举
 ///
@@ -224,24 +424,34 @@ impl<'de> serde::Deserialize<'de> for FieldValue {
                 Ok(FieldValue::Boolean(v))
             }
 
-            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> std::result::Result<FieldValue, A::Error> {
-                let (key, value): (String, serde_json::Value) = map.next_entry()?.ok_or_else(|| {
-                    de::Error::custom("empty map is not a valid FieldValue")
-                })?;
+            fn visit_map<A: MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> std::result::Result<FieldValue, A::Error> {
+                let (key, value): (String, serde_json::Value) = map
+                    .next_entry()?
+                    .ok_or_else(|| de::Error::custom("empty map is not a valid FieldValue"))?;
                 match key.as_str() {
-                    "Float" => value.as_f64().map(FieldValue::Float).ok_or_else(|| {
-                        de::Error::custom("invalid Float value")
-                    }),
-                    "Integer" => value.as_i64().map(FieldValue::Integer).ok_or_else(|| {
-                        de::Error::custom("invalid Integer value")
-                    }),
-                    "String" => value.as_str().map(|s| FieldValue::String(s.to_string())).ok_or_else(|| {
-                        de::Error::custom("invalid String value")
-                    }),
-                    "Boolean" => value.as_bool().map(FieldValue::Boolean).ok_or_else(|| {
-                        de::Error::custom("invalid Boolean value")
-                    }),
-                    other => Err(de::Error::custom(format!("unknown FieldValue variant: {}", other))),
+                    "Float" => value
+                        .as_f64()
+                        .map(FieldValue::Float)
+                        .ok_or_else(|| de::Error::custom("invalid Float value")),
+                    "Integer" => value
+                        .as_i64()
+                        .map(FieldValue::Integer)
+                        .ok_or_else(|| de::Error::custom("invalid Integer value")),
+                    "String" => value
+                        .as_str()
+                        .map(|s| FieldValue::String(s.to_string()))
+                        .ok_or_else(|| de::Error::custom("invalid String value")),
+                    "Boolean" => value
+                        .as_bool()
+                        .map(FieldValue::Boolean)
+                        .ok_or_else(|| de::Error::custom("invalid Boolean value")),
+                    other => Err(de::Error::custom(format!(
+                        "unknown FieldValue variant: {}",
+                        other
+                    ))),
                 }
             }
         }
@@ -335,7 +545,69 @@ impl DataPoint {
         parts.sort();
         format!("{},{}", self.measurement, parts.join(","))
     }
+
+    /// 验证数据点的完整性
+    ///
+    /// 规则:
+    /// - measurement 不能为空
+    /// - 至少有一个字段
+    /// - 标签键不能为空字符串
+    /// - 字段键不能为空字符串
+    /// - NaN/Inf 浮点值不允许
+    pub fn validate(&self) -> std::result::Result<(), DataPointError> {
+        if self.measurement.is_empty() || self.measurement.trim().is_empty() {
+            return Err(DataPointError::EmptyMeasurement);
+        }
+        if self.fields.is_empty() {
+            return Err(DataPointError::NoFields);
+        }
+        for key in self.tags.keys() {
+            if key.is_empty() {
+                return Err(DataPointError::EmptyTagKey);
+            }
+        }
+        for (key, value) in &self.fields {
+            if key.is_empty() {
+                return Err(DataPointError::EmptyFieldKey);
+            }
+            if let FieldValue::Float(f) = value {
+                if f.is_nan() || f.is_infinite() {
+                    return Err(DataPointError::InvalidFloatValue {
+                        field: key.clone(),
+                        value: *f,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
 }
+
+/// 数据点验证错误
+#[derive(Debug, Clone, PartialEq)]
+pub enum DataPointError {
+    EmptyMeasurement,
+    NoFields,
+    EmptyTagKey,
+    EmptyFieldKey,
+    InvalidFloatValue { field: String, value: f64 },
+}
+
+impl std::fmt::Display for DataPointError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DataPointError::EmptyMeasurement => write!(f, "measurement name cannot be empty"),
+            DataPointError::NoFields => write!(f, "data point must have at least one field"),
+            DataPointError::EmptyTagKey => write!(f, "tag key cannot be empty string"),
+            DataPointError::EmptyFieldKey => write!(f, "field key cannot be empty string"),
+            DataPointError::InvalidFloatValue { field, value } => {
+                write!(f, "field '{}' has invalid float value: {}", field, value)
+            }
+        }
+    }
+}
+
+impl std::error::Error for DataPointError {}
 
 /// 字段类型枚举 (无值, 仅表示类型信息)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -363,7 +635,7 @@ mod tests {
 
     #[test]
     fn test_field_value_as_f64() {
-        assert_eq!(FieldValue::Float(3.14).as_f64(), Some(3.14));
+        assert_eq!(FieldValue::Float(2.78).as_f64(), Some(2.78));
         assert_eq!(FieldValue::Integer(42).as_f64(), Some(42.0));
         assert_eq!(FieldValue::String("hello".into()).as_f64(), None);
         assert_eq!(FieldValue::Boolean(true).as_f64(), None);
@@ -372,7 +644,7 @@ mod tests {
     #[test]
     fn test_field_value_as_i64() {
         assert_eq!(FieldValue::Integer(42).as_i64(), Some(42));
-        assert_eq!(FieldValue::Float(3.14).as_i64(), Some(3));
+        assert_eq!(FieldValue::Float(2.78).as_i64(), Some(2));
         assert_eq!(FieldValue::String("hello".into()).as_i64(), None);
         assert_eq!(FieldValue::Boolean(false).as_i64(), None);
     }
@@ -380,7 +652,7 @@ mod tests {
     #[test]
     fn test_field_value_as_str() {
         assert_eq!(FieldValue::String("hello".into()).as_str(), Some("hello"));
-        assert_eq!(FieldValue::Float(3.14).as_str(), None);
+        assert_eq!(FieldValue::Float(2.78).as_str(), None);
         assert_eq!(FieldValue::Integer(42).as_str(), None);
         assert_eq!(FieldValue::Boolean(true).as_str(), None);
     }
@@ -389,16 +661,16 @@ mod tests {
     fn test_field_value_as_bool() {
         assert_eq!(FieldValue::Boolean(true).as_bool(), Some(true));
         assert_eq!(FieldValue::Boolean(false).as_bool(), Some(false));
-        assert_eq!(FieldValue::Float(3.14).as_bool(), None);
+        assert_eq!(FieldValue::Float(2.78).as_bool(), None);
         assert_eq!(FieldValue::Integer(42).as_bool(), None);
     }
 
     #[test]
     fn test_field_value_serde_roundtrip_float() {
-        let original = FieldValue::Float(3.14);
+        let original = FieldValue::Float(2.78);
         let json = serde_json::to_string(&original).unwrap();
         let restored: FieldValue = serde_json::from_str(&json).unwrap();
-        assert!(matches!(restored, FieldValue::Float(v) if (v - 3.14).abs() < f64::EPSILON));
+        assert!(matches!(restored, FieldValue::Float(v) if (v - 2.78).abs() < f64::EPSILON));
     }
 
     #[test]
@@ -455,8 +727,14 @@ mod tests {
     fn test_field_type_from_field_value() {
         assert_eq!(FieldType::from(&FieldValue::Float(0.0)), FieldType::Float);
         assert_eq!(FieldType::from(&FieldValue::Integer(0)), FieldType::Integer);
-        assert_eq!(FieldType::from(&FieldValue::String("".into())), FieldType::String);
-        assert_eq!(FieldType::from(&FieldValue::Boolean(false)), FieldType::Boolean);
+        assert_eq!(
+            FieldType::from(&FieldValue::String("".into())),
+            FieldType::String
+        );
+        assert_eq!(
+            FieldType::from(&FieldValue::Boolean(false)),
+            FieldType::Boolean
+        );
     }
 
     #[test]
@@ -477,8 +755,7 @@ mod tests {
 
     #[test]
     fn test_series_key_single_tag() {
-        let dp = DataPoint::new("mem", 2000)
-            .with_tag("host", "srv1");
+        let dp = DataPoint::new("mem", 2000).with_tag("host", "srv1");
         let key = dp.series_key();
         assert_eq!(key, "mem,host=srv1");
     }
@@ -537,9 +814,76 @@ mod tests {
 
     #[test]
     fn test_field_value_to_data_type() {
-        assert_eq!(field_value_to_data_type(&FieldValue::Float(0.0)), arrow::datatypes::DataType::Float64);
-        assert_eq!(field_value_to_data_type(&FieldValue::Integer(0)), arrow::datatypes::DataType::Int64);
-        assert_eq!(field_value_to_data_type(&FieldValue::String("".into())), arrow::datatypes::DataType::Utf8);
-        assert_eq!(field_value_to_data_type(&FieldValue::Boolean(false)), arrow::datatypes::DataType::Boolean);
+        assert_eq!(
+            field_value_to_data_type(&FieldValue::Float(0.0)),
+            arrow::datatypes::DataType::Float64
+        );
+        assert_eq!(
+            field_value_to_data_type(&FieldValue::Integer(0)),
+            arrow::datatypes::DataType::Int64
+        );
+        assert_eq!(
+            field_value_to_data_type(&FieldValue::String("".into())),
+            arrow::datatypes::DataType::Utf8
+        );
+        assert_eq!(
+            field_value_to_data_type(&FieldValue::Boolean(false)),
+            arrow::datatypes::DataType::Boolean
+        );
+    }
+
+    #[test]
+    fn test_validate_valid_datapoint() {
+        let dp = DataPoint::new("cpu", 1000)
+            .with_tag("host", "server01")
+            .with_field("usage", FieldValue::Float(0.5));
+        assert!(dp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_empty_measurement() {
+        let dp = DataPoint::new("", 1000).with_field("value", FieldValue::Float(1.0));
+        assert_eq!(dp.validate().unwrap_err(), DataPointError::EmptyMeasurement);
+    }
+
+    #[test]
+    fn test_validate_whitespace_measurement() {
+        let dp = DataPoint::new("  ", 1000).with_field("value", FieldValue::Float(1.0));
+        assert_eq!(dp.validate().unwrap_err(), DataPointError::EmptyMeasurement);
+    }
+
+    #[test]
+    fn test_validate_no_fields() {
+        let dp = DataPoint::new("cpu", 1000);
+        assert_eq!(dp.validate().unwrap_err(), DataPointError::NoFields);
+    }
+
+    #[test]
+    fn test_validate_nan_float() {
+        let dp = DataPoint::new("cpu", 1000).with_field("value", FieldValue::Float(f64::NAN));
+        let err = dp.validate().unwrap_err();
+        assert!(matches!(err, DataPointError::InvalidFloatValue { .. }));
+    }
+
+    #[test]
+    fn test_validate_infinite_float() {
+        let dp = DataPoint::new("cpu", 1000).with_field("value", FieldValue::Float(f64::INFINITY));
+        let err = dp.validate().unwrap_err();
+        assert!(matches!(err, DataPointError::InvalidFloatValue { .. }));
+    }
+
+    #[test]
+    fn test_validate_no_tags_is_valid() {
+        let dp = DataPoint::new("cpu", 1000).with_field("usage", FieldValue::Float(0.5));
+        assert!(dp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_multiple_fields() {
+        let dp = DataPoint::new("cpu", 1000)
+            .with_tag("host", "s1")
+            .with_field("usage", FieldValue::Float(0.5))
+            .with_field("count", FieldValue::Integer(42));
+        assert!(dp.validate().is_ok());
     }
 }

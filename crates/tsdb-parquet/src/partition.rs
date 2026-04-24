@@ -124,7 +124,10 @@ impl PartitionManager {
             }
         }
 
-        *self.known_partitions.lock().unwrap() = partitions;
+        *self
+            .known_partitions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = partitions;
         Ok(())
     }
 
@@ -162,7 +165,10 @@ impl PartitionManager {
     /// 确保分区目录存在 (不存在则创建)
     pub fn ensure_partition(&self, date: NaiveDate) -> Result<PathBuf> {
         {
-            let partitions = self.known_partitions.lock().unwrap();
+            let partitions = self
+                .known_partitions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(info) = partitions.get(&date) {
                 return Ok(info.dir.clone());
             }
@@ -185,7 +191,10 @@ impl PartitionManager {
             is_hot,
         };
 
-        self.known_partitions.lock().unwrap().insert(date, info);
+        self.known_partitions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(date, info);
 
         info!("created partition {} (hot={})", dir_name, is_hot);
         Ok(dir)
@@ -195,7 +204,7 @@ impl PartitionManager {
     pub fn get_partition_dir(&self, date: NaiveDate) -> Option<PathBuf> {
         self.known_partitions
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&date)
             .map(|i| i.dir.clone())
     }
@@ -204,7 +213,7 @@ impl PartitionManager {
     pub fn get_partitions_in_range(&self, start: NaiveDate, end: NaiveDate) -> Vec<PartitionInfo> {
         self.known_partitions
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .range(start..=end)
             .map(|(_, v)| v.clone())
             .collect()
@@ -221,14 +230,19 @@ impl PartitionManager {
         let expired: Vec<NaiveDate> = self
             .known_partitions
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .keys()
             .filter(|&&d| d < cutoff)
             .copied()
             .collect();
 
         for date in expired {
-            if let Some(info) = self.known_partitions.lock().unwrap().remove(&date) {
+            if let Some(info) = self
+                .known_partitions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&date)
+            {
                 info!("dropping expired partition: {}", info.dir.display());
                 if info.dir.exists() {
                     fs::remove_dir_all(&info.dir).map_err(|e| {
@@ -268,7 +282,12 @@ impl PartitionManager {
 
     /// 删除指定日期的分区
     pub fn remove_partition(&self, date: NaiveDate) -> Result<()> {
-        if let Some(info) = self.known_partitions.lock().unwrap().remove(&date) {
+        if let Some(info) = self
+            .known_partitions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&date)
+        {
             if info.dir.exists() {
                 fs::remove_dir_all(&info.dir).map_err(|e| {
                     TsdbParquetError::Partition(format!("failed to remove partition: {}", e))
@@ -276,6 +295,22 @@ impl PartitionManager {
             }
         }
         Ok(())
+    }
+
+    pub fn list_measurements(&self) -> Vec<String> {
+        let mut measurements = std::collections::HashSet::new();
+        if let Ok(entries) = fs::read_dir(&self.base_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.starts_with(CF_PREFIX) {
+                    let measurement = name.trim_start_matches(CF_PREFIX).to_string();
+                    measurements.insert(measurement);
+                }
+            }
+        }
+        let mut result: Vec<String> = measurements.into_iter().collect();
+        result.sort();
+        result
     }
 
     /// 判断日期是否为热数据

@@ -82,7 +82,10 @@ impl TsdbTableProvider {
         })
     }
 
-    fn load_data_parquet(&self, projection: Option<&Vec<usize>>) -> Result<Vec<arrow::record_batch::RecordBatch>> {
+    fn load_data_parquet(
+        &self,
+        projection: Option<&Vec<usize>>,
+    ) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         let config = PartitionConfig::default();
         let pm = PartitionManager::new(&self.base_dir, config)?;
         let reader = TsdbParquetReader::new(Arc::new(pm));
@@ -97,7 +100,9 @@ impl TsdbTableProvider {
         let end = 4_102_444_800_000_000i64;
 
         let batches = match &proj_columns {
-            Some(cols) => reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice()))?,
+            Some(cols) => {
+                reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice()))?
+            }
             None => reader.read_range_arrow(&self.measurement, start, end, None)?,
         };
 
@@ -114,8 +119,10 @@ impl TsdbTableProvider {
                     datafusion::logical_expr::Operator::GtEq => {
                         if let Expr::Column(col) = binary.left.as_ref() {
                             if col.name() == "timestamp" {
-                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
-                                    binary.right.as_ref()
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(
+                                    Some(v),
+                                    _,
+                                )) = binary.right.as_ref()
                                 {
                                     start = Some(*v);
                                 }
@@ -125,8 +132,10 @@ impl TsdbTableProvider {
                     datafusion::logical_expr::Operator::LtEq => {
                         if let Expr::Column(col) = binary.left.as_ref() {
                             if col.name() == "timestamp" {
-                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
-                                    binary.right.as_ref()
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(
+                                    Some(v),
+                                    _,
+                                )) = binary.right.as_ref()
                                 {
                                     end = Some(*v);
                                 }
@@ -136,8 +145,10 @@ impl TsdbTableProvider {
                     datafusion::logical_expr::Operator::Gt => {
                         if let Expr::Column(col) = binary.left.as_ref() {
                             if col.name() == "timestamp" {
-                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
-                                    binary.right.as_ref()
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(
+                                    Some(v),
+                                    _,
+                                )) = binary.right.as_ref()
                                 {
                                     start = Some(*v + 1);
                                 }
@@ -147,8 +158,10 @@ impl TsdbTableProvider {
                     datafusion::logical_expr::Operator::Lt => {
                         if let Expr::Column(col) = binary.left.as_ref() {
                             if col.name() == "timestamp" {
-                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(Some(v), _)) =
-                                    binary.right.as_ref()
+                                if let Expr::Literal(ScalarValue::TimestampMicrosecond(
+                                    Some(v),
+                                    _,
+                                )) = binary.right.as_ref()
                                 {
                                     end = Some(*v - 1);
                                 }
@@ -209,7 +222,9 @@ impl TableProvider for TsdbTableProvider {
             let end = end_micros.unwrap_or(4_102_444_800_000_000i64);
 
             let result = match &proj_columns {
-                Some(cols) => reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice())),
+                Some(cols) => {
+                    reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice()))
+                }
                 None => reader.read_range_arrow(&self.measurement, start, end, None),
             };
 
@@ -226,7 +241,9 @@ impl TableProvider for TsdbTableProvider {
                     let proj_indices: Vec<usize> = projection
                         .unwrap()
                         .iter()
-                        .filter_map(|&idx| batch.schema().index_of(self.schema.field(idx).name()).ok())
+                        .filter_map(|&idx| {
+                            batch.schema().index_of(self.schema.field(idx).name()).ok()
+                        })
                         .collect();
                     if proj_indices.is_empty() {
                         Ok(batch)
@@ -262,7 +279,9 @@ impl TableProvider for TsdbTableProvider {
         };
 
         if limited_batches.is_empty() {
-            let partitions = vec![vec![arrow::record_batch::RecordBatch::new_empty(projected_schema.clone())]];
+            let partitions = vec![vec![arrow::record_batch::RecordBatch::new_empty(
+                projected_schema.clone(),
+            )]];
             let mem_table = MemTable::try_new(projected_schema, partitions)?;
             return mem_table.scan(state, None, filters, limit).await;
         }
@@ -334,7 +353,12 @@ mod tests {
     fn test_extract_timestamp_range_with_gte() {
         use datafusion::logical_expr::{col, lit};
 
-        let filters = vec![col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None)))];
+        let filters = vec![
+            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(
+                Some(1_000_000),
+                None,
+            ))),
+        ];
         let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
         assert_eq!(start, Some(1_000_000));
         assert!(end.is_none());
@@ -344,7 +368,12 @@ mod tests {
     fn test_extract_timestamp_range_with_lte() {
         use datafusion::logical_expr::{col, lit};
 
-        let filters = vec![col("timestamp").lt_eq(lit(ScalarValue::TimestampMicrosecond(Some(5_000_000), None)))];
+        let filters = vec![
+            col("timestamp").lt_eq(lit(ScalarValue::TimestampMicrosecond(
+                Some(5_000_000),
+                None,
+            ))),
+        ];
         let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
         assert!(start.is_none());
         assert_eq!(end, Some(5_000_000));
@@ -355,8 +384,14 @@ mod tests {
         use datafusion::logical_expr::{col, lit};
 
         let filters = vec![
-            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1_000_000), None))),
-            col("timestamp").lt_eq(lit(ScalarValue::TimestampMicrosecond(Some(5_000_000), None))),
+            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(
+                Some(1_000_000),
+                None,
+            ))),
+            col("timestamp").lt_eq(lit(ScalarValue::TimestampMicrosecond(
+                Some(5_000_000),
+                None,
+            ))),
         ];
         let (start, end) = TsdbTableProvider::extract_timestamp_range(&filters);
         assert_eq!(start, Some(1_000_000));

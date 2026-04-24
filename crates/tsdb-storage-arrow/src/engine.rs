@@ -1,8 +1,11 @@
-use std::sync::Arc;
 use crate::buffer::{AsyncWriteBuffer, WriteBuffer};
 use crate::config::ArrowStorageConfig;
 use crate::error::{Result, TsdbStorageArrowError};
+use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tsdb_arrow::schema::{DataPoint, Tags};
 use tsdb_datafusion::engine::DataFusionQueryEngine;
 use tsdb_parquet::compaction::{CompactionConfig, ParquetCompactor};
@@ -32,7 +35,8 @@ pub struct ArrowStorageEngine {
     async_writer: AsyncWriteBuffer,
     query_engine: DataFusionQueryEngine,
     _config: ArrowStorageConfig,
-    base_dir: PathBuf,
+    _base_dir: PathBuf,
+    known_measurements: std::sync::Mutex<HashSet<String>>,
 }
 
 impl ArrowStorageEngine {
@@ -50,12 +54,9 @@ impl ArrowStorageEngine {
         };
 
         let partition_manager = Arc::new(PartitionManager::new(&path, partition_config)?);
-        let reader =
-            TsdbParquetReader::new(partition_manager.clone());
-        let compactor = ParquetCompactor::new(
-            partition_manager.clone(),
-            CompactionConfig::default(),
-        );
+        let reader = TsdbParquetReader::new(partition_manager.clone());
+        let compactor =
+            ParquetCompactor::new(partition_manager.clone(), CompactionConfig::default());
 
         let wal = if config.wal_enabled {
             let wal_dir = path.join("wal");
@@ -85,7 +86,8 @@ impl ArrowStorageEngine {
             async_writer,
             query_engine,
             _config: config,
-            base_dir: path,
+            _base_dir: path,
+            known_measurements: std::sync::Mutex::new(HashSet::new()),
         })
     }
 
@@ -97,10 +99,13 @@ impl ArrowStorageEngine {
             wal.append(WALEntryType::Insert, &payload)?;
         }
         self.async_writer.write(dp)?;
+        self.known_measurements
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dp.measurement.clone());
         Ok(())
     }
 
-    /// 批量写入数据点
     pub fn write_batch(&self, datapoints: &[DataPoint]) -> Result<()> {
         if let Some(ref wal) = self.wal {
             for dp in datapoints {
@@ -111,6 +116,10 @@ impl ArrowStorageEngine {
             }
         }
         self.async_writer.write_batch(datapoints)?;
+        let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| e.into_inner());
+        for dp in datapoints {
+            measurements.insert(dp.measurement.clone());
+        }
         Ok(())
     }
 
@@ -123,7 +132,9 @@ impl ArrowStorageEngine {
         end_micros: i64,
     ) -> Result<Vec<DataPoint>> {
         self.async_writer.flush()?;
-        let points = self.reader.read_range(measurement, tags, start_micros, end_micros)?;
+        let points = self
+            .reader
+            .read_range(measurement, tags, start_micros, end_micros)?;
         Ok(points)
     }
 
@@ -146,7 +157,9 @@ impl ArrowStorageEngine {
         projection: Option<&[String]>,
     ) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         self.async_writer.flush()?;
-        let batches = self.reader.read_range_arrow(measurement, start_micros, end_micros, projection)?;
+        let batches =
+            self.reader
+                .read_range_arrow(measurement, start_micros, end_micros, projection)?;
         Ok(batches)
     }
 
@@ -195,9 +208,86 @@ impl Drop for ArrowStorageEngine {
     }
 }
 
+impl tsdb_arrow::StorageEngine for ArrowStorageEngine {
+    fn write(&self, dp: &DataPoint) -> tsdb_arrow::engine::EngineResult<()> {
+        ArrowStorageEngine::write(self, dp)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn write_batch(&self, datapoints: &[DataPoint]) -> tsdb_arrow::engine::EngineResult<()> {
+        ArrowStorageEngine::write_batch(self, datapoints)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn read_range(
+        &self,
+        measurement: &str,
+        tags: &Tags,
+        start: i64,
+        end: i64,
+    ) -> tsdb_arrow::engine::EngineResult<Vec<DataPoint>> {
+        ArrowStorageEngine::read_range(self, measurement, tags, start, end)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn get_point(
+        &self,
+        measurement: &str,
+        tags: &Tags,
+        timestamp: i64,
+    ) -> tsdb_arrow::engine::EngineResult<Option<DataPoint>> {
+        ArrowStorageEngine::get_point(self, measurement, tags, timestamp)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn list_measurements(&self) -> Vec<String> {
+        let measurements = self.known_measurements.lock().unwrap_or_else(|e| e.into_inner());
+        let mut list: Vec<String> = measurements.iter().cloned().collect();
+        list.sort();
+        list
+    }
+
+    fn flush(&self) -> tsdb_arrow::engine::EngineResult<()> {
+        ArrowStorageEngine::flush(self)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn read_range_arrow(
+        &self,
+        measurement: &str,
+        start: i64,
+        end: i64,
+        projection: Option<&[String]>,
+    ) -> tsdb_arrow::engine::EngineResult<Vec<RecordBatch>> {
+        ArrowStorageEngine::read_range_arrow(self, measurement, start, end, projection)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn measurement_schema(&self, measurement: &str) -> Option<SchemaRef> {
+        let now = chrono::Utc::now().timestamp_micros();
+        let start = now - 365 * 86_400_000_000i64;
+        let datapoints =
+            ArrowStorageEngine::read_range(self, measurement, &Tags::new(), start, now)
+                .ok()
+                .filter(|dps| !dps.is_empty());
+        let datapoints = match datapoints {
+            Some(dps) => dps,
+            None => {
+                let future = now + 86_400_000_000i64;
+                ArrowStorageEngine::read_range(self, measurement, &Tags::new(), now, future)
+                    .ok()
+                    .filter(|dps| !dps.is_empty())?
+            }
+        };
+        Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(&datapoints))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
     use tsdb_arrow::schema::FieldValue;
 
     fn make_test_datapoints(count: usize) -> Vec<DataPoint> {
@@ -212,17 +302,19 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn test_engine_write_read() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = ArrowStorageConfig {
-            wal_enabled: false,
+    fn make_config(wal: bool) -> ArrowStorageConfig {
+        ArrowStorageConfig {
+            wal_enabled: wal,
             max_buffer_rows: 10,
             flush_interval_ms: 100,
             ..Default::default()
-        };
+        }
+    }
 
-        let engine = ArrowStorageEngine::open(dir.path(), config).unwrap();
+    #[test]
+    fn test_engine_write_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
 
         let dps = make_test_datapoints(20);
         engine.write_batch(&dps).unwrap();
@@ -242,14 +334,7 @@ mod tests {
     #[test]
     fn test_engine_single_point() {
         let dir = tempfile::tempdir().unwrap();
-        let config = ArrowStorageConfig {
-            wal_enabled: false,
-            max_buffer_rows: 10,
-            flush_interval_ms: 100,
-            ..Default::default()
-        };
-
-        let engine = ArrowStorageEngine::open(dir.path(), config).unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
 
         let dp = DataPoint::new("cpu", 1_000_000)
             .with_tag("host", "s1")
@@ -266,14 +351,7 @@ mod tests {
     #[test]
     fn test_engine_with_wal() {
         let dir = tempfile::tempdir().unwrap();
-        let config = ArrowStorageConfig {
-            wal_enabled: true,
-            max_buffer_rows: 10,
-            flush_interval_ms: 100,
-            ..Default::default()
-        };
-
-        let engine = ArrowStorageEngine::open(dir.path(), config).unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(true)).unwrap();
 
         let dps = make_test_datapoints(5);
         engine.write_batch(&dps).unwrap();
@@ -289,14 +367,7 @@ mod tests {
     #[tokio::test]
     async fn test_engine_sql_query() {
         let dir = tempfile::tempdir().unwrap();
-        let config = ArrowStorageConfig {
-            wal_enabled: false,
-            max_buffer_rows: 10,
-            flush_interval_ms: 100,
-            ..Default::default()
-        };
-
-        let engine = ArrowStorageEngine::open(dir.path(), config).unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
 
         let dps: Vec<DataPoint> = (0..50)
             .map(|i| {
@@ -314,5 +385,150 @@ mod tests {
             .await
             .unwrap();
         assert!(!result.rows.is_empty());
+    }
+
+    #[test]
+    fn test_engine_wal_recovery_after_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().to_path_buf();
+
+        let dps = make_test_datapoints(15);
+        {
+            let engine = ArrowStorageEngine::open(&wal_dir, make_config(true)).unwrap();
+            engine.write_batch(&dps).unwrap();
+            engine.flush().unwrap();
+        }
+
+        let engine2 = ArrowStorageEngine::open(&wal_dir, make_config(true)).unwrap();
+        let tags = Tags::new();
+        let result = engine2
+            .read_range("cpu", &tags, 1_000_000_000, 1_000_015_000_000)
+            .unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_engine_compaction_after_multiple_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
+
+        for batch in 0..3 {
+            let dps: Vec<DataPoint> = (0..15)
+                .map(|i| {
+                    DataPoint::new("cpu", 1_000_000_000 + (batch * 15 + i) as i64 * 1_000_000)
+                        .with_tag("host", "server01")
+                        .with_field("usage", FieldValue::Float(0.5 + i as f64 * 0.01))
+                })
+                .collect();
+            engine.write_batch(&dps).unwrap();
+            engine.flush().unwrap();
+        }
+
+        let result = engine.compact();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_engine_concurrent_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(ArrowStorageEngine::open(dir.path(), make_config(true)).unwrap());
+
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let eng = engine.clone();
+            handles.push(thread::spawn(move || {
+                let dps: Vec<DataPoint> = (0..10)
+                    .map(|i| {
+                        DataPoint::new("cpu", 1_000_000_000 + (t * 10 + i) as i64 * 1_000_000)
+                            .with_tag("host", format!("host-{}", t))
+                            .with_field("usage", FieldValue::Float(t as f64 + i as f64 * 0.1))
+                    })
+                    .collect();
+                eng.write_batch(&dps).unwrap();
+            }));
+        }
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        engine.flush().unwrap();
+        let tags = Tags::new();
+        let result = engine
+            .read_range("cpu", &tags, 1_000_000_000, 1_000_040_000_000)
+            .unwrap();
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn test_engine_read_empty_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
+
+        let tags = Tags::new();
+        let result = engine
+            .read_range("cpu", &tags, 9_999_000_000, 9_999_001_000)
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_engine_flush_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(true)).unwrap();
+
+        engine.flush().unwrap();
+        engine.flush().unwrap();
+        engine.flush().unwrap();
+    }
+
+    #[test]
+    fn test_engine_wal_sync_after_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(true)).unwrap();
+
+        let dp = DataPoint::new("cpu", 1_000_000)
+            .with_tag("host", "s1")
+            .with_field("usage", FieldValue::Float(0.5));
+
+        engine.write(&dp).unwrap();
+        engine.flush().unwrap();
+
+        let wal_path = dir.path().join("wal").join("wal-000001.log");
+        assert!(wal_path.exists());
+        let entries = TsdbWAL::recover(&wal_path).unwrap();
+        assert!(!entries.is_empty());
+    }
+
+    #[test]
+    fn test_engine_multiple_measurements() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
+
+        let cpu_dps: Vec<DataPoint> = (0..5)
+            .map(|i| {
+                DataPoint::new("cpu", 1_000_000 + i as i64 * 1_000)
+                    .with_tag("host", "s1")
+                    .with_field("usage", FieldValue::Float(0.5))
+            })
+            .collect();
+
+        let mem_dps: Vec<DataPoint> = (0..5)
+            .map(|i| {
+                DataPoint::new("mem", 1_000_000 + i as i64 * 1_000)
+                    .with_tag("host", "s1")
+                    .with_field("used", FieldValue::Float(1024.0))
+            })
+            .collect();
+
+        engine.write_batch(&cpu_dps).unwrap();
+        engine.write_batch(&mem_dps).unwrap();
+        engine.flush().unwrap();
+
+        let tags = Tags::new();
+        let cpu_result = engine.read_range("cpu", &tags, 0, 2_000_000).unwrap();
+        let mem_result = engine.read_range("mem", &tags, 0, 2_000_000).unwrap();
+        assert!(!cpu_result.is_empty());
+        assert!(!mem_result.is_empty());
     }
 }

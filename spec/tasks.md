@@ -1,579 +1,882 @@
-# TSDB2 实施任务清单
+# TSDB2 Iceberg 模拟功能 — 实施任务清单
 
-> 基于 spec.md 规格，按优先级和依赖关系排列
+> 基于 spec/spec.md 规格，按优先级和依赖关系排列
 
 ---
 
 ## 任务总览
 
-| Phase          | 名称           | 任务数       | 优先级 | 依赖 |
-| -------------- | -------------- | ------------ | ------ | ---- |
-| T1             | 单元测试增强   | 6            | P0     | 无   |
-| T2             | 压力测试增强   | 4            | P1     | T1   |
-| T3             | 集成测试增强   | 3            | P0     | T1   |
-| T4             | 真实数据生成器 | 3            | P1     | 无   |
-| T5             | CLI 子命令实现 | 6            | P0     | T1   |
-| T6             | CLI 测试覆盖   | 3            | P1     | T5   |
-| T7             | 多平台兼容性   | 3            | P2     | T1   |
-| T8             | CI/CD 增强     | 4            | P1     | T1   |
-| T9             | Flight SQL 集成| 4            | P0     | T1   |
-| **合计** |                | **36** |        |      |
+| Phase | 名称 | 任务数 | 优先级 | 依赖 |
+|-------|------|--------|--------|------|
+| P1 | Catalog + TableMetadata + Schema | 8 | P0 | 无 |
+| P2 | Snapshot + Manifest + DataFile | 8 | P0 | P1 |
+| P3 | Append 写入 + 列统计收集 | 7 | P0 | P2 |
+| P4 | Scan + 谓词下推 (三级过滤) | 7 | P0 | P3 |
+| P5 | IcebergTableProvider (DataFusion) | 6 | P0 | P4 |
+| P6 | Time Travel 查询 | 5 | P1 | P5 |
+| P7 | Compaction (Iceberg 风格) | 5 | P1 | P3 |
+| P8 | Snapshot 过期清理 | 4 | P1 | P6 |
+| P9 | Schema 演化 | 5 | P2 | P5 |
+| P10 | 分区演化 | 4 | P2 | P9 |
+| **合计** | | **59** | | |
 
 ---
 
-## T1: 单元测试增强 [P0]
+## P1: Catalog + TableMetadata + Schema [P0]
 
-### T1.1 merge.rs 独立单元测试
+### P1.1 创建 tsdb-iceberg crate 骨架
 
-**文件**: `crates/tsdb-rocksdb/src/merge.rs`
+**文件**: `crates/tsdb-iceberg/`
 
-当前状态: 0 个独立测试，merge 仅在 db.rs 的集成测试中覆盖
+- [ ] 创建 `Cargo.toml` (依赖: tsdb-arrow, tsdb-rocksdb, tsdb-parquet, rocksdb, serde, serde_json, uuid, thiserror, chrono, tracing)
+- [ ] 创建 `src/lib.rs` (crate 入口 + 重导出)
+- [ ] 创建 `src/error.rs` (IcebergError 枚举: Catalog, TableNotFound, CommitConflict, Schema, Manifest, Io, Json, Rocksdb)
+- [ ] 在 workspace `Cargo.toml` 中添加 `[patch]` 或 `[workspace.dependencies]` 条目
+- [ ] `cargo check` 编译通过
 
-- [ ] `test_full_merge_single_operand`: full_merge(空 existing, [op1]) == op1
-- [ ] `test_full_merge_multiple_operands`: full_merge(existing, [op1, op2]) 字段 union 正确
-- [ ] `test_full_merge_field_override`: 同名字段后者覆盖前者
-- [ ] `test_full_merge_5_plus_operands`: 5+ operands 合并结果与逐次合并一致
-- [ ] `test_full_merge_empty_operands`: 空 operands 不 panic
-- [ ] `test_partial_merge_returns_none`: partial_merge 始终返回 None (安全降级)
-- [ ] `test_full_merge_empty_fields_union`: 空字段集合并
+- **验收**: `cargo check -p tsdb-iceberg` 无错误
 
-- **验收**: 覆盖率 ≥85%，clippy 零警告
+### P1.2 Schema 数据结构
 
-### T1.2 snapshot.rs 独立单元测试
+**文件**: `crates/tsdb-iceberg/src/schema.rs`
 
-**文件**: `crates/tsdb-rocksdb/src/snapshot.rs`
+- [ ] 定义 `Schema` 结构体 (schema_id, fields)
+- [ ] 定义 `Field` 结构体 (id, name, required, field_type, doc, initial_default, write_default)
+- [ ] 定义 `IcebergType` 枚举 (Boolean, Int, Long, Float, Double, Decimal, Date, Time, Timestamp, Timestamptz, String, Uuid, Binary, Struct, List, Map)
+- [ ] 实现 `Schema::arrow_schema()` — Iceberg Schema → Arrow Schema 转换
+- [ ] 实现 `Schema::field_by_id()` / `field_by_name()` 查找方法
+- [ ] 实现 Serialize/Deserialize for Schema, Field, IcebergType
+- [ ] 单元测试: `test_schema_serde_roundtrip`, `test_schema_to_arrow`, `test_field_lookup`
 
-当前状态: 0 个独立测试，仅在 db.rs 的 test_db_snapshot_consistency 中覆盖
+- **验收**: Schema 结构体完整，序列化/反序列化正确，Arrow 转换正确
 
-- [ ] `test_snapshot_get_after_write_invisible`: snapshot 创建后新写入不可见
-- [ ] `test_snapshot_read_range_consistency`: snapshot 读取与 DB 直接读取在创建时刻一致
-- [ ] `test_snapshot_multiple_independent`: 多个 snapshot 互不影响
-- [ ] `test_snapshot_cross_cf_read`: 跨 CF Snapshot 读取
+### P1.3 PartitionSpec 数据结构
 
-- **验收**: 覆盖率 ≥85%
+**文件**: `crates/tsdb-iceberg/src/partition.rs`
 
-### T1.3 error.rs 全路径覆盖
+- [ ] 定义 `PartitionSpec` 结构体 (spec_id, fields)
+- [ ] 定义 `PartitionField` 结构体 (source_id, field_id, name, transform)
+- [ ] 定义 `Transform` 枚举 (Identity, Bucket, Truncate, Year, Month, Day, Hour, Void)
+- [ ] 实现 `Transform::apply()` — 对值执行 Transform
+- [ ] 实现 `PartitionSpec::partition_path()` — 生成分区路径字符串
+- [ ] 单元测试: `test_transform_day`, `test_transform_identity`, `test_partition_path`
 
-**文件**: `crates/tsdb-rocksdb/src/error.rs`
+- **验收**: PartitionSpec 和 Transform 完整，分区路径生成正确
 
-当前状态: 0 个测试
+### P1.4 TableMetadata 数据结构
 
-- [ ] `test_invalid_key_construction`: InvalidKey 变体构造和 Display
-- [ ] `test_invalid_value_construction`: InvalidValue 变体构造和 Display
-- [ ] `test_cf_not_found_construction`: CfNotFound 变体
-- [ ] `test_arrow_conversion_error_chain`: From`<TsdbArrowError>` 正确映射
-- [ ] `test_error_source_chain`: 错误链可通过 source() 追溯
+**文件**: `crates/tsdb-iceberg/src/catalog.rs` (部分)
 
-- **验收**: 覆盖率 ≥90%
+- [ ] 定义 `TableMetadata` 结构体 (format_version, table_uuid, location, last_sequence_number, last_updated_ms, last_column_id, current_schema_id, schemas, default_spec_id, partition_specs, current_snapshot_id, snapshots, snapshot_log, properties)
+- [ ] 定义 `SnapshotLogEntry` 结构体 (snapshot_id, timestamp_ms)
+- [ ] 实现 Serialize/Deserialize for TableMetadata
+- [ ] 实现 `TableMetadata::new()` — 创建空表元数据
+- [ ] 单元测试: `test_table_metadata_new`, `test_table_metadata_serde_roundtrip`
 
-### T1.4 key.rs 属性测试 (proptest)
+- **验收**: TableMetadata 结构完整，序列化正确
 
-**文件**: `crates/tsdb-rocksdb/src/key.rs`
+### P1.5 IcebergCatalog 实现
 
-当前状态: 8 个单元测试，缺少属性测试
+**文件**: `crates/tsdb-iceberg/src/catalog.rs`
 
-- [ ] 添加 `proptest` 开发依赖到 Cargo.toml
-- [ ] `proptest_key_encode_decode_roundtrip`: decode(encode(k)) == k for all k
-- [ ] `proptest_key_ordering_invariant`: encode(a) < encode(b) iff a < b
-- [ ] `proptest_prefix_encode_is_prefix`: prefix_encode(h) 是 encode(h, t) 的前缀
-- [ ] `proptest_key_size_constant`: 所有合法 key 编码后长度 = 16
+- [ ] 定义 `IcebergCatalog` 结构体 (db: rocksdb::DB, base_dir: PathBuf)
+- [ ] 实现 RocksDB CF 创建: `_catalog`, `_table_meta`, `_snapshot`, `_manifest_list`, `_manifest`, `_refs`
+- [ ] 实现 `IcebergCatalog::open(path)` — 打开/创建 Catalog
+- [ ] 实现 `IcebergCatalog::create_table(name, schema, partition_spec)` — 创建表
+- [ ] 实现 `IcebergCatalog::load_table(name)` — 加载表
+- [ ] 实现 `IcebergCatalog::drop_table(name)` — 删除表
+- [ ] 实现 `IcebergCatalog::list_tables()` — 列出所有表
+- [ ] 实现 `IcebergCatalog::rename_table(old, new)` — 重命名表
+- [ ] 单元测试: `test_catalog_create_load_table`, `test_catalog_list_tables`, `test_catalog_drop_table`, `test_catalog_rename_table`
 
-- **验收**: proptest 默认 256 cases 全部通过
+- **验收**: Catalog CRUD 全部可用，RocksDB CF 正确创建
 
-### T1.5 value.rs 属性测试 (proptest)
+### P1.6 Catalog 内部辅助方法
 
-**文件**: `crates/tsdb-rocksdb/src/value.rs`
+**文件**: `crates/tsdb-iceberg/src/catalog.rs`
 
-当前状态: 8 个单元测试，缺少属性测试
+- [ ] 实现 `load_metadata(table_name)` — 从 `_table_meta` CF 读取 TableMetadata
+- [ ] 实现 `save_metadata(table_name, metadata)` — 写入 `_table_meta` CF
+- [ ] 实现 `next_sequence_number()` — 单调递增序列号
+- [ ] 实现 Key 编码函数: `meta_key(table)`, `schema_key(table, id)`, `part_spec_key(table, id)`
+- [ ] 单元测试: `test_key_encoding`, `test_sequence_number_monotonic`
 
-- [ ] `proptest_value_encode_decode_roundtrip`: decode(encode(f)) == f for all f
-- [ ] `proptest_value_all_field_types`: Float64/Int64/Utf8/Boolean 全类型组合
-- [ ] `proptest_value_special_floats`: NaN/Inf/-Inf/0.0/-0.0 编解码保留语义
+- **验收**: 内部方法正确，Key 编码一致
 
-- **验收**: proptest 默认 256 cases 全部通过
+### P1.7 DataPoint ↔ Iceberg Schema 映射
 
-### T1.6 comparator.rs 不变量测试
+**文件**: `crates/tsdb-iceberg/src/schema.rs`
 
-**文件**: `crates/tsdb-rocksdb/src/comparator.rs`
+- [ ] 实现 `Schema::from_datapoint_schema(measurement, tags, fields)` — 从 DataPoint 结构推导 Iceberg Schema
+- [ ] 实现 `DataPoint → Arrow RecordBatch` 转换 (复用 tsdb-arrow)
+- [ ] 定义列 ID 分配规则: timestamp=1, tags 从 2 开始, fields 从 1000 开始
+- [ ] 单元测试: `test_schema_from_datapoint`, `test_column_id_assignment`
 
-当前状态: 5 个单元测试
+- **验收**: DataPoint 结构可正确映射为 Iceberg Schema
 
-- [ ] `test_comparator_transitivity`: a<b && b<c → a<c (10000 组随机数据)
-- [ ] `test_comparator_antisymmetry`: a<b → !(b<a) for all a≠b
-- [ ] `test_comparator_reflexivity`: !(a<a) for all a
-- [ ] `test_comparator_different_length_keys`: 不同长度 key 比较安全
+### P1.8 P1 集成测试
 
-- **验收**: 覆盖率 ≥95%
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
 
----
+- [ ] `test_catalog_full_lifecycle`: create_table → load_table → list → rename → drop
+- [ ] `test_catalog_persistence`: 创建 Catalog → 关闭 → 重新打开 → 数据一致
+- [ ] `test_schema_datapoint_roundtrip`: DataPoint → Schema → Arrow Schema → 兼容
+- [ ] `test_partition_spec_day_transform`: day(timestamp) 分区正确
 
-## T2: 压力测试增强 [P1]
-
-### T2.1 写入吞吐增强
-
-**文件**: `crates/tsdb-stress-rocksdb/src/write_stress.rs`
-
-当前状态: 3 个测试 (100k single, 100k batch, multi_measurement)
-
-- [ ] `stress_rocksdb_write_1M_single_thread`: 1M points, 阈值 >40K pts/s
-- [ ] `stress_rocksdb_write_batch_sizes`: 对比 batch=1/100/1000/10000 吞吐差异
-- [ ] 添加 StressTestReport 结构化输出 (JSON)
-
-- **验收**: 1M 版本在 CI 中 <120s
-
-### T2.2 并发读写增强
-
-**文件**: `crates/tsdb-stress-rocksdb/src/concurrent_stress.rs`
-
-当前状态: 3 个测试 (4_threads, merge_same_key, mixed_read_write)
-
-- [ ] `stress_concurrent_write_8_threads`: 8 线程各写 125K, 无数据丢失
-- [ ] `stress_concurrent_snapshot_consistency`: 写入中创建 snapshot, 快照一致性 100%
-
-- **验收**: 无 panic, 无数据丢失
-
-### T2.3 读取性能增强
-
-**文件**: `crates/tsdb-stress-rocksdb/src/read_stress.rs`
-
-当前状态: 3 个测试 (range_scan_100k, prefix_scan_100, cross_day_7days)
-
-- [ ] `stress_rocksdb_batched_multi_get`: 1000 keys 批量查询, P99 < 20ms
-- [ ] `stress_rocksdb_cross_day_scan_30days`: 30 天跨日期扫描无退化
-
-- **验收**: 性能不退化超过 20%
-
-### T2.4 长时间稳定性测试 (新增)
-
-**新建文件**: `crates/tsdb-stress-rocksdb/src/stability_stress.rs`
-
-- [ ] `stress_long_running_5min`: 5 分钟持续写入, 无内存泄漏
-- [ ] `stress_long_running_cf_creation`: 持续创建新 CF (模拟新日期), 无退化
-- [ ] 在 lib.rs 中添加 `pub mod stability_stress;`
-
-- **验收**: 内存稳定, 无泄漏趋势
+- **验收**: P1 全部功能集成测试通过
 
 ---
 
-## T3: 集成测试增强 [P0]
+## P2: Snapshot + Manifest + DataFile [P0]
 
-### T3.1 DataFusion + RocksDB SQL 集成
+### P2.1 Snapshot 数据结构
 
-**文件**: `crates/tsdb-integration-tests/src/rocksdb_e2e.rs`
+**文件**: `crates/tsdb-iceberg/src/snapshot.rs`
 
-当前状态: 10 个测试，缺少 SQL 查询 RocksDB 数据的测试
+- [ ] 定义 `Snapshot` 结构体 (snapshot_id, parent_snapshot_id, sequence_number, timestamp_ms, manifest_list, summary, schema_id)
+- [ ] 定义 `SnapshotSummary` 结构体 (operation, added_data_files, deleted_data_files, added_records, deleted_records, total_data_files, total_records, extra)
+- [ ] 定义 `SnapshotOperation` 枚举 (Append, Replace, Overwrite, Delete)
+- [ ] 实现 Serialize/Deserialize for Snapshot, SnapshotSummary
+- [ ] 实现 `Snapshot::new_append()` / `Snapshot::new_replace()` 构造方法
+- [ ] 单元测试: `test_snapshot_serde_roundtrip`, `test_snapshot_new_append`, `test_snapshot_new_replace`
 
-- [ ] `test_e2e_rocksdb_sql_select`: 通过 DataFusion SQL 查询 RocksDB 数据
-- [ ] `test_e2e_rocksdb_sql_aggregation`: AVG/SUM/COUNT/MIN/MAX 聚合正确
-- [ ] `test_e2e_rocksdb_sql_where_tag`: WHERE tag 条件过滤正确
+- **验收**: Snapshot 结构完整，序列化正确
 
-- **实现路径**: TsdbRocksDb.read_range() → ArrowAdapter.read_range_arrow() → DataFusionQueryEngine.register_from_datapoints() → execute SQL
-- **验收**: SQL 查询结果与手动计算一致
+### P2.2 DataFile 数据结构
 
-### T3.2 引擎对比测试
+**文件**: `crates/tsdb-iceberg/src/manifest.rs`
 
-**文件**: `crates/tsdb-integration-tests/src/rocksdb_e2e.rs`
+- [ ] 定义 `DataFile` 结构体 (content, file_path, file_format, partition, record_count, file_size_in_bytes, column_sizes, value_counts, null_value_counts, lower_bounds, upper_bounds, split_offsets, sort_order_id)
+- [ ] 定义 `DataContentType` 枚举 (Data, PositionDeletes, EqualityDeletes)
+- [ ] 定义 `PartitionData` 类型 (BTreeMap<i32, serde_json::Value>)
+- [ ] 实现 `DataFile` 的列统计访问方法
+- [ ] 实现 Serialize/Deserialize for DataFile
+- [ ] 单元测试: `test_data_file_serde_roundtrip`, `test_data_file_bounds_access`
 
-- [ ] `test_e2e_parquet_vs_rocksdb_consistency`: 同一批数据分别写入两者，查询结果一致
-- [ ] `test_e2e_rocksdb_performance_baseline`: 记录 RocksDB E2E 性能基线
+- **验收**: DataFile 结构完整，列统计可访问
 
-- **验收**: Parquet vs RocksDB 查询结果完全一致
+### P2.3 ManifestEntry 数据结构
 
-### T3.3 Arrow 适配空结果测试
+**文件**: `crates/tsdb-iceberg/src/manifest.rs`
 
-**文件**: `crates/tsdb-integration-tests/src/rocksdb_e2e.rs`
+- [ ] 定义 `ManifestEntry` 结构体 (status, snapshot_id, sequence_number, file_sequence_number, data_file)
+- [ ] 定义 `EntryStatus` 枚举 (Existing=0, Added=1, Deleted=2)
+- [ ] 定义 `ManifestMeta` 结构体 (manifest_id, schema_id, partition_spec_id, added_files_count, existing_files_count, deleted_files_count, partitions_summary)
+- [ ] 实现 Serialize/Deserialize for ManifestEntry, ManifestMeta
+- [ ] 单元测试: `test_manifest_entry_serde_roundtrip`, `test_entry_status_values`
 
-- [ ] `test_e2e_rocksdb_empty_result_arrow`: 空结果 → 空 RecordBatch (schema 正确, num_rows=0)
+- **验收**: ManifestEntry 和 ManifestMeta 结构完整
 
-- **验收**: 空 RecordBatch 的 schema 与非空结果一致
+### P2.4 Manifest 读写
 
----
+**文件**: `crates/tsdb-iceberg/src/manifest.rs`
 
-## T4: 真实数据生成器 [P1]
+- [ ] 实现 `ManifestWriter` — 将 ManifestEntry 列表写入 RocksDB `_manifest` CF
+- [ ] 实现 `ManifestReader` — 从 RocksDB `_manifest` CF 读取 ManifestEntry 列表
+- [ ] 实现 `ManifestListWriter` — 将 ManifestMeta 列表写入 `_manifest_list` CF
+- [ ] 实现 `ManifestListReader` — 从 `_manifest_list` CF 读取 ManifestMeta 列表
+- [ ] Key 编码: `{table}\x00{manifest_id}\x00{file_idx}` (manifest), `{table}\x00{snap_id}\x00{seq}` (manifest_list)
+- [ ] 单元测试: `test_manifest_write_read_roundtrip`, `test_manifest_list_write_read_roundtrip`
 
-### T4.1 DevOps 数据生成器
+- **验收**: Manifest 读写正确，Key 编码一致
 
-**文件**: `crates/tsdb-test-utils/src/data_gen.rs`
+### P2.5 Snapshot 管理
 
-- [ ] `make_devops_datapoints_enhanced`: 支持 hosts/ranges/measurements 可配置
-- [ ] 支持周期性模式 (白天高、夜间低)
-- [ ] 支持异常注入 (spike/dropout/gap)
+**文件**: `crates/tsdb-iceberg/src/snapshot.rs`
 
-- **参数**: device_count, hours, measurements, anomaly_rate
-- **验收**: 生成的 Tags/Fields/DataPoint 结构合法
+- [ ] 实现 `SnapshotManager` — 管理快照的创建、提交、查询
+- [ ] 实现 `create_snapshot(table, operation, manifest_entries, parent_snapshot_id)` — 创建新快照
+- [ ] 实现 `commit_snapshot(catalog, table, old_meta, new_snapshot)` — 提交快照到 RocksDB
+- [ ] 实现 `load_snapshot(catalog, table, snapshot_id)` — 加载指定快照
+- [ ] 实现 `load_current_snapshot(catalog, table)` — 加载当前快照
+- [ ] 单元测试: `test_create_snapshot`, `test_commit_snapshot`, `test_load_snapshot`
 
-### T4.2 IoT 数据生成器
+- **验收**: 快照创建和提交正确
 
-**文件**: `crates/tsdb-test-utils/src/data_gen.rs`
+### P2.6 Refs (Branch/Tag) 管理
 
-- [ ] `make_iot_datapoints`: 高频传感器数据
-- [ ] 支持设备分组 (区域/类型)
-- [ ] 支持离线模拟 (随机 gap)
+**文件**: `crates/tsdb-iceberg/src/snapshot.rs`
 
-- **参数**: devices, duration_days, offline_rate
-- **验收**: 大规模 (100K devices) 不 OOM
+- [ ] 定义 `Ref` 结构体 (snapshot_id, type: main/branch/tag, min_snapshots_to_keep, max_snapshot_age_ms, max_ref_age_ms)
+- [ ] 实现 `RefsManager` — 管理快照引用
+- [ ] 实现 `create_ref(catalog, table, ref_name, snapshot_id, ref_type)` — 创建引用
+- [ ] 实现 `load_ref(catalog, table, ref_name)` — 加载引用
+- [ ] Key 编码: `{table}\x00{ref_name}` → `_refs` CF
+- [ ] 单元测试: `test_create_ref`, `test_load_ref`, `test_main_ref_auto_created`
 
-### T4.3 金融 K线生成器
+- **验收**: 引用管理正确，main 引用自动创建
 
-**文件**: `crates/tsdb-test-utils/src/data_gen.rs`
+### P2.7 原子提交协议
 
-- [ ] `make_financial_ohlcv`: OHLCV K线数据
-- [ ] 支持几何布朗运动价格模型
-- [ ] 时间戳对齐到 bar interval
+**文件**: `crates/tsdb-iceberg/src/commit.rs`
 
-- **参数**: tickers, years, bar_interval, volatility
-- **验收**: high >= low, open/close 在 [low, high]
+- [ ] 定义 `CommitConflict` 错误类型
+- [ ] 实现 `atomic_commit(catalog, table, old_meta, new_meta, new_entries)` — 乐观并发提交
+- [ ] 使用 RocksDB WriteBatch 保证原子性:
+  - 写入新 Snapshot → `_snapshot` CF
+  - 写入新 ManifestList → `_manifest_list` CF
+  - 写入新 Manifest entries → `_manifest` CF
+  - 更新 TableMetadata → `_table_meta` CF
+- [ ] 实现冲突检测: `current.last_updated_ms != old.last_updated_ms` → CommitConflict
+- [ ] 实现重试逻辑: 冲突时重新读取并重试 (最多 3 次)
+- [ ] 单元测试: `test_atomic_commit_success`, `test_atomic_commit_conflict_retry`, `test_atomic_commit_batch_integrity`
 
----
+- **验收**: 原子提交正确，冲突检测和重试有效
 
-## T5: CLI 子命令实现 [P0]
+### P2.8 P2 集成测试
 
-### T5.1 status 子命令
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
 
-**文件**: `crates/tsdb-cli/src/main.rs`
+- [ ] `test_snapshot_lifecycle`: 创建表 → 创建快照 → 提交 → 加载 → 验证
+- [ ] `test_manifest_write_read`: 写入 ManifestEntry → 读取 → 验证
+- [ ] `test_atomic_commit_full`: 完整提交流程 (Snapshot + Manifest + Metadata)
+- [ ] `test_concurrent_commit_conflict`: 两个并发提交 → 一个成功一个冲突重试
+- [ ] `test_refs_management`: 创建 main/branch/tag 引用 → 查询
 
-当前状态: 占位 println
-
-- [ ] 实现 `execute_status(data_dir, storage_engine)`:
-  - 打开 TsdbRocksDb
-  - 调用 `list_ts_cfs()` + `stats()` + `cf_stats()`
-  - 格式化输出到终端
-- [ ] 添加 `--storage-engine` 参数支持 (rocksdb / parquet)
-
-- **验收**: `tsdb-cli status --data-dir ./data` 输出格式化状态信息
-
-### T5.2 query 子命令
-
-**文件**: `crates/tsdb-cli/src/main.rs`
-
-当前状态: 占位 println
-
-- [ ] 实现 `execute_query(data_dir, sql, format)`:
-  - 打开 TsdbRocksDb
-  - 读取所有数据 → ArrowAdapter → RecordBatch
-  - 注册到 DataFusionQueryEngine → execute SQL
-  - 输出格式: json (默认) / table / csv
-- [ ] 添加 `--sql` 参数
-- [ ] 添加 `--format` 参数 (json/table/csv)
-
-- **验收**: `tsdb-cli query --sql "SELECT * FROM cpu"` 返回正确结果
-
-### T5.3 compact 子命令
-
-**文件**: `crates/tsdb-cli/src/main.rs`
-
-当前状态: 占位 println
-
-- [ ] 实现 `execute_compact(data_dir, cf_name)`:
-  - 打开 TsdbRocksDb
-  - 如果指定 `--cf`: compact_cf(cf_name)
-  - 否则: 遍历 list_ts_cfs() 逐个 compact
-- [ ] 添加 `--cf` 可选参数
-
-- **验收**: `tsdb-cli compact --data-dir ./data` 成功执行
-
-### T5.4 bench 子命令增强
-
-**文件**: `crates/tsdb-cli/src/main.rs`
-
-当前状态: 有基础 `run_bench()` 实现
-
-- [ ] 增强 `run_bench()`:
-  - write 模式: 生成数据 → write_batch → 报告 ops/sec
-  - read 模式: 写入数据 → range_scan → 报告 latency
-  - 输出 JSON 报告
-- [ ] 添加 `--points` 参数 (默认 100000)
-- [ ] 添加 `--workers` 参数 (默认 1)
-
-- **验收**: `tsdb-cli bench write --points 100000` 输出性能报告
-
-### T5.5 import 子命令
-
-**文件**: `crates/tsdb-cli/src/main.rs`
-
-当前状态: 占位 println
-
-- [ ] 实现 JSON 格式导入:
-  - 解析 JSON 文件 → Vec`<DataPoint>`
-  - write_batch() 批量写入
-- [ ] 实现 Line Protocol 格式导入 (可选, P2)
-- [ ] 实现 CSV 格式导入 (可选, P2)
-- [ ] 添加 `--file` 参数
-- [ ] 添加 `--format` 参数 (json/lp/csv)
-- [ ] 添加 `--batch-size` 参数 (默认 10000)
-
-- **验收**: `tsdb-cli import --file test.json --format json` 成功导入
-
-### T5.6 archive 子命令
-
-**文件**: `crates/tsdb-cli/src/main.rs`
-
-当前状态: 占位 println
-
-- [ ] 实现 `archive create`: 遍历过期 CF → 导出 SST 文件
-- [ ] 实现 `archive restore`: 从 SST 文件恢复
-- [ ] 实现 `archive list`: 列出归档目录中的文件
-- [ ] 添加 `--older-than` 参数 (默认 30d)
-- [ ] 添加 `--output-dir` 参数
-
-- **验收**: archive create → archive list → archive restore 全链路
+- **验收**: P2 全部功能集成测试通过
 
 ---
 
-## T6: CLI 测试覆盖 [P1]
+## P3: Append 写入 + 列统计收集 [P0]
 
-### T6.1 CLI 集成测试
+### P3.1 IcebergTable 基础
 
-**新建文件**: `crates/tsdb-cli/tests/cli_tests.rs`
+**文件**: `crates/tsdb-iceberg/src/table.rs`
 
-- [ ] `test_cli_status_output`: status 子命令输出包含 "Column Families"
-- [ ] `test_cli_query_output`: query 子命令输出 JSON 格式
-- [ ] `test_cli_compact_success`: compact 子命令成功执行
-- [ ] `test_cli_bench_write_output`: bench write 输出性能报告
-- [ ] `test_cli_import_json`: import JSON 文件成功
+- [ ] 定义 `IcebergTable` 结构体 (catalog: Arc<IcebergCatalog>, name: String, metadata: TableMetadata)
+- [ ] 实现 `IcebergTable::name()` / `schema()` / `partition_spec()` / `current_snapshot()` / `snapshots()` / `history()`
+- [ ] 单元测试: `test_table_accessors`
 
-- **验收**: 所有 CLI 测试通过
+- **验收**: IcebergTable 基础访问方法正确
 
-### T6.2 CLI 参数解析测试
+### P3.2 列统计收集
 
-**文件**: `crates/tsdb-cli/tests/cli_tests.rs`
+**文件**: `crates/tsdb-iceberg/src/stats.rs`
 
-- [ ] `test_cli_help_output`: `--help` 显示所有子命令
-- [ ] `test_cli_version_output`: `--version` 显示版本号
-- [ ] `test_cli_missing_data_dir`: 缺少 --data-dir 报错
-- [ ] `test_cli_unknown_subcommand`: 未知子命令报错
+- [ ] 实现 `collect_column_stats(record_batch: &RecordBatch, schema: &Schema) -> ColumnStats`
+- [ ] 定义 `ColumnStats` 结构体 (column_sizes, value_counts, null_value_counts, lower_bounds, upper_bounds)
+- [ ] 实现 `value_to_iceberg_bytes()` — 将值编码为 Iceberg 统计字节格式
+- [ ] 支持类型: Int/Long/Float/Double/Timestamp/String/Boolean
+- [ ] 单元测试: `test_collect_stats_numeric`, `test_collect_stats_string`, `test_collect_stats_nulls`, `test_collect_stats_empty_batch`
 
-- **验收**: 错误消息友好
+- **验收**: 列统计收集正确，支持所有基本类型
 
-### T6.3 CLI 配置加载测试
+### P3.3 Parquet 文件写入 (Iceberg 风格)
 
-**文件**: `crates/tsdb-cli/tests/cli_tests.rs`
+**文件**: `crates/tsdb-iceberg/src/table.rs`
 
-- [ ] `test_cli_config_file_loading`: tsdb.toml 加载成功
-- [ ] `test_cli_default_config`: 无配置文件时使用默认值
+- [ ] 实现 `write_parquet_file(table, datapoints, partition) -> DataFile`:
+  - DataPoint → Arrow RecordBatch (复用 tsdb-arrow)
+  - RecordBatch → Parquet 文件 (复用 tsdb-parquet writer)
+  - 收集列统计 → 构建 DataFile
+  - 文件路径: `{location}/data/{partition_path}/part-{uuid}.parquet`
+- [ ] 实现 `build_partition_data(datapoints, partition_spec) -> PartitionData`
+- [ ] 单元测试: `test_write_parquet_file`, `test_build_partition_data`
 
-- **验收**: 配置加载正确
+- **验收**: Parquet 文件写入正确，DataFile 统计完整
 
----
+### P3.4 Append 写入
 
-## T7: 多平台兼容性 [P2]
+**文件**: `crates/tsdb-iceberg/src/table.rs`
 
-### T7.1 CPU 特性检测模块
+- [ ] 实现 `IcebergTable::append(datapoints)`:
+  1. 按 partition_spec 分组 DataPoint
+  2. 每组写入 Parquet 文件 → 收集 DataFile
+  3. 创建 ManifestEntry (status=Added)
+  4. 创建新 Snapshot (operation=append)
+  5. 原子提交 (WriteBatch)
+- [ ] 处理空表首次 append (current_snapshot_id = -1)
+- [ ] 更新 TableMetadata: last_sequence_number, last_updated_ms, current_snapshot_id, snapshots, snapshot_log
+- [ ] 单元测试: `test_append_to_empty_table`, `test_append_multiple_times`, `test_append_with_partition`
 
-**新建文件**: `crates/tsdb-rocksdb/src/cpu_features.rs`
+- **验收**: Append 写入正确，快照链完整
 
-- [ ] `detect_cpu_features()`: 运行时检测 AVX2/NEON/SSE4.2
-- [ ] `optimized_config()`: 根据 CPU 特性返回最优 RocksDbConfig
-- [ ] ARM: 较小 block_size (4KB), 较大 write_buffer
-- [ ] x86_64: 启用 SIMD 友好选项
-- [ ] 在 lib.rs 中添加 `pub mod cpu_features;`
+### P3.5 WriteBuffer 批量写入优化
 
-- **验收**: 在 x86_64 和 aarch64 上均能正常工作
+**文件**: `crates/tsdb-iceberg/src/table.rs`
 
-### T7.2 RISC-V cross-compile CI
+- [ ] 实现 `IcebergTable::append_batch(datapoints)` — 大批量写入优化
+- [ ] 按 target_file_size (默认 128MB) 切分数据为多个 Parquet 文件
+- [ ] 单个 WriteBatch 包含所有新 ManifestEntry + Snapshot + Metadata
+- [ ] 单元测试: `test_append_batch_large_dataset`, `test_append_batch_file_size_limit`
 
-**文件**: `.github/workflows/ci.yml`
+- **验收**: 批量写入正确，文件大小合理
 
-- [ ] 添加 riscv64gc-unknown-linux-gnu nightly check job
-- [ ] 识别并修复 RISC-V 不兼容代码 (如有)
+### P3.6 DataPoint 读取验证
 
-- **验收**: nightly 编译通过 (允许部分失败)
+**文件**: `crates/tsdb-iceberg/src/table.rs`
 
-### T7.3 Docker 多架构构建
+- [ ] 实现 `IcebergTable::read_data_file(data_file) -> Vec<RecordBatch>` — 读取 Parquet 文件
+- [ ] 验证 append 后数据可读: 写入 → 读取 → 比对
+- [ ] 单元测试: `test_read_data_file`, `test_append_then_read_roundtrip`
 
-**新建文件**: `Dockerfile` + `docker-bake.hcl`
+- **验收**: 写入的数据可正确读回
 
-- [ ] 多阶段构建 (build + runtime)
-- [ ] 支持: linux/amd64, linux/arm64, linux/arm/v7
+### P3.7 P3 集成测试
 
-- **验收**: `docker buildx bake` 成功构建 3 个架构
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
 
----
+- [ ] `test_append_full_lifecycle`: create_table → append → 读取验证
+- [ ] `test_append_multiple_snapshots`: 多次 append → 快照链正确
+- [ ] `test_append_partitioned_data`: 按天分区 → 多分区文件正确
+- [ ] `test_column_stats_accuracy`: 列统计与实际数据一致
+- [ ] `test_append_large_batch`: 100K DataPoint 批量写入
 
-## T8: CI/CD 增强 [P1]
-
-### T8.1 覆盖率阈值门禁
-
-**文件**: `.github/workflows/ci.yml`
-
-当前状态: coverage job 存在但无 `--fail-under` 阈值
-
-- [ ] 添加 `--fail-under 80` 到 tarpaulin 命令
-- [ ] 排除 tsdb-stress-rocksdb
-- [ ] 上传 Codecov
-
-- **验收**: 覆盖率 <80% 时 CI 失败
-
-### T8.2 性能回归检测
-
-**新建文件**: `.github/workflows/bench.yml`
-
-- [ ] criterion benchmark baseline 存储
-- [ ] PR vs main 性能对比
-- [ ] 回归阈值: >10% warning, >25% fail
-
-- **验收**: 主要基准测试有回归保护
-
-### T8.3 压力测试 Gate
-
-**新建文件**: `.github/workflows/stress.yml`
-
-- [ ] 仅 main 分支 push 时运行
-- [ ] 运行 tsdb-stress-rocksdb 测试
-- [ ] 超时限制: 每个 stress test ≤10min
-- [ ] 结果存档为 artifact
-
-- **验收**: main 分支 push 自动运行压力测试
-
-### T8.4 Dependabot + 安全审计
-
-**新建文件**: `.github/dependabot.yml`
-
-- [ ] weekly 依赖更新 PR
-- [ ] 保持已有 audit-check job
-
-- **验收**: 安全漏洞自动检测
+- **验收**: P3 全部功能集成测试通过
 
 ---
 
-## T9: Flight SQL 集成 [P0]
+## P4: Scan + 谓词下推 (三级过滤) [P0]
 
-### T9.1 Flight SQL 服务端完善
+### P4.1 IcebergScanBuilder
 
-**文件**: `crates/tsdb-flight/src/server.rs`
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
 
-当前状态: ✅ 已实现 do_get/do_put/do_action/list_actions/get_flight_info/get_schema/poll_flight_info
+- [ ] 定义 `IcebergScanBuilder` 结构体 (table, snapshot_id, predicate, projection, case_sensitive)
+- [ ] 实现 `predicate(expr)` / `projection(field_ids)` / `case_insensitive()` / `build()` 方法
+- [ ] `build()` 返回 `IcebergScan`
+- [ ] 单元测试: `test_scan_builder_default`, `test_scan_builder_with_predicate`
 
-- [x] `TsdbFlightServer::new()`: 创建 Flight 服务端
-- [x] `do_get`: SQL 查询 → Arrow Flight Data 流式返回
-- [x] `do_put`: Arrow Flight Data 流式写入 → RocksDB
-- [x] `do_action("list_measurements")`: 列出所有 measurement
-- [x] `list_actions`: 返回支持的 action 列表
-- [x] `get_flight_info`: 返回查询的 FlightInfo (schema + endpoint)
-- [x] `get_schema`: 返回查询的 SchemaResult
-- [x] `poll_flight_info`: 长查询轮询
+- **验收**: ScanBuilder 配置正确
 
-- **验收**: 所有 Flight RPC 方法可调用, Arrow IPC 编解码正确
+### P4.2 IcebergScan 文件规划
 
-### T9.2 TsdbTableProvider 优化
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
 
-**文件**: `crates/tsdb-datafusion/src/table_provider.rs`
+- [ ] 定义 `IcebergScan` 结构体 (data_files, predicate, projection)
+- [ ] 实现 `plan()` — 返回匹配的数据文件列表
+- [ ] 实现文件规划核心逻辑:
+  1. 加载 current_snapshot → manifest_list
+  2. 遍历 manifest_list → 加载 manifest entries
+  3. 过滤 DELETED 状态的 entry
+  4. 应用谓词下推过滤
+- [ ] 单元测试: `test_scan_plan_all_files`, `test_scan_plan_with_no_predicate`
 
-当前状态: ✅ 已实现谓词下推+列投影+Limit下推+Parquet原生扫描
+- **验收**: 文件规划正确，返回匹配的 DataFile 列表
 
-- [x] 列投影下推: 只读取查询所需的列
-- [x] 谓词下推: timestamp 范围条件下推到 Parquet 扫描层
-- [x] Limit 下推: 在扫描层直接截断数据
-- [x] Parquet 原生扫描: 直接读取 Parquet 为 RecordBatch, 避免 DataPoint 中间转换
-- [x] `extract_timestamp_range()`: 从 DataFusion Expr 中提取时间范围
+### P4.3 Level 1: Manifest 级别过滤
 
-- **验收**: 查询性能相比无优化版本提升 3x+
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
 
-### T9.3 Flight E2E 集成测试
+- [ ] 实现 `manifest_matches_predicate(manifest_meta, predicate)` — 使用分区统计过滤
+- [ ] 利用 ManifestMeta 的 partitions_summary (contains_null, lower_bound, upper_bound)
+- [ ] 跳过不包含匹配分区的整个 Manifest
+- [ ] 单元测试: `test_manifest_filter_day_partition`, `test_manifest_filter_no_match`
 
-**文件**: `crates/tsdb-integration-tests/src/flight_e2e.rs`
+- **验收**: Manifest 级别过滤正确跳过不匹配的 Manifest
 
-当前状态: ✅ 18 个测试全部通过
+### P4.4 Level 2: DataFile 级别过滤
 
-- [x] `test_flight_server_creation`: 服务端创建
-- [x] `test_flight_server_with_rocksdb`: RocksDB 集成
-- [x] `test_flight_list_actions`: list_actions RPC
-- [x] `test_flight_do_get_sql_query`: SQL 查询 via do_get
-- [x] `test_flight_get_flight_info`: get_flight_info RPC
-- [x] `test_flight_get_schema`: get_schema RPC
-- [x] `test_flight_do_action_list_measurements`: list_measurements action
-- [x] `test_datafusion_sql_aggregation`: DataFusion 聚合查询
-- [x] `test_datafusion_sql_filter`: DataFusion 过滤查询
-- [x] `test_datafusion_sql_group_by`: DataFusion 分组查询
-- [x] `test_datafusion_sql_limit`: DataFusion LIMIT 查询
-- [x] `test_arrow_roundtrip`: Arrow 编解码往返
-- [x] `test_arrow_projection`: Arrow 列投影
-- [x] `test_parquet_write_read_roundtrip`: Parquet 读写往返
-- [x] `test_parquet_range_read`: Parquet 范围查询
-- [x] `test_rocksdb_write_and_query`: RocksDB 写入+查询
-- [x] `test_rocksdb_multi_get`: RocksDB 批量查询
-- [x] `test_full_pipeline_rocksdb_to_datafusion`: 全链路: RocksDB→Parquet→DataFusion
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
 
-- **验收**: 18 个测试全部通过
+- [ ] 实现 `file_matches_predicate(data_file, predicate)` — 使用列统计过滤
+- [ ] 利用 DataFile 的 lower_bounds / upper_bounds
+- [ ] 支持: 等值条件 (col = val), 范围条件 (col > val, col < val), IN 条件
+- [ ] 跳过列值范围不匹配的数据文件
+- [ ] 单元测试: `test_file_filter_timestamp_range`, `test_file_filter_tag_equals`, `test_file_filter_no_match`
 
-### T9.4 Flight gRPC 端到端测试
+- **验收**: DataFile 级别过滤正确跳过不匹配的文件
 
-**文件**: `crates/tsdb-integration-tests/src/flight_grpc_e2e.rs`
+### P4.5 Level 3: Parquet RowGroup 级别过滤
 
-当前状态: 待实现
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
 
-- [ ] 启动 tonic gRPC 服务器
-- [ ] 使用 Arrow Flight 客户端连接
-- [ ] 测试 do_get SQL 查询
-- [ ] 测试 do_put 数据写入
-- [ ] 测试 get_flight_info 元数据查询
-- [ ] 测试 do_action list_measurements
+- [ ] 实现 `row_group_matches_predicate(parquet_metadata, row_group_idx, predicate)` — 使用 RowGroup 统计
+- [ ] 读取 Parquet 文件的元数据 (parquet::file::metadata::ParquetMetaData)
+- [ ] 利用 RowGroup 的 column_chunk 统计 (min/max)
+- [ ] 跳过不匹配的 RowGroup
+- [ ] 单元测试: `test_row_group_filter`, `test_row_group_filter_all_skipped`
 
-- **验收**: gRPC 端到端测试通过
+- **验收**: RowGroup 级别过滤正确跳过不匹配的 RowGroup
+
+### P4.6 IcebergScan 执行
+
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
+
+- [ ] 实现 `IcebergScan::execute()` — 执行扫描返回 RecordBatch
+- [ ] 流程: plan() → 遍历 data_files → 读取 Parquet → RowGroup 过滤 → 合并 RecordBatch
+- [ ] 支持列投影: 只读取 projection 指定的列
+- [ ] 实现 `IcebergScan::to_record_batches()` — 同步版本
+- [ ] 单元测试: `test_scan_execute_full`, `test_scan_execute_with_projection`, `test_scan_execute_with_predicate`
+
+- **验收**: Scan 执行正确，三级过滤生效
+
+### P4.7 P4 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_scan_full_lifecycle`: append 数据 → scan → 验证结果
+- [ ] `test_scan_predicate_pushdown_timestamp`: 时间范围谓词 → 跳过不匹配文件
+- [ ] `test_scan_predicate_pushdown_tag`: 标签等值谓词 → 跳过不匹配文件
+- [ ] `test_scan_projection`: 只查询部分列 → 只读对应 Parquet 列
+- [ ] `test_scan_three_level_filter`: 三级过滤全部生效 → 验证跳过率
+- [ ] `test_scan_empty_result`: 谓词无匹配 → 返回空 RecordBatch
+
+- **验收**: P4 全部功能集成测试通过
+
+---
+
+## P5: IcebergTableProvider (DataFusion) [P0]
+
+### P5.1 IcebergTableProvider 结构
+
+**文件**: `crates/tsdb-iceberg/src/table_provider.rs` (或 tsdb-datafusion 中)
+
+- [ ] 定义 `IcebergTableProvider` 结构体 (table: Arc<Mutex<IcebergTable>>, schema: SchemaRef)
+- [ ] 实现 `IcebergTableProvider::new(table)` — 从 IcebergTable 创建 Provider
+- [ ] 实现 Iceberg Schema → DataFusion Schema 转换
+- [ ] 单元测试: `test_provider_creation`, `test_provider_schema`
+
+- **验收**: Provider 创建正确，Schema 转换正确
+
+### P5.2 TableProvider trait 实现
+
+**文件**: `crates/tsdb-iceberg/src/table_provider.rs`
+
+- [ ] 实现 `TableProvider::as_any()`
+- [ ] 实现 `TableProvider::schema()`
+- [ ] 实现 `TableProvider::table_type()` → Base
+- [ ] 实现 `TableProvider::scan()`:
+  - 将 DataFusion filters 转为 Iceberg 谓词
+  - 调用 IcebergScanBuilder → IcebergScan
+  - 创建 IcebergScanExec (ExecutionPlan)
+- [ ] 单元测试: `test_table_provider_scan`
+
+- **验收**: TableProvider trait 实现完整
+
+### P5.3 IcebergScanExec (ExecutionPlan)
+
+**文件**: `crates/tsdb-iceberg/src/scan_exec.rs`
+
+- [ ] 定义 `IcebergScanExec` 结构体 (data_files, predicate, projection, schema, limit)
+- [ ] 实现 `ExecutionPlan` trait:
+  - `schema()` → 投影后的 Schema
+  - `children()` → 空
+  - `with_new_children()` → 自身
+  - `execute()` → 创建 IcebergScanStream
+- [ ] 单元测试: `test_scan_exec_creation`, `test_scan_exec_schema`
+
+- **验收**: ExecutionPlan 实现正确
+
+### P5.4 IcebergScanStream (FileStream)
+
+**文件**: `crates/tsdb-iceberg/src/scan_exec.rs`
+
+- [ ] 定义 `IcebergScanStream` — 实现 `SendableRecordBatchStream`
+- [ ] 实现流式读取: 逐文件读取 Parquet → 逐 RowGroup 过滤 → yield RecordBatch
+- [ ] 支持列投影: 只解码 projection 指定的列
+- [ ] 支持 limit: 读够行数后停止
+- [ ] 单元测试: `test_scan_stream_single_file`, `test_scan_stream_multiple_files`, `test_scan_stream_with_limit`
+
+- **验收**: 流式读取正确，支持投影和 limit
+
+### P5.5 DataFusion filters → Iceberg 谓词转换
+
+**文件**: `crates/tsdb-iceberg/src/table_provider.rs`
+
+- [ ] 实现 `filters_to_predicate(filters: &[Expr]) -> Option<Predicate>`
+- [ ] 支持: Eq, Gt, GtEq, Lt, LtEq, InList, And, Or, Not
+- [ ] 定义 `Predicate` 枚举 (AlwaysTrue, And, Or, Not, Eq, Gt, Lt, InList, IsNull, IsNotNull)
+- [ ] 单元测试: `test_filter_to_predicate_eq`, `test_filter_to_predicate_range`, `test_filter_to_predicate_and_or`
+
+- **验收**: DataFusion 过滤条件正确转为 Iceberg 谓词
+
+### P5.6 P5 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_datafusion_sql_select`: `SELECT * FROM table` 全表查询
+- [ ] `test_datafusion_sql_where_timestamp`: `WHERE timestamp > ...` 时间过滤
+- [ ] `test_datafusion_sql_where_tag`: `WHERE tag_host = 'server1'` 标签过滤
+- [ ] `test_datafusion_sql_aggregation`: `AVG/sum/count` 聚合查询
+- [ ] `test_datafusion_sql_group_by`: `GROUP BY` 分组查询
+- [ ] `test_datafusion_sql_limit`: `LIMIT` 限制行数
+- [ ] `test_datafusion_predicate_pushdown`: 验证谓词下推生效 (减少读取文件数)
+
+- **验收**: DataFusion SQL 查询 Iceberg 表全部正确
+
+---
+
+## P6: Time Travel 查询 [P1]
+
+### P6.1 scan_at_snapshot 实现
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::scan_at_snapshot(snapshot_id)` — 指定快照查询
+- [ ] 实现 `IcebergTable::scan_at_timestamp(timestamp_ms)` — 指定时间点查询
+- [ ] 实现 `IcebergTable::snapshots()` — 返回快照历史
+- [ ] 实现 `IcebergTable::snapshot_by_id(id)` / `snapshot_by_timestamp(ts)` 查找方法
+- [ ] 单元测试: `test_scan_at_snapshot`, `test_scan_at_timestamp`
+
+- **验收**: Time Travel 查询正确
+
+### P6.2 快照历史查询
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::history()` — 返回 SnapshotLogEntry 列表
+- [ ] 实现 `IcebergTable::snapshot_diff(from_id, to_id)` — 两个快照之间的差异
+- [ ] 差异包含: added_files, deleted_files, added_records, deleted_records
+- [ ] 单元测试: `test_history`, `test_snapshot_diff`
+
+- **验收**: 快照历史和差异查询正确
+
+### P6.3 Rollback 实现
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::rollback_to_snapshot(snapshot_id)` — 回滚到指定快照
+- [ ] 实现 `IcebergTable::rollback_to_timestamp(timestamp_ms)` — 回滚到指定时间点
+- [ ] Rollback = 创建新 Snapshot 指向旧快照的数据文件
+- [ ] 原子提交更新 current_snapshot_id
+- [ ] 单元测试: `test_rollback_to_snapshot`, `test_rollback_then_query`
+
+- **验收**: Rollback 正确，回滚后查询数据正确
+
+### P6.4 Branch/Tag 查询
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::scan_ref(ref_name)` — 按引用名查询
+- [ ] 实现 `IcebergTable::create_branch(name, snapshot_id)` — 创建分支
+- [ ] 实现 `IcebergTable::create_tag(name, snapshot_id)` — 创建标签
+- [ ] 单元测试: `test_scan_branch`, `test_scan_tag`
+
+- **验收**: Branch/Tag 查询正确
+
+### P6.5 P6 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_time_travel_full`: append → append → 查询快照1 → 查询快照2 → 验证不同
+- [ ] `test_time_travel_by_timestamp`: 按时间点查询 → 数据正确
+- [ ] `test_rollback_and_query`: append → append → rollback → 查询 → 验证回滚
+- [ ] `test_branch_tag_query`: 创建 branch/tag → 按引用查询 → 正确
+- [ ] `test_snapshot_diff`: 两个快照差异 → added/deleted 文件正确
+
+- **验收**: P6 全部功能集成测试通过
+
+---
+
+## P7: Compaction (Iceberg 风格) [P1]
+
+### P7.1 小文件选择策略
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::find_compaction_candidates(target_size)` — 选择小文件
+- [ ] 策略: file_size < target_file_size (默认 128MB) 的文件
+- [ ] 按分区分组候选文件
+- [ ] 单元测试: `test_find_compaction_candidates`
+
+- **验收**: 正确选择需要合并的小文件
+
+### P7.2 文件合并
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `compact_partition(table, partition, data_files) -> DataFile`:
+  - 读取所有小文件 → 合并 RecordBatch
+  - 写入新的大 Parquet 文件
+  - 收集列统计 → 构建 DataFile
+- [ ] 单元测试: `test_compact_partition`
+
+- **验收**: 合并后文件数据完整，统计正确
+
+### P7.3 Compaction 提交
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::compact()`:
+  1. 查找小文件候选
+  2. 按分区合并
+  3. 创建新 Manifest:
+     - 旧文件标记为 DELETED
+     - 新文件标记为 ADDED
+  4. 创建新 Snapshot (operation=replace)
+  5. 原子提交
+- [ ] 单元测试: `test_compact_commit`, `test_compact_snapshot_operation`
+
+- **验收**: Compaction 提交正确，快照操作为 replace
+
+### P7.4 Compaction 后验证
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 验证 compact 后查询结果不变
+- [ ] 验证 compact 后文件数减少
+- [ ] 验证 compact 后总数据量不变
+- [ ] 单元测试: `test_compact_query_consistency`, `test_compact_file_count_reduction`
+
+- **验收**: Compaction 后数据一致性
+
+### P7.5 P7 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_compact_full_lifecycle`: 多次小批量 append → compact → 查询一致
+- [ ] `test_compact_multiple_partitions`: 多分区分别 compact
+- [ ] `test_compact_with_concurrent_reads`: compact 中查询不阻塞
+- [ ] `test_compact_snapshot_history`: compact 后快照历史完整
+
+- **验收**: P7 全部功能集成测试通过
+
+---
+
+## P8: Snapshot 过期清理 [P1]
+
+### P8.1 过期快照选择
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::expire_snapshots(older_than_ms, min_snapshots)`:
+  - 选择 timestamp_ms < older_than_ms 的快照
+  - 保留至少 min_snapshots 个快照
+  - 不删除被 branch/tag 引用的快照
+- [ ] 单元测试: `test_expire_snapshots_by_age`, `test_expire_snapshots_min_retention`
+
+- **验收**: 正确选择过期快照
+
+### P8.2 孤立文件清理
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::remove_orphan_files(older_than_ms)`:
+  - 扫描数据目录中的所有文件
+  - 与当前有效快照引用的文件对比
+  - 删除不被任何快照引用的文件
+- [ ] 单元测试: `test_remove_orphan_files`
+
+- **验收**: 孤立文件正确清理
+
+### P8.3 过期提交验证
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 验证过期后当前快照仍可查询
+- [ ] 验证过期后快照历史被正确截断
+- [ ] 验证过期后 TableMetadata 更新正确
+- [ ] 单元测试: `test_expire_then_query`, `test_expire_metadata_update`
+
+- **验收**: 过期后系统状态正确
+
+### P8.4 P8 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_expire_snapshots_full`: 多次 append → expire → 验证
+- [ ] `test_expire_with_branch_protection`: branch 引用的快照不被过期
+- [ ] `test_orphan_file_cleanup`: compact → expire → 孤立文件清理
+- [ ] `test_expire_then_time_travel`: 过期后旧快照不可查询
+
+- **验收**: P8 全部功能集成测试通过
+
+---
+
+## P9: Schema 演化 [P2]
+
+### P9.1 SchemaChange 定义
+
+**文件**: `crates/tsdb-iceberg/src/schema.rs`
+
+- [ ] 定义 `SchemaChange` 枚举:
+  - AddField { parent_id, name, field_type, required, write_default }
+  - DeleteField { field_id }
+  - RenameField { field_id, new_name }
+  - PromoteType { field_id, new_type } (int→long, float→double)
+  - MoveField { field_id, new_position }
+- [ ] 单元测试: `test_schema_change_variants`
+
+- **验收**: SchemaChange 枚举完整
+
+### P9.2 Schema 演化应用
+
+**文件**: `crates/tsdb-iceberg/src/schema.rs`
+
+- [ ] 实现 `Schema::apply_change(change) -> Schema` — 应用单个变更
+- [ ] 实现 `Schema::apply_changes(changes) -> Schema` — 应用多个变更
+- [ ] 新 Schema 分配新的 schema_id
+- [ ] last_column_id 递增 (AddField 时)
+- [ ] 单元测试: `test_apply_add_field`, `test_apply_delete_field`, `test_apply_rename_field`, `test_apply_promote_type`
+
+- **验收**: Schema 变更应用正确
+
+### P9.3 update_schema 实现
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::update_schema(changes)`:
+  1. 应用 SchemaChange → 新 Schema
+  2. 更新 TableMetadata: current_schema_id, schemas, last_column_id
+  3. 原子提交
+- [ ] 单元测试: `test_update_schema_commit`, `test_update_schema_history`
+
+- **验收**: Schema 更新提交正确
+
+### P9.4 Schema 演化后查询兼容
+
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
+
+- [ ] Scan 时根据每个 DataFile 关联的 schema_id 选择正确的 Schema
+- [ ] 新增列: 旧文件中该列返回 null
+- [ ] 删除列: 旧文件中该列被忽略
+- [ ] 重命名列: 旧文件中用旧名映射到新名
+- [ ] 单元测试: `test_scan_after_add_field`, `test_scan_after_delete_field`, `test_scan_after_rename_field`
+
+- **验收**: Schema 演化后查询兼容
+
+### P9.5 P9 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_schema_evolution_add_field`: 添加字段 → 旧数据新字段为 null
+- [ ] `test_schema_evolution_delete_field`: 删除字段 → 旧数据该列忽略
+- [ ] `test_schema_evolution_rename_field`: 重命名字段 → 查询正确
+- [ ] `test_schema_evolution_promote_type`: int→long → 查询正确
+- [ ] `test_schema_evolution_multiple_changes`: 多次变更 → 历史完整
+
+- **验收**: P9 全部功能集成测试通过
+
+---
+
+## P10: 分区演化 [P2]
+
+### P10.1 PartitionSpec 变更
+
+**文件**: `crates/tsdb-iceberg/src/partition.rs`
+
+- [ ] 实现 `PartitionSpec::evolve(changes) -> PartitionSpec` — 分区规范演化
+- [ ] 定义 `PartitionSpecChange` 枚举 (AddField, RemoveField, RenameField)
+- [ ] 新 PartitionSpec 分配新的 spec_id
+- [ ] 单元测试: `test_partition_spec_evolve`
+
+- **验收**: 分区规范演化正确
+
+### P10.2 update_partition_spec 实现
+
+**文件**: `crates/tsdb-iceberg/src/table.rs`
+
+- [ ] 实现 `IcebergTable::update_partition_spec(new_spec)`:
+  1. 验证新 PartitionSpec 兼容性
+  2. 更新 TableMetadata: default_spec_id, partition_specs
+  3. 原子提交
+- [ ] 单元测试: `test_update_partition_spec`
+
+- **验收**: 分区规范更新提交正确
+
+### P10.3 分区演化后查询兼容
+
+**文件**: `crates/tsdb-iceberg/src/scan.rs`
+
+- [ ] Scan 时根据每个 DataFile 关联的 partition_spec_id 选择正确的 PartitionSpec
+- [ ] 旧分区数据仍可按旧分区规范查询
+- [ ] 新分区数据按新分区规范查询
+- [ ] 单元测试: `test_scan_after_partition_evolution`
+
+- **验收**: 分区演化后查询兼容
+
+### P10.4 P10 集成测试
+
+**文件**: `crates/tsdb-iceberg/src/` 或 `tests/`
+
+- [ ] `test_partition_evolution_full`: 旧分区写入 → 演化 → 新分区写入 → 查询全部正确
+- [ ] `test_partition_evolution_compact`: 演化后 compact → 数据一致
+- [ ] `test_partition_evolution_time_travel`: 演化后 Time Travel → 旧分区数据正确
+- [ ] `test_partition_evolution_schema_compat`: 分区演化 + Schema 演化同时进行
+
+- **验收**: P10 全部功能集成测试通过
 
 ---
 
 ## 执行顺序
 
 ```
-T1 (单元测试增强)
-├── T1.1 merge.rs 测试
-├── T1.2 snapshot.rs 测试
-├── T1.3 error.rs 测试
-├── T1.4 key.rs proptest
-├── T1.5 value.rs proptest
-└── T1.6 comparator.rs 不变量
+P1 (Catalog + TableMetadata + Schema)
+├── P1.1 crate 骨架
+├── P1.2 Schema 数据结构
+├── P1.3 PartitionSpec 数据结构
+├── P1.4 TableMetadata 数据结构
+├── P1.5 IcebergCatalog 实现
+├── P1.6 Catalog 辅助方法
+├── P1.7 DataPoint ↔ Schema 映射
+└── P1.8 P1 集成测试
      │
-     ├──▶ T2 (压力测试增强)
-     │    ├── T2.1 写入吞吐
-     │    ├── T2.2 并发读写
-     │    ├── T2.3 读取性能
-     │    └── T2.4 长时间稳定性
+     ▼
+P2 (Snapshot + Manifest + DataFile)
+├── P2.1 Snapshot 数据结构
+├── P2.2 DataFile 数据结构
+├── P2.3 ManifestEntry 数据结构
+├── P2.4 Manifest 读写
+├── P2.5 Snapshot 管理
+├── P2.6 Refs 管理
+├── P2.7 原子提交协议
+└── P2.8 P2 集成测试
      │
-     ├──▶ T3 (集成测试增强)
-     │    ├── T3.1 SQL 集成
-     │    ├── T3.2 引擎对比
-     │    └── T3.3 空结果测试
+     ▼
+P3 (Append 写入 + 列统计)
+├── P3.1 IcebergTable 基础
+├── P3.2 列统计收集
+├── P3.3 Parquet 文件写入
+├── P3.4 Append 写入
+├── P3.5 WriteBuffer 批量优化
+├── P3.6 DataPoint 读取验证
+└── P3.7 P3 集成测试
      │
-     ├──▶ T9 (Flight SQL 集成) ✅ 大部分完成
-     │    ├── T9.1 Flight SQL 服务端 ✅
-     │    ├── T9.2 TsdbTableProvider 优化 ✅
-     │    ├── T9.3 Flight E2E 测试 ✅
-     │    └── T9.4 Flight gRPC E2E (待实现)
-     │
-     ├──▶ T5 (CLI 子命令实现)
-     │    ├── T5.1 status
-     │    ├── T5.2 query
-     │    ├── T5.3 compact
-     │    ├── T5.4 bench 增强
-     │    ├── T5.5 import
-     │    └── T5.6 archive
+     ├──▶ P4 (Scan + 谓词下推)
+     │    ├── P4.1 IcebergScanBuilder
+     │    ├── P4.2 IcebergScan 文件规划
+     │    ├── P4.3 Level 1: Manifest 过滤
+     │    ├── P4.4 Level 2: DataFile 过滤
+     │    ├── P4.5 Level 3: RowGroup 过滤
+     │    ├── P4.6 IcebergScan 执行
+     │    └── P4.7 P4 集成测试
      │         │
-     │         └──▶ T6 (CLI 测试覆盖)
-     │              ├── T6.1 集成测试
-     │              ├── T6.2 参数解析测试
-     │              └── T6.3 配置加载测试
+     │         ▼
+     │    P5 (IcebergTableProvider)
+     │    ├── P5.1 Provider 结构
+     │    ├── P5.2 TableProvider trait
+     │    ├── P5.3 IcebergScanExec
+     │    ├── P5.4 IcebergScanStream
+     │    ├── P5.5 filters → 谓词转换
+     │    └── P5.6 P5 集成测试
+     │         │
+     │         ├──▶ P6 (Time Travel)
+     │         │    └── P6.1~P6.5
+     │         │         │
+     │         │         └──▶ P8 (Snapshot 过期)
+     │         │              └── P8.1~P8.4
+     │         │
+     │         └──▶ P9 (Schema 演化)
+     │              └── P9.1~P9.5
+     │                   │
+     │                   └──▶ P10 (分区演化)
+     │                        └── P10.1~P10.4
      │
-     └──▶ T8 (CI/CD 增强)
-          ├── T8.1 覆盖率门禁
-          ├── T8.2 性能回归
-          ├── T8.3 压力测试 Gate
-          └── T8.4 Dependabot
-
-T4 (真实数据生成器) — 独立，可与 T1 并行
-T7 (多平台兼容性) — 低优先级，T1 完成后启动
+     └──▶ P7 (Compaction)
+          └── P7.1~P7.5
 ```
 
 ---
 
-## 辅助函数提取 (跨任务)
+## 与现有系统集成
 
-stress-rocksdb 各模块存在大量重复辅助函数，应提取到 tsdb-test-utils:
+### 集成点
 
-**文件**: `crates/tsdb-test-utils/src/data_gen.rs`
+| 集成点 | 说明 | 依赖 |
+|--------|------|------|
+| tsdb-arrow | DataPoint ↔ Arrow RecordBatch 转换 | P1 |
+| tsdb-rocksdb | RocksDB 引擎 (CF 管理、WriteBatch) | P1 |
+| tsdb-parquet | Parquet 文件读写、列统计 | P3 |
+| tsdb-datafusion | IcebergTableProvider 注册 | P5 |
+| tsdb-flight | Flight SQL 查询 Iceberg 表 | P5 |
+| tsdb-cli | CLI 支持 Iceberg 表操作 | P5 |
 
-- [ ] 提取 `make_tags()`, `make_fields()`, `ts_today()`, `ts_days_ago()` 到 tsdb-test-utils
-- [ ] 各 stress 模块改为 `use tsdb_test_utils::*`
-- [ ] 删除各模块中的重复辅助函数
+### CLI 扩展 (P5 完成后)
 
-- **验收**: stress 测试仍全部通过
+- [ ] `tsdb-cli iceberg create-table --name cpu --schema ...`
+- [ ] `tsdb-cli iceberg append --name cpu --file data.json`
+- [ ] `tsdb-cli iceberg scan --name cpu --sql "SELECT * FROM cpu"`
+- [ ] `tsdb-cli iceberg snapshots --name cpu`
+- [ ] `tsdb-cli iceberg compact --name cpu`
+- [ ] `tsdb-cli iceberg rollback --name cpu --snapshot-id 123`

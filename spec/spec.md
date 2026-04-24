@@ -1,526 +1,523 @@
-# TSDB2 完整规格说明书
+# TSDB2 Iceberg Table Format Simulation Spec
 
-> 基于 `Cargo.toml` (工作区结构)、`kimi-rocksdb.md` (架构设计)、`plan.md` (实施计划) 三份参考文档编制
+## 1. 目标
 
----
+在 TSDB2 中使用 RocksDB 模拟 Apache Iceberg 表格式核心概念，实现 Snapshot 隔离、Manifest 元数据管理、Schema 演化、Time Travel 查询等能力，并直接对接 Parquet 数据文件，形成 **RocksDB 元数据 + Parquet 数据** 的 Iceberg 兼容架构。
 
-## 1. 项目概览
+## 2. 设计原则
 
-### 1.1 项目定位
+| 原则 | 说明 |
+|------|------|
+| **Iceberg 兼容** | 元数据模型遵循 Iceberg V2 规范，支持未来对接 Iceberg 生态 |
+| **RocksDB 元数据** | 所有元数据 (Snapshot/Manifest/Schema) 存储在 RocksDB CF 中，利用其事务和原子性 |
+| **Parquet 数据** | 数据文件使用 Parquet 格式，支持列投影和谓词下推 |
+| **渐进式实现** | 先实现核心 (Snapshot/Manifest/Scan)，再扩展 (Schema 演化/Delete 文件) |
+| **TDD 驱动** | 每个模块先写测试，再实现功能 |
 
-TSDB2 是一个基于 RocksDB 的时序数据库引擎，对标 Arrow + Parquet + DataFusion 技术栈，核心优势：
+## 3. Iceberg 核心概念映射
 
-- **RocksDB LSM-Tree**：高吞吐实时写入、天然覆盖写/墓碑删除
-- **Arrow 列式内存**：零拷贝扫描、SIMD 加速
-- **Column Family 分离**：索引与数据分离、按日期分区 CF
-- **三级 TTL 清理**：天级 drop_cf → 范围级 delete_range → 行级 CompactionFilter
-
-### 1.2 工作区结构 (Cargo.toml)
-
-```
-tsdb2/
-├── crates/
-│   ├── tsdb-arrow/           # Arrow 数据模型 + DataPoint↔RecordBatch 转换
-│   ├── tsdb-parquet/         # Parquet 存储引擎 (写入/读取/Compaction/WAL)
-│   ├── tsdb-storage-arrow/   # Arrow 存储引擎 (WriteBuffer + Parquet)
-│   ├── tsdb-datafusion/      # DataFusion SQL 查询引擎 (谓词下推+列投影)
-│   ├── tsdb-flight/          # Arrow Flight SQL 服务端 (gRPC 远程查询)
-│   ├── tsdb-rocksdb/         # RocksDB 存储引擎 (核心 crate)
-│   ├── tsdb-cli/             # CLI 工具 (子命令框架已有，业务逻辑占位)
-│   ├── tsdb-test-utils/      # 测试工具 (数据生成器 + 断言)
-│   ├── tsdb-integration-tests/ # 集成测试 (Parquet E2E + RocksDB E2E + Flight E2E)
-│   ├── tsdb-stress/          # Parquet 压力测试
-│   ├── tsdb-stress-rocksdb/  # RocksDB 压力测试
-│   └── tsdb-bench/           # Criterion 基准测试
-├── .github/workflows/ci.yml # CI 流水线
-└── spec/                     # 规格文档
-```
-
-### 1.3 当前实现状态
-
-| Crate | 源文件数 | 代码行数 | 单元测试 | 集成测试 | 压力测试 | 状态 |
-|-------|---------|---------|---------|---------|---------|------|
-| `tsdb-rocksdb` | 13 | ~2418 | 62 | 10 (rocksdb_e2e) | 15 | ✅ 核心完成 |
-| `tsdb-arrow` | 5 | ~786 | 5+ | - | - | ✅ 基础完成 |
-| `tsdb-parquet` | 8 | ~1437 | 多 | - | - | ✅ 基础完成 |
-| `tsdb-datafusion` | 6 | ~565 | 17 | - | - | ✅ 谓词下推+列投影 |
-| `tsdb-flight` | 3 | ~300 | 0 | 18 (flight_e2e) | - | ✅ Flight SQL 完成 |
-| `tsdb-storage-arrow` | 5 | ~591 | 多 | 7 (e2e) | 5 | ✅ Parquet 完成 |
-| `tsdb-cli` | 1 | 202 | 0 | - | - | ⚠️ 框架占位 |
-| `tsdb-test-utils` | 3 | ~181 | 0 | - | - | ✅ 工具层 |
-| `tsdb-integration-tests` | 3 | ~477 | - | 40 | - | ✅ 含 Flight E2E |
-| `tsdb-stress-rocksdb` | 6 | ~595 | - | - | 15 | ✅ 基础完成 |
-
----
-
-## 2. 架构设计 (基于 kimi-rocksdb.md)
-
-### 2.1 分层架构
+### 3.1 Iceberg 元数据层级
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    查询层 (Query Layer)                       │
-│  CLI / HTTP API / Flight SQL → DataFusion SQL → Optimizer   │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│              Flight SQL 服务层 (tsdb-flight)                  │
-│  Arrow Flight gRPC: do_get(查询) / do_put(写入) / do_action  │
-│  协议: Arrow IPC → RecordBatch 流式传输                      │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                  执行引擎 (Execution Engine)                  │
-│  Arrow RecordBatch Stream: Filter → Project → Aggregate     │
-│  优化: 谓词下推(timestamp范围) + 列投影 + Limit下推          │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                  存储引擎 (Storage Engine)                    │
-│  ┌──────────────────────┐  ┌──────────────────────────────┐ │
-│  │  RocksDB Engine      │  │  Parquet Engine              │ │
-│  │  CF: ts_{m}_{date}   │  │  Partition: date-based       │ │
-│  │  CF: _series_meta    │  │  Compaction: hot/cold tiers  │ │
-│  │  Key: hash+timestamp │  │  Format: Parquet columnar    │ │
-│  │  实时读写+列投影下推  │  │  批量分析+高压缩比归档       │ │
-│  └──────────────────────┘  └──────────────────────────────┘ │
-│  双引擎互通: DataPoint 共享模型 + JSONL 归档桥接             │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                  文件系统层 (File System)                     │
-│  WAL Files / SST Files / Parquet Files / Object Storage     │
-└─────────────────────────────────────────────────────────────┘
+Catalog (表入口)
+  └── Metadata File (JSON, 表级元数据)
+        ├── Schema (表结构定义, 支持 ID 引用和演化)
+        ├── Partition Spec (分区规范, 支持 day(timestamp) 等 Transform)
+        ├── Sort Order (排序规范)
+        └── Snapshots[] (快照列表)
+              └── Snapshot (某时刻的表状态)
+                    ├── manifest_list (Avro/Parquet, 清单文件列表)
+                    │     └── Manifest File (Avro/Parquet, 数据文件列表)
+                    │           ├── Data File Entry (status=ADDED/EXISTING/DELETED)
+                    │           │     ├── file_path (Parquet 文件路径)
+                    │           │     ├── partition (分区值元组)
+                    │           │     ├── record_count (行数)
+                    │           │     ├── file_size_in_bytes (文件大小)
+                    │           │     ├── lower_bounds / upper_bounds (列统计)
+                    │           │     └── column_sizes / null_value_counts (列指标)
+                    │           └── Delete File Entry (V2, 行级删除)
+                    └── summary (operation=append/replace/overwrite/delete)
 ```
 
-### 2.2 RocksDB 引擎核心设计
+### 3.2 RocksDB CF 映射方案
 
-#### 2.2.1 Key 编码 (key.rs)
+| Iceberg 概念 | RocksDB 存储 | CF 名称 | Key 编码 | Value 编码 |
+|-------------|-------------|---------|---------|-----------|
+| Catalog | 全局元数据 | `_catalog` | `table_name` (Utf8) | TableMetadata (JSON) |
+| Table Metadata | 表级元数据 | `_table_meta` | `{table}\x00meta` | TableMetadata JSON |
+| Schema History | Schema 版本链 | `_table_meta` | `{table}\x00schema\x00{id}` | Schema JSON |
+| Partition Spec | 分区规范 | `_table_meta` | `{table}\x00part_spec\x00{id}` | PartitionSpec JSON |
+| Snapshot | 快照元数据 | `_snapshot` | `{table}\x00snap\x00{id}` | Snapshot JSON |
+| Manifest List | 清单文件列表 | `_manifest_list` | `{table}\x00{snap_id}\x00{seq}` | ManifestEntry JSON |
+| Manifest Entry | 数据文件条目 | `_manifest` | `{table}\x00{manifest_id}\x00{file_idx}` | DataFileEntry JSON |
+| Branch/Tag | 快照引用 | `_refs` | `{table}\x00{ref_name}` | Ref JSON |
 
-```
-Key Layout (16 bytes, big-endian):
-┌──────────────────────┬──────────────────────┐
-│   tags_hash (u64)    │   timestamp (i64)    │
-│     8 bytes          │     8 bytes          │
-└──────────────────────┴──────────────────────┘
-
-排序语义: 先按 tags_hash 升序，再按 timestamp 降序 (最新数据优先)
-前缀查询: prefix_encode(tags_hash) = tags_hash 的 8 字节大端序
-```
-
-#### 2.2.2 Value 编码 (value.rs)
+### 3.3 数据流
 
 ```
-Value Layout (变长):
-┌──────────┬─────────────┬──────────────┬─────────────┬─────┐
-│ field_count│ field1_name │ field1_type  │ field1_value │ ... │
-│ (u16 BE)  │ (len+bytes) │ (1 byte)     │ (variable)  │     │
-└──────────┴─────────────┴──────────────┴─────────────┴─────┘
+写入路径:
+  DataPoint → WriteBuffer → Parquet File (data_{date}/part-{n}.parquet)
+                         → DataFileEntry (含列统计) → Manifest → ManifestList → Snapshot → TableMetadata
+                         → RocksDB 元数据 CF 原子提交
 
-字段类型编码:
-  0x00 = Float64 (8 bytes BE)
-  0x01 = Int64   (8 bytes BE)
-  0x02 = Utf8    (len:u16 + bytes)
-  0x03 = Boolean (1 byte, 0x00/0x01)
+查询路径:
+  SQL → DataFusion → IcebergTableProvider.scan()
+      → load current_snapshot → load manifest_list → 过滤 manifest (分区统计)
+      → 过滤 data_file (列统计 lower_bounds/upper_bounds) → 只读匹配的 Parquet 文件
+      → RecordBatch → DataFusion 执行
+
+Time Travel:
+  SQL: SELECT * FROM cpu FOR SYSTEM_VERSION AS OF {snapshot_id}
+  → load specified snapshot → 同上查询路径
+
+Compaction:
+  小文件合并 → 新 Parquet 文件 → 新 Manifest (旧文件标记 DELETED) → 新 Snapshot (operation=replace)
 ```
 
-#### 2.2.3 Column Family 策略
+## 4. 核心数据结构
 
-```
-CF 命名规则:
-  _series_meta              — 全局唯一，存储 tags_hash → tags 映射
-  ts_{measurement}_{date}   — 按度量名+日期分区，如 ts_cpu_20260417
-
-优势:
-  - 按日期删除: drop_cf 即可清理过期数据
-  - 查询隔离: 不同日期的查询互不干扰
-  - Compaction 独立: 每个 CF 独立 Compaction，不影响其他日期
-```
-
-#### 2.2.4 三级 TTL 清理 (cleanup.rs + compaction_filter.rs)
-
-```
-Level 1 (天级): TtlManager::drop_expired_cfs()
-  → 整体删除过期日期的 CF (如 ts_cpu_20260410 在 7 天后删除)
-  → 最快、最彻底
-
-Level 2 (范围级): TtlManager::delete_range_in_cf()
-  → 在 CF 内按时间戳范围删除 (delete_range API)
-  → 适用于同一天内部分过期数据
-
-Level 3 (行级): TsdbTtlFilterFactory + CompactionFilter
-  → Compaction 时逐行检查 timestamp，过期则 Remove
-  → 最精细，依赖 Compaction 触发
-```
-
-#### 2.2.5 Merge 策略 (merge.rs)
-
-```
-字段合并语义 (union + 后者覆盖):
-  existing: {cpu: 80.0, mem: 60.0}
-  operand:  {cpu: 90.0, disk: 40.0}
-  result:   {cpu: 90.0, mem: 60.0, disk: 40.0}
-
-full_merge:  有 existing_value 时使用
-partial_merge: 安全降级，返回 None (交给 full_merge 处理)
-```
-
-### 2.3 与 Parquet 引擎的对比
-
-| 特性 | RocksDB Engine | Parquet Engine |
-|------|---------------|----------------|
-| 写入模型 | LSM-Tree，高频小写入 | 批量导入为主 |
-| 更新/删除 | 天然支持 (覆盖写 + 墓碑) | 不友好 (需重写文件) |
-| 时间范围查询 | CF 分区 + 前缀扫描 | 文件级 Min/Max 跳过 |
-| TTL/过期 | 三级自动清理 | 外部管理 |
-| Compaction | RocksDB 内置 | 自定义 hot/cold 分层 |
-| 跨天查询 | 需合并多个 CF | 需合并多个 Parquet 文件 |
-
----
-
-## 3. 测试体系规格
-
-### 3.1 测试金字塔
-
-```
-                 ┌──────────────┐
-                 │   E2E Tests  │  ← 17 tests (rocksdb_e2e:10 + parquet_e2e:7)
-                 └──────────────┘
-                ┌┴──────────────┴┐
-                │  Stress Tests  │  ← 20 tests (rocksdb:15 + parquet:5)
-                └────────────────┘
-               ┌┴────────────────┴┐
-               │  Integration     │  ← 跨模块交互测试
-               └──────────────────┘
-              ┌┴──────────────────┴┐
-              │   Unit Tests       │  ← 62+ tests (rocksdb alone)
-              └────────────────────┘
-             ┌┴────────────────────┴┐
-             │  Property-Based      │  ← 待补充: proptest 编解码不变量
-             └──────────────────────┘
-```
-
-### 3.2 覆盖率目标
-
-| 层级 | 目标覆盖率 | 当前估计 | 差距 |
-|------|-----------|---------|------|
-| 核心编解码 (key/value/tags/comparator) | ≥95% | ~90% | 需补充属性测试 |
-| DB 引擎核心 (db.rs put/get/range/batch) | ≥90% | ~85% | 需补充边界场景 |
-| 插件机制 (merge/filter/snapshot) | ≥85% | ~70% | merge.rs 无独立测试 |
-| Arrow 适配层 | ≥80% | ~75% | 需补充空结果/错误路径 |
-| CLI / 配置 | ≥75% | ~0% | CLI 无测试 |
-| **整体项目加权平均** | **≥80%** | **~65%** | **CI gate 待启用** |
-
-### 3.3 测试命名规范
-
-```
-test_{module}_{function}_{scenario}
-
-示例:
-  test_key_encode_roundtrip           — 单元: 正常编解码
-  test_key_encode_empty_input         — 单元: 边界空输入
-  test_db_put_and_get_single_point    — 集成: 写入单点读取
-  stress_rocksdb_write_100k           — 压力: 10万点写入
-  test_e2e_rocksdb_write_read_large   — E2E: 全链路
-```
-
-### 3.4 现有测试清单
-
-#### tsdb-rocksdb 单元测试 (62 tests)
-
-| 模块 | 测试数 | 关键测试 |
-|------|--------|---------|
-| db.rs | 17 | open, put/get, read_range, write_batch, merge, prefix_scan, snapshot, drop_cf, compact_cf, multi_measurement |
-| key.rs | 8 | encode/decode roundtrip, prefix_encode, compute_tags_hash, boundary values |
-| value.rs | 8 | encode/decode roundtrip, float/int/str/bool types, empty fields, large fields |
-| tags.rs | 6 | encode/decode roundtrip, empty tags, special chars, unicode |
-| comparator.rs | 5 | ordering semantics, same hash different ts, different hash |
-| compaction_filter.rs | 6 | filter expired, keep valid, boundary, factory |
-| config.rs | 7 | default values, presets validation |
-| cleanup.rs | 2 | drop_expired_cfs, delete_range |
-| arrow_adapter.rs | 3 | read_range_arrow, prefix_scan_arrow, empty_result |
-
-#### tsdb-integration-tests (17 tests)
-
-| 文件 | 测试数 | 关键测试 |
-|------|--------|---------|
-| rocksdb_e2e.rs | 10 | write_read_large, cross_day, tags_dedup, arrow, compaction, ttl, drop_cf, merge, snapshot |
-| end_to_end.rs | 7 | write_read_large, tag_filtering, wal_recovery, sql_aggregation, compaction, mixed_fields |
-
-#### tsdb-stress-rocksdb (15 tests)
-
-| 模块 | 测试数 | 关键测试 |
-|------|--------|---------|
-| write_stress.rs | 3 | 100k single, 100k batch, multi_measurement |
-| read_stress.rs | 3 | range_scan_100k, prefix_scan_100_series, cross_day_7days |
-| concurrent_stress.rs | 3 | 4_threads_write, merge_same_key, mixed_read_write |
-| recovery_stress.rs | 3 | restart_recovery, 5x_restart, compaction_then_read |
-| ttl_stress.rs | 3 | mixed_data, drop_expired_cfs, high_cardinality_1000 |
-
-### 3.5 缺失测试项
-
-- [ ] **merge.rs 独立测试**: 当前 merge 仅在 db.rs 的 merge 测试中覆盖，缺少 full_merge/partial_merge 的独立单元测试
-- [ ] **snapshot.rs 独立测试**: 当前仅在 db.rs 的 snapshot 一致性测试中覆盖
-- [ ] **error.rs 路径覆盖**: 所有 Error 变体的构造和 Display 输出
-- [ ] **属性测试 (proptest)**: 编解码不变量、排序不变量、合并幂等性
-- [ ] **DataFusion + RocksDB SQL 集成**: 当前 E2E 中无 SQL 查询 RocksDB 数据的测试
-- [ ] **引擎对比测试**: 同一数据写入 Parquet 和 RocksDB，查询结果一致性验证
-- [ ] **真实场景数据生成器**: DevOps/IoT/金融场景数据生成
-- [ ] **CLI 测试**: 0 个测试，所有子命令无测试覆盖
-
----
-
-## 4. CLI 规格 (基于当前 tsdb-cli 状态)
-
-### 4.1 当前状态
-
-tsdb-cli 已有基础框架：
-- `Cli` struct (clap derive): `data_dir`, `storage_engine` 参数
-- `Commands` 枚举: Status, Query, Bench, Compact, Import, Archive
-- `ArchiveActions` 枚举: Create, Restore, List
-- **所有子命令均为占位实现** (println 输出，无实际业务逻辑)
-- 依赖已配置: clap 4, serde, serde_json, toml, tracing, tokio, anyhow
-
-### 4.2 子命令实现规格
-
-#### `tsdb-cli status` — 数据库状态
-
-```bash
-tsdb-cli status --data-dir ./data
-# 输出:
-# TSDB Status (RocksDB Engine)
-# Version:    tsdb2 v0.1.0
-# Data Dir:   ./data
-# Column Families: 31
-#   _series_meta:    1,234 entries
-#   ts_cpu_20260417:  1.2M entries
-# Memory:
-#   Block Cache:  448MB / 512MB
-#   MemTables:    128MB / 256MB
-```
-
-实现要点:
-- 打开 TsdbRocksDb (只读模式)
-- 调用 `list_ts_cfs()` + `stats()` / `cf_stats()`
-- 格式化输出到终端
-
-#### `tsdb-cli query` — SQL 查询
-
-```bash
-tsdb-cli query --data-dir ./data --sql "SELECT AVG(usage) FROM cpu WHERE time > now() - 1h"
-# 输出: JSON 格式查询结果
-```
-
-实现要点:
-- 打开 TsdbRocksDb → read_range → DataPoint
-- DataPoint → RecordBatch (ArrowAdapter)
-- 注册到 DataFusionQueryEngine → execute SQL
-- 输出格式: json (默认) / table / csv
-
-#### `tsdb-cli bench` — 基准测试
-
-```bash
-tsdb-cli bench write --data-dir ./bench-data --points 100000
-tsdb-cli bench read --data-dir ./bench-data --queries 1000
-```
-
-实现要点:
-- 复用 tsdb-test-utils 数据生成器
-- 测量 ops/sec, p50/p99 latency
-- 输出 JSON 报告
-
-#### `tsdb-cli compact` — 手动 Compaction
-
-```bash
-tsdb-cli compact --data-dir ./data                    # 全部 CF
-tsdb-cli compact --data-dir ./data --cf ts_cpu_20260417  # 指定 CF
-```
-
-实现要点:
-- 打开 TsdbRocksDb → `compact_cf(cf_name)` 或遍历 `list_ts_cfs()` 逐个 compact
-
-#### `tsdb-cli import` — 数据导入
-
-```bash
-tsdb-cli import --data-dir ./data --file metrics.json --format json
-tsdb-cli import --data-dir ./data --file metrics.lp --format line-protocol
-tsdb-cli import --data-dir ./data --file metrics.csv --format csv
-```
-
-实现要点:
-- 解析输入文件 → Vec<DataPoint>
-- 调用 `write_batch()` 批量写入
-- 进度条显示 (indicatif)
-
-#### `tsdb-cli archive` — 归档管理
-
-```bash
-tsdb-cli archive create --data-dir ./data --older-than 30d --output-dir ./archive
-tsdb-cli archive restore --data-dir ./data --archive-file ./archive/ts_cpu_20260301.sst
-tsdb-cli archive list --archive-dir ./archive
-```
-
-实现要点:
-- create: 遍历过期 CF → IngestExternalFile (RocksDB SST export)
-- restore: IngestExternalFile 导入
-- list: 扫描归档目录
-
-### 4.3 技术选型
-
-| 组件 | 选择 | 状态 |
-|------|------|------|
-| CLI 框架 | `clap` v4 (derive) | ✅ 已集成 |
-| 异步运行时 | `tokio` | ✅ 已集成 |
-| 错误处理 | `anyhow` | ✅ 已集成 |
-| 序列化 | `serde` + `serde_json` | ✅ 已集成 |
-| 配置 | `toml` | ✅ 已集成 |
-| 日志 | `tracing` + `tracing-subscriber` | ✅ 已集成 |
-| 进度条 | `indicatif` | ❌ 待添加 |
-| Shell 补全 | `clap_complete` | ❌ 待添加 |
-
----
-
-## 5. 多平台兼容性规格
-
-### 5.1 支持矩阵
-
-| 平台 | 架构 | 编译目标 | 优先级 | CI 状态 |
-|------|------|---------|--------|---------|
-| Linux x86_64 | x86_64 | x86_64-unknown-linux-gnu | P0 | ✅ 已有 |
-| macOS Apple Silicon | aarch64 | aarch64-apple-darwin | P0 | ✅ 已有 |
-| macOS x86_64 | x86_64 | x86_64-apple-darwin | P0 | ✅ 已有 |
-| Windows x86_64 | x86_64 | x86_64-pc-windows-msvc | P0 | ✅ 已有 |
-| Linux AArch64 | aarch64 | aarch64-unknown-linux-gnu | P1 | ✅ 已有 |
-| Linux ARMv7 | armv7 | armv7-unknown-linux-gnueabihf | P2 | ✅ 已有 |
-| Linux RISC-V 64 | riscv64gc | riscv64gc-unknown-linux-gnu | P3 | ❌ 待添加 |
-
-### 5.2 条件编译策略
+### 4.1 TableMetadata
 
 ```rust
-#[cfg(target_arch = "aarch64")]
-pub fn optimized_config() -> RocksDbConfig {
-    RocksDbConfig { block_size: 4096, .. }  // NEON 友好
+struct TableMetadata {
+    format_version: u32,              // 2
+    table_uuid: String,               // UUID v4
+    location: String,                 // 表数据根目录
+    last_sequence_number: u64,        // 单调递增
+    last_updated_ms: u64,             // 最后更新时间
+    last_column_id: i32,              // 最大列 ID
+    current_schema_id: i32,           // 当前 Schema ID
+    schemas: Vec<Schema>,             // Schema 历史
+    default_spec_id: i32,             // 默认分区规范 ID
+    partition_specs: Vec<PartitionSpec>, // 分区规范历史
+    current_snapshot_id: i64,         // 当前快照 ID (-1 表示空表)
+    snapshots: Vec<Snapshot>,         // 快照列表
+    snapshot_log: Vec<SnapshotLogEntry>, // 快照变更日志
+    properties: BTreeMap<String, String>, // 表属性
 }
-
-#[cfg(target_arch = "x86_64")]
-pub fn optimized_config() -> RocksDbConfig {
-    RocksDbConfig { block_size: 8192, .. }  // AVX2 友好
-}
-
-#[cfg(target_arch = "arm")]
-const MEMTABLE_ALIGNMENT: usize = 256;  // ARM 严格对齐
-#[cfg(not(target_arch = "arm"))]
-const MEMTABLE_ALIGNMENT: usize = 64;
 ```
 
-### 5.3 CPU 特性检测
+### 4.2 Schema
 
 ```rust
-pub fn detect_cpu_features() -> CpuFeatures {
-    CpuFeatures {
-        has_avx2: is_x86_feature_detected!("avx2"),
-        has_neon: cfg!(target_arch = "aarch64"),
-        has_sse42: is_x86_feature_detected!("sse4.2"),
-        cpu_count: num_cpus::get(),
+struct Schema {
+    schema_id: i32,
+    fields: Vec<Field>,  // 与 Iceberg Schema 兼容
+}
+
+struct Field {
+    id: i32,                  // 全局唯一列 ID
+    name: String,
+    required: bool,
+    field_type: IcebergType,
+    doc: Option<String>,
+    initial_default: Option<serde_json::Value>,
+    write_default: Option<serde_json::Value>,
+}
+
+enum IcebergType {
+    Boolean, Int, Long, Float, Double,
+    Decimal { precision: u8, scale: u8 },
+    Date, Time, Timestamp, Timestamptz,
+    String, Uuid, Binary,
+    Struct { fields: Vec<Field> },
+    List { element_id: i32, element_required: bool, element: Box<IcebergType> },
+    Map { key_id: i32, key: Box<IcebergType>, value_id: i32, value_required: bool, value: Box<IcebergType> },
+}
+```
+
+### 4.3 PartitionSpec
+
+```rust
+struct PartitionSpec {
+    spec_id: i32,
+    fields: Vec<PartitionField>,
+}
+
+struct PartitionField {
+    source_id: i32,          // 源列 ID
+    field_id: i32,           // 分区字段 ID
+    name: String,            // 分区名 (如 "ts_day")
+    transform: Transform,    // 转换函数
+}
+
+enum Transform {
+    Identity,
+    Bucket { n: u32 },
+    Truncate { w: u32 },
+    Year, Month, Day, Hour,
+    Void,
+}
+```
+
+### 4.4 Snapshot
+
+```rust
+struct Snapshot {
+    snapshot_id: i64,
+    parent_snapshot_id: Option<i64>,
+    sequence_number: u64,
+    timestamp_ms: u64,
+    manifest_list: String,       // Manifest list 存储位置标识
+    summary: SnapshotSummary,
+    schema_id: i32,
+}
+
+struct SnapshotSummary {
+    operation: String,           // "append" | "replace" | "overwrite" | "delete"
+    added_data_files: Option<i32>,
+    deleted_data_files: Option<i32>,
+    added_records: Option<i64>,
+    deleted_records: Option<i64>,
+    total_data_files: Option<i32>,
+    total_records: Option<i64>,
+    extra: BTreeMap<String, String>,
+}
+```
+
+### 4.5 ManifestEntry / DataFileEntry
+
+```rust
+struct ManifestEntry {
+    status: EntryStatus,         // Existing=0, Added=1, Deleted=2
+    snapshot_id: i64,
+    sequence_number: Option<u64>,
+    file_sequence_number: Option<u64>,
+    data_file: DataFile,
+}
+
+enum EntryStatus { Existing, Added, Deleted }
+
+struct DataFile {
+    content: DataContentType,    // Data=0, PositionDeletes=1, EqualityDeletes=2
+    file_path: String,
+    file_format: String,         // "parquet"
+    partition: PartitionData,    // 分区值元组
+    record_count: i64,
+    file_size_in_bytes: i64,
+    column_sizes: Option<BTreeMap<i32, i64>>,
+    value_counts: Option<BTreeMap<i32, i64>>,
+    null_value_counts: Option<BTreeMap<i32, i64>>,
+    lower_bounds: Option<BTreeMap<i32, Vec<u8>>>,
+    upper_bounds: Option<BTreeMap<i32, Vec<u8>>>,
+    split_offsets: Option<Vec<i64>>,
+    sort_order_id: Option<i32>,
+}
+```
+
+## 5. 新增 Crate: tsdb-iceberg
+
+```
+crates/tsdb-iceberg/
+├── Cargo.toml
+└── src/
+    ├── lib.rs              — crate 入口 + 重导出
+    ├── catalog.rs          — IcebergCatalog (RocksDB-backed)
+    ├── table.rs            — IcebergTable (表操作入口)
+    ├── snapshot.rs         — Snapshot 管理 (创建/提交/过期)
+    ├── manifest.rs         — Manifest 读写 (数据文件条目管理)
+    ├── scan.rs             — IcebergScan (文件规划 + 谓词下推)
+    ├── schema.rs           — Schema 定义 + 演化
+    ├── partition.rs        — PartitionSpec + Transform
+    ├── stats.rs            — 列统计收集 (Parquet → lower/upper bounds)
+    ├── commit.rs           — 原子提交 (乐观并发 + 重试)
+    ├── error.rs            — 错误类型
+    └── time_travel.rs      — Time Travel 查询
+```
+
+### 5.1 依赖关系
+
+```toml
+[dependencies]
+tsdb-arrow = { workspace = true }
+tsdb-rocksdb = { workspace = true }
+tsdb-parquet = { workspace = true }
+tsdb-datafusion = { workspace = true }
+arrow = { workspace = true }
+parquet = { workspace = true }
+datafusion = { workspace = true }
+rocksdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+```
+
+## 6. 核心接口设计
+
+### 6.1 IcebergCatalog
+
+```rust
+pub struct IcebergCatalog {
+    db: rocksdb::DB,
+    base_dir: PathBuf,
+}
+
+impl IcebergCatalog {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self>;
+    pub fn create_table(&self, name: &str, schema: Schema, partition_spec: PartitionSpec) -> Result<IcebergTable>;
+    pub fn load_table(&self, name: &str) -> Result<IcebergTable>;
+    pub fn drop_table(&self, name: &str) -> Result<()>;
+    pub fn list_tables(&self) -> Result<Vec<String>>;
+    pub fn rename_table(&self, old_name: &str, new_name: &str) -> Result<()>;
+}
+```
+
+### 6.2 IcebergTable
+
+```rust
+pub struct IcebergTable {
+    catalog: Arc<IcebergCatalog>,
+    name: String,
+    metadata: TableMetadata,
+}
+
+impl IcebergTable {
+    // 写入
+    pub fn append(&mut self, datapoints: &[DataPoint]) -> Result<()>;
+    pub fn overwrite(&mut self, datapoints: &[DataPoint], predicate: Option<Expr>) -> Result<()>;
+    pub fn delete(&mut self, predicate: Expr) -> Result<()>;
+
+    // 查询
+    pub fn scan(&self) -> IcebergScanBuilder;
+    pub fn scan_at_snapshot(&self, snapshot_id: i64) -> IcebergScanBuilder;
+
+    // 元数据
+    pub fn current_snapshot(&self) -> Option<&Snapshot>;
+    pub fn snapshots(&self) -> &[Snapshot];
+    pub fn schema(&self) -> &Schema;
+    pub fn partition_spec(&self) -> &PartitionSpec;
+    pub fn history(&self) -> &[SnapshotLogEntry];
+
+    // 维护
+    pub fn compact(&mut self) -> Result<()>;
+    pub fn expire_snapshots(&mut self, older_than_ms: u64, min_snapshots: u32) -> Result<()>;
+    pub fn update_schema(&mut self, changes: SchemaChange) -> Result<()>;
+    pub fn update_partition_spec(&mut self, new_spec: PartitionSpec) -> Result<()>;
+}
+```
+
+### 6.3 IcebergScanBuilder
+
+```rust
+pub struct IcebergScanBuilder<'a> {
+    table: &'a IcebergTable,
+    snapshot_id: Option<i64>,
+    predicate: Option<Expr>,
+    projection: Option<Vec<i32>>,
+    case_sensitive: bool,
+}
+
+impl<'a> IcebergScanBuilder<'a> {
+    pub fn predicate(mut self, expr: Expr) -> Self;
+    pub fn projection(mut self, field_ids: Vec<i32>) -> Self;
+    pub fn case_insensitive(mut self) -> Self;
+    pub fn build(self) -> Result<IcebergScan>;
+}
+```
+
+### 6.4 IcebergScan
+
+```rust
+pub struct IcebergScan {
+    data_files: Vec<DataFile>,
+    predicate: Option<Expr>,
+    projection: Option<Vec<i32>>,
+}
+
+impl IcebergScan {
+    pub fn plan(&self) -> &[DataFile];
+    pub async fn execute(&self) -> Result<Vec<RecordBatch>>;
+    pub fn to_execution_plan(&self) -> Arc<dyn ExecutionPlan>;
+}
+```
+
+## 7. 原子提交协议
+
+### 7.1 乐观并发提交
+
+```
+1. 读取 current TableMetadata (版本 V)
+2. 创建新数据文件 (Parquet)
+3. 收集列统计 → 构建 DataFileEntry
+4. 创建新 Manifest (包含新 DataFileEntry)
+5. 创建新 ManifestList (引用新 Manifest + 旧 Manifest)
+6. 创建新 Snapshot
+7. 创建新 TableMetadata (版本 V+1)
+8. 原子提交: CAS(current_version=V, new_version=V+1)
+   - 成功: 提交完成
+   - 失败: 重试 (从步骤1重新开始)
+```
+
+### 7.2 RocksDB 原子性保证
+
+使用 RocksDB WriteBatch 保证元数据写入原子性:
+
+```rust
+fn commit(&self, old_meta: &TableMetadata, new_meta: &TableMetadata) -> Result<()> {
+    let current = self.load_metadata()?;
+    if current.last_updated_ms != old_meta.last_updated_ms {
+        return Err(IcebergError::CommitConflict);
+    }
+
+    let mut batch = rocksdb::WriteBatch::default();
+    // 写入新 Snapshot
+    batch.put_cf(snapshot_cf, snap_key, snap_json);
+    // 写入新 ManifestList
+    batch.put_cf(manifest_list_cf, ml_key, ml_json);
+    // 写入新 Manifest entries
+    for entry in new_entries {
+        batch.put_cf(manifest_cf, entry_key, entry_json);
+    }
+    // 更新 TableMetadata
+    batch.put_cf(meta_cf, meta_key, new_meta_json);
+
+    self.db.write(batch)?;  // 原子提交
+    Ok(())
+}
+```
+
+## 8. 谓词下推设计
+
+### 8.1 三级过滤
+
+```
+Level 1: Manifest 级别
+  - 使用 partition field_summary (contains_null, lower_bound, upper_bound)
+  - 跳过不包含匹配分区的整个 Manifest
+
+Level 2: DataFile 级别
+  - 使用 lower_bounds / upper_bounds 列统计
+  - 跳过列值范围不匹配的数据文件
+
+Level 3: Parquet RowGroup 级别
+  - 使用 Parquet 文件内的 RowGroup 统计
+  - 跳过不匹配的 RowGroup
+```
+
+### 8.2 过滤流程
+
+```rust
+fn plan_files(&self, predicate: &Expr) -> Vec<DataFile> {
+    let snapshot = self.current_snapshot();
+    let manifest_list = self.load_manifest_list(snapshot);
+
+    let mut result = Vec::new();
+    for manifest_meta in manifest_list {
+        // Level 1: Manifest 级别过滤
+        if !manifest_matches_predicate(&manifest_meta, predicate) {
+            continue;
+        }
+
+        let entries = self.load_manifest_entries(&manifest_meta);
+        for entry in entries {
+            if entry.status == EntryStatus::Deleted {
+                continue;
+            }
+
+            // Level 2: DataFile 级别过滤
+            if !file_matches_predicate(&entry.data_file, predicate) {
+                continue;
+            }
+
+            result.push(entry.data_file.clone());
+        }
+    }
+    result
+}
+```
+
+## 9. DataFusion 集成
+
+### 9.1 IcebergTableProvider
+
+```rust
+pub struct IcebergTableProvider {
+    table: Arc<Mutex<IcebergTable>>,
+    schema: SchemaRef,
+}
+
+#[async_trait]
+impl TableProvider for IcebergTableProvider {
+    fn as_any(&self) -> &dyn Any { self }
+    fn schema(&self) -> SchemaRef { self.schema.clone() }
+    fn table_type(&self) -> TableType { TableType::Base }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let table = self.table.lock().unwrap();
+        let scan = table.scan();
+        // 将 DataFusion filters 转为 Iceberg 谓词
+        let predicate = filters_to_predicate(filters);
+        let iceberg_scan = scan.predicate(predicate).build()?;
+
+        // 使用 Parquet 文件列表创建 ParquetExec
+        let data_files = iceberg_scan.plan();
+        let plan = self.create_parquet_exec(data_files, projection, limit, state)?;
+        Ok(plan)
     }
 }
 ```
 
----
+## 10. Time Travel
 
-## 6. CI/CD 规格增强
+```sql
+-- 查询特定快照
+SELECT * FROM cpu FOR SYSTEM_VERSION AS OF 3051729675574597004;
 
-### 6.1 当前 CI 状态
+-- 查询特定时间点
+SELECT * FROM cpu FOR SYSTEM_TIME AS OF '2026-04-20 00:00:00';
 
-已有 jobs: check, test, clippy, fmt, audit, msrv, cross-compile, coverage
+-- 查看快照历史
+SELECT * FROM cpu.snapshots;
 
-### 6.2 待增强项
+-- 回滚到特定快照
+ROLLBACK TABLE cpu TO SNAPSHOT 3051729675574597004;
+```
 
-| 增强项 | 当前状态 | 目标 |
-|--------|---------|------|
-| 覆盖率阈值门禁 | coverage job 存在但无阈值 | `--fail-under 80` |
-| 性能回归检测 | 无 | criterion baseline 对比 |
-| 压力测试 Gate | 手动运行 | main 分支自动运行 |
-| RISC-V cross-compile | 无 | nightly check |
-| Dependabot | 无 | weekly 依赖更新 |
-| Docker 多架构 | 无 | amd64 + arm64 + armv7 |
+## 11. Compaction (Iceberg 风格)
 
----
+```
+1. 选择小文件 (file_size < target_file_size)
+2. 读取小文件内容 → 合并为大文件
+3. 创建新 Manifest:
+   - 旧文件标记为 DELETED
+   - 新文件标记为 ADDED
+4. 创建新 Snapshot (operation="replace")
+5. 原子提交
+6. 后台清理: 删除只被 DELETED 快照引用的物理文件
+```
 
-## 7. 真实数据场景规格
-
-### 7.1 场景 A: DevOps 监控数据
+## 12. Schema 演化
 
 ```rust
-struct DevOpsDataGenerator {
-    hosts: usize,              // 1000..10000
-    measurements: Vec<String>, // ["cpu", "memory", "disk", "network"]
-    interval_secs: u64,        // 10..60
-    duration_days: u64,        // 7..30
-    fields_per_metric: usize,  // 3..8
+enum SchemaChange {
+    AddField { parent_id: Option<i32>, name: String, field_type: IcebergType, required: bool, write_default: Option<serde_json::Value> },
+    DeleteField { field_id: i32 },
+    RenameField { field_id: i32, new_name: String },
+    PromoteType { field_id: i32, new_type: IcebergType },  // int→long, float→double
+    MoveField { field_id: i32, new_position: usize },
 }
 ```
 
-特征: 1000~10000 hosts, 10~50 measurements, 10s~60s 采集间隔
+## 13. 实施优先级
 
-### 7.2 场景 B: IoT 传感器数据
-
-```rust
-struct IotDataGenerator {
-    devices: usize,         // 10000..100000
-    measurements: Vec<String>,
-    interval_secs: u64,     // 1..5
-    duration_days: u64,     // 1..7
-}
-```
-
-特征: 10000~100000 devices, 1s~5s 高频采集
-
-### 7.3 场景 C: 金融 K线数据
-
-```rust
-struct FinancialDataGenerator {
-    tickers: usize,      // 100..5000
-    bar_interval: BarInterval, // 1m/5m/15m/1h/1d
-    duration_years: u64, // 1..10
-}
-```
-
-特征: 100~5000 tickers, OHLCV 5 字段, 时间戳对齐到 bar interval
-
----
-
-## 8. 代码质量规范
-
-### 8.1 注释规范
-
-```rust
-/// 模块/结构体/函数的中文文档注释
-///
-/// 详细说明（可选）
-///
-/// # 参数
-/// - `param` - 参数说明
-///
-/// # 返回
-/// 返回值说明
-```
-
-- 所有 `pub fn` / `pub struct` / `pub enum` / `pub const` 添加 `///` 文档注释
-- 关键编解码格式添加二进制布局图注释
-- 关键逻辑添加 `//` 行内注释
-- 不添加多余注释，保持代码简洁
-
-### 8.2 日期处理规范
-
-- 测试代码中的日期必须使用 `chrono::Utc::now()` 动态获取
-- 辅助函数: `today_date()`, `ts_today()`, `ts_days_ago(n)`
-- 生产代码中的时长常量 (如 `7 * 24 * 3600`) 不修改
-- 测试中的固定参考时间点 (如 `1_000_000_000_000_000i64`) 不修改
-
-### 8.3 Lint 规则
-
-- `cargo clippy --all-targets -- -D warnings` 零警告
-- `cargo fmt --all -- --check` 格式正确
-- 无 `unwrap()` 在生产代码中 (测试代码允许)
-- 错误处理使用 `Result<T, TsdbRocksDbError>`
+| Phase | 内容 | 优先级 | 依赖 |
+|-------|------|--------|------|
+| P1 | Catalog + TableMetadata + Schema | P0 | 无 |
+| P2 | Snapshot + Manifest + DataFile | P0 | P1 |
+| P3 | Append 写入 + 列统计收集 | P0 | P2 |
+| P4 | Scan + 谓词下推 (三级过滤) | P0 | P3 |
+| P5 | IcebergTableProvider (DataFusion) | P0 | P4 |
+| P6 | Time Travel 查询 | P1 | P5 |
+| P7 | Compaction (Iceberg 风格) | P1 | P3 |
+| P8 | Snapshot 过期清理 | P1 | P6 |
+| P9 | Schema 演化 | P2 | P5 |
+| P10 | 分区演化 | P2 | P9 |

@@ -9,6 +9,7 @@ tsdb-parquet = { workspace = true }
 tsdb-datafusion = { workspace = true }
 tsdb-storage-arrow = { workspace = true }
 tsdb-rocksdb = { workspace = true }
+tsdb-iceberg = { workspace = true }
 tsdb-flight = { path = "../tsdb-flight" }
 rocksdb = { workspace = true }
 arrow = { workspace = true }

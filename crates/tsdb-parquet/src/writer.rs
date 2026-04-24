@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use crate::encoding::{cold_writer_props, hot_writer_props};
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
@@ -9,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tsdb_arrow::converter::datapoints_to_record_batch;
 use tsdb_arrow::schema::{DataPoint, FieldValue};
 

@@ -7,6 +7,7 @@ use crate::merge::{tsdb_full_merge, tsdb_partial_merge};
 use crate::snapshot::TsdbSnapshot;
 use crate::tags::{decode_tags, encode_tags};
 use crate::value::{decode_fields, decode_fields_projection, encode_fields};
+use arrow::datatypes::SchemaRef;
 use rocksdb::{
     BlockBasedOptions, BoundColumnFamily, Cache, ColumnFamilyDescriptor, DBCompressionType,
     IteratorMode, Options, ReadOptions, SliceTransform, WriteBatch, DB,
@@ -14,6 +15,7 @@ use rocksdb::{
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tsdb_arrow::schema::{DataPoint, Tags};
 
 /// 标签元数据 Column Family 名称
 const SERIES_META_CF: &str = "_series_meta";
@@ -38,6 +40,7 @@ pub struct TsdbRocksDb {
     config: RocksDbConfig,
     cache: Cache,
     base_dir: PathBuf,
+    last_cache: crate::last_cache::LastCache,
 }
 
 impl TsdbRocksDb {
@@ -84,6 +87,7 @@ impl TsdbRocksDb {
             config,
             cache,
             base_dir,
+            last_cache: crate::last_cache::LastCache::default(),
         })
     }
 
@@ -193,6 +197,15 @@ impl TsdbRocksDb {
         let data_cf = self.ensure_data_cf(&cf_name)?;
         let value = encode_fields(fields);
         self.db.put_cf(&data_cf, &key, &value)?;
+
+        let dp = DataPoint {
+            measurement: measurement.to_string(),
+            tags: tags.clone(),
+            fields: fields.clone(),
+            timestamp,
+        };
+        self.last_cache.update(&dp);
+
         Ok(())
     }
 
@@ -267,6 +280,8 @@ impl TsdbRocksDb {
             self.db.write(batch)?;
         }
 
+        self.last_cache.update_batch(dps);
+
         Ok(())
     }
 
@@ -329,12 +344,7 @@ impl TsdbRocksDb {
         for (i, (tags, timestamp)) in keys.iter().enumerate() {
             let tags_hash = compute_tags_hash(tags);
             if let Ok(date) = micros_to_date(*timestamp) {
-                let cf_name = format!(
-                    "{}{}_{}",
-                    TS_CF_PREFIX,
-                    measurement,
-                    date.format("%Y%m%d")
-                );
+                let cf_name = format!("{}{}_{}", TS_CF_PREFIX, measurement, date.format("%Y%m%d"));
                 by_cf
                     .entry(cf_name)
                     .or_default()
@@ -342,8 +352,7 @@ impl TsdbRocksDb {
             }
         }
 
-        let mut results: Vec<Option<tsdb_arrow::schema::DataPoint>> =
-            vec![None; keys.len()];
+        let mut results: Vec<Option<tsdb_arrow::schema::DataPoint>> = vec![None; keys.len()];
 
         for (cf_name, group) in &by_cf {
             let data_cf = match self.db.cf_handle(cf_name) {
@@ -353,16 +362,12 @@ impl TsdbRocksDb {
 
             let rocksdb_keys: Vec<Vec<u8>> = group
                 .iter()
-                .map(|(_, tags_hash, timestamp, _)| {
-                    TsdbKey::new(*tags_hash, *timestamp).encode()
-                })
+                .map(|(_, tags_hash, timestamp, _)| TsdbKey::new(*tags_hash, *timestamp).encode())
                 .collect();
 
-            let values = self.db.multi_get_cf(
-                rocksdb_keys
-                    .iter()
-                    .map(|k| (&data_cf, k.as_slice())),
-            );
+            let values = self
+                .db
+                .multi_get_cf(rocksdb_keys.iter().map(|k| (&data_cf, k.as_slice())));
 
             let meta_cf = self.db.cf_handle(SERIES_META_CF);
 
@@ -381,13 +386,12 @@ impl TsdbRocksDb {
                             } else {
                                 (*tags).clone()
                             };
-                            results[*original_idx] =
-                                Some(tsdb_arrow::schema::DataPoint {
-                                    measurement: measurement.to_string(),
-                                    tags: resolved_tags,
-                                    fields,
-                                    timestamp: *timestamp,
-                                });
+                            results[*original_idx] = Some(tsdb_arrow::schema::DataPoint {
+                                measurement: measurement.to_string(),
+                                tags: resolved_tags,
+                                fields,
+                                timestamp: *timestamp,
+                            });
                         }
                     }
                     Ok(None) => {}
@@ -612,6 +616,18 @@ impl TsdbRocksDb {
             .collect()
     }
 
+    pub fn get_last(&self, measurement: &str, tags: &Tags) -> Option<DataPoint> {
+        self.last_cache.get_last(measurement, tags)
+    }
+
+    pub fn get_all_last(&self, measurement: &str) -> Vec<DataPoint> {
+        self.last_cache.get_all_last(measurement)
+    }
+
+    pub fn last_cache(&self) -> &crate::last_cache::LastCache {
+        &self.last_cache
+    }
+
     /// 获取数据库统计信息 (字符串格式)
     pub fn stats(&self) -> String {
         self.db
@@ -677,6 +693,99 @@ fn micros_to_date(micros: i64) -> Result<chrono::NaiveDate> {
     chrono::DateTime::from_timestamp_micros(micros)
         .map(|dt| dt.date_naive())
         .ok_or_else(|| TsdbRocksDbError::InvalidKey(format!("invalid timestamp: {}", micros)))
+}
+
+impl tsdb_arrow::StorageEngine for TsdbRocksDb {
+    fn write(&self, dp: &DataPoint) -> tsdb_arrow::engine::EngineResult<()> {
+        TsdbRocksDb::put(self, &dp.measurement, &dp.tags, dp.timestamp, &dp.fields)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn write_batch(&self, datapoints: &[DataPoint]) -> tsdb_arrow::engine::EngineResult<()> {
+        TsdbRocksDb::write_batch(self, datapoints)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn read_range(
+        &self,
+        measurement: &str,
+        tags: &Tags,
+        start: i64,
+        end: i64,
+    ) -> tsdb_arrow::engine::EngineResult<Vec<DataPoint>> {
+        if tags.is_empty() {
+            TsdbRocksDb::read_range(self, measurement, start, end)
+        } else {
+            TsdbRocksDb::prefix_scan(self, measurement, tags, start, end)
+        }
+        .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn get_point(
+        &self,
+        measurement: &str,
+        tags: &Tags,
+        timestamp: i64,
+    ) -> tsdb_arrow::engine::EngineResult<Option<DataPoint>> {
+        TsdbRocksDb::get(self, measurement, tags, timestamp)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn list_measurements(&self) -> Vec<String> {
+        TsdbRocksDb::list_measurements(self)
+    }
+
+    fn flush(&self) -> tsdb_arrow::engine::EngineResult<()> {
+        self.db
+            .flush()
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))
+    }
+
+    fn read_range_arrow(
+        &self,
+        measurement: &str,
+        start: i64,
+        end: i64,
+        _projection: Option<&[String]>,
+    ) -> tsdb_arrow::engine::EngineResult<Vec<arrow::record_batch::RecordBatch>> {
+        let datapoints = TsdbRocksDb::read_range(self, measurement, start, end)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))?;
+
+        if datapoints.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let schema = tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(&datapoints);
+        let batch = tsdb_arrow::converter::datapoints_to_record_batch(&datapoints, schema)
+            .map_err(|e| tsdb_arrow::error::TsdbArrowError::Storage(e.to_string()))?;
+
+        Ok(vec![batch])
+    }
+
+    fn measurement_schema(&self, measurement: &str) -> Option<SchemaRef> {
+        let now = chrono::Utc::now().timestamp_micros();
+        let start = now - 365 * 86_400_000_000i64;
+        let result = TsdbRocksDb::read_range(self, measurement, start, now);
+        let datapoints = match result {
+            Ok(dps) if !dps.is_empty() => dps,
+            _ => {
+                let future = now + 86_400_000_000i64;
+                match TsdbRocksDb::read_range(self, measurement, now, future) {
+                    Ok(dps) if !dps.is_empty() => dps,
+                    _ => {
+                        let far_future = now + 2 * 86_400_000_000i64;
+                        match TsdbRocksDb::read_range(self, measurement, start, far_future) {
+                            Ok(dps) if !dps.is_empty() => dps,
+                            _ => return None,
+                        }
+                    }
+                }
+            }
+        };
+        Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(
+            &datapoints,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1155,7 +1264,8 @@ mod tests {
 
         db.put("cpu", &tags_a, base_ts, &fields1).unwrap();
         db.put("cpu", &tags_b, base_ts, &fields2).unwrap();
-        db.put("cpu", &tags_a, base_ts + 1_000_000, &fields3).unwrap();
+        db.put("cpu", &tags_a, base_ts + 1_000_000, &fields3)
+            .unwrap();
 
         let keys = vec![
             (tags_a.clone(), base_ts),
@@ -1166,11 +1276,20 @@ mod tests {
 
         assert_eq!(results.len(), 3);
         assert!(results[0].is_some());
-        assert_eq!(*results[0].as_ref().unwrap().fields.get("usage").unwrap(), FieldValue::Float(1.0));
+        assert_eq!(
+            *results[0].as_ref().unwrap().fields.get("usage").unwrap(),
+            FieldValue::Float(1.0)
+        );
         assert!(results[1].is_some());
-        assert_eq!(*results[1].as_ref().unwrap().fields.get("usage").unwrap(), FieldValue::Float(2.0));
+        assert_eq!(
+            *results[1].as_ref().unwrap().fields.get("usage").unwrap(),
+            FieldValue::Float(2.0)
+        );
         assert!(results[2].is_some());
-        assert_eq!(*results[2].as_ref().unwrap().fields.get("usage").unwrap(), FieldValue::Float(3.0));
+        assert_eq!(
+            *results[2].as_ref().unwrap().fields.get("usage").unwrap(),
+            FieldValue::Float(3.0)
+        );
     }
 
     #[test]
@@ -1231,12 +1350,17 @@ mod tests {
             let tags = if i % 2 == 0 { &tags_a } else { &tags_b };
             let mut fields = tsdb_arrow::schema::Fields::new();
             fields.insert("val".to_string(), FieldValue::Float(i as f64));
-            db.put("cpu", tags, base_ts + i * 1_000_000, &fields).unwrap();
+            db.put("cpu", tags, base_ts + i * 1_000_000, &fields)
+                .unwrap();
         }
 
         let keys: Vec<(Tags, i64)> = (0..20)
             .map(|i| {
-                let tags = if i % 2 == 0 { tags_a.clone() } else { tags_b.clone() };
+                let tags = if i % 2 == 0 {
+                    tags_a.clone()
+                } else {
+                    tags_b.clone()
+                };
                 (tags, base_ts + i * 1_000_000)
             })
             .collect();
@@ -1247,12 +1371,20 @@ mod tests {
             let single = db.get("cpu", &keys[i].0, keys[i].1).unwrap();
             match result {
                 Some(dp) => {
-                    assert!(single.is_some(), "multi_get found but get didn't at index {}", i);
+                    assert!(
+                        single.is_some(),
+                        "multi_get found but get didn't at index {}",
+                        i
+                    );
                     assert_eq!(dp.timestamp, single.as_ref().unwrap().timestamp);
                     assert_eq!(dp.fields, single.as_ref().unwrap().fields);
                 }
                 None => {
-                    assert!(single.is_none(), "get found but multi_get didn't at index {}", i);
+                    assert!(
+                        single.is_none(),
+                        "get found but multi_get didn't at index {}",
+                        i
+                    );
                 }
             }
         }
@@ -1283,7 +1415,7 @@ mod tests {
                     measurement: "cpu".to_string(),
                     tags: tags.clone(),
                     fields,
-                    timestamp: base_ts + i as i64 * 1_000_000,
+                    timestamp: base_ts + i * 1_000_000,
                 }
             })
             .collect();
@@ -1295,7 +1427,10 @@ mod tests {
 
         let meta_cf = db.db().cf_handle("_series_meta").unwrap();
         let tags_hash = compute_tags_hash(&tags);
-        let meta_val = db.db().get_pinned_cf(&meta_cf, tags_hash.to_be_bytes()).unwrap();
+        let meta_val = db
+            .db()
+            .get_pinned_cf(&meta_cf, tags_hash.to_be_bytes())
+            .unwrap();
         assert!(meta_val.is_some(), "tags metadata should be stored once");
     }
 
@@ -1309,12 +1444,12 @@ mod tests {
                 let mut fields = tsdb_arrow::schema::Fields::new();
                 fields.insert("usage".to_string(), FieldValue::Float(i as f64 * 0.1));
                 fields.insert("idle".to_string(), FieldValue::Float(1.0 - i as f64 * 0.1));
-                fields.insert("count".to_string(), FieldValue::Integer(i as i64 * 10));
+                fields.insert("count".to_string(), FieldValue::Integer(i * 10));
                 tsdb_arrow::schema::DataPoint {
                     measurement: "cpu".to_string(),
                     tags: make_tags("server01"),
                     fields,
-                    timestamp: now_ts() + i as i64 * 1_000_000,
+                    timestamp: now_ts() + i * 1_000_000,
                 }
             })
             .collect();
@@ -1323,7 +1458,9 @@ mod tests {
         let start = dps[0].timestamp;
         let end = dps[9].timestamp;
 
-        let projected = db.read_range_projection("cpu", start, end, &["usage"]).unwrap();
+        let projected = db
+            .read_range_projection("cpu", start, end, &["usage"])
+            .unwrap();
         assert_eq!(projected.len(), 10);
         for dp in &projected {
             assert!(dp.fields.contains_key("usage"));
@@ -1347,7 +1484,7 @@ mod tests {
                     measurement: "cpu".to_string(),
                     tags: make_tags("server01"),
                     fields,
-                    timestamp: now_ts() + i as i64 * 1_000_000,
+                    timestamp: now_ts() + i * 1_000_000,
                 }
             })
             .collect();
@@ -1356,7 +1493,9 @@ mod tests {
         let start = dps[0].timestamp;
         let end = dps[4].timestamp;
 
-        let projected = db.read_range_projection("cpu", start, end, &["usage", "count"]).unwrap();
+        let projected = db
+            .read_range_projection("cpu", start, end, &["usage", "count"])
+            .unwrap();
         assert_eq!(projected.len(), 5);
         for dp in &projected {
             assert!(dp.fields.contains_key("usage"));
@@ -1378,7 +1517,7 @@ mod tests {
                     measurement: "cpu".to_string(),
                     tags: make_tags("srv1"),
                     fields,
-                    timestamp: now_ts() + i as i64 * 1_000_000,
+                    timestamp: now_ts() + i * 1_000_000,
                 }
             })
             .collect();
@@ -1391,7 +1530,7 @@ mod tests {
                     measurement: "mem".to_string(),
                     tags: make_tags("srv1"),
                     fields,
-                    timestamp: now_ts() + i as i64 * 1_000_000,
+                    timestamp: now_ts() + i * 1_000_000,
                 }
             })
             .collect();
@@ -1402,5 +1541,52 @@ mod tests {
         let measurements = db.list_measurements();
         assert!(measurements.contains(&"cpu".to_string()));
         assert!(measurements.contains(&"mem".to_string()));
+    }
+
+    #[test]
+    fn test_measurement_schema_via_trait() {
+        use tsdb_arrow::engine::StorageEngine;
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
+
+        let ts = now_ts();
+        let dps: Vec<tsdb_arrow::schema::DataPoint> = (0..5)
+            .map(|i| {
+                let mut tags = Tags::new();
+                tags.insert("host".to_string(), format!("h{}", i));
+                let mut fields = tsdb_arrow::schema::Fields::new();
+                fields.insert("usage".to_string(), FieldValue::Float(i as f64));
+                fields.insert("count".to_string(), FieldValue::Integer(i as i64));
+                tsdb_arrow::schema::DataPoint {
+                    measurement: "cpu".to_string(),
+                    tags,
+                    fields,
+                    timestamp: ts + i as i64 * 1_000_000,
+                }
+            })
+            .collect();
+
+        db.write_batch(&dps).unwrap();
+
+        let read_back = db.read_range("cpu", ts, ts + 10_000_000).unwrap();
+        assert!(!read_back.is_empty(), "should have data after write");
+
+        let engine: Arc<dyn StorageEngine> = Arc::new(db);
+        let schema = engine.measurement_schema("cpu");
+        assert!(
+            schema.is_some(),
+            "measurement_schema should return Some for existing measurement"
+        );
+
+        let schema = schema.unwrap();
+        let field_names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert!(field_names.contains(&"timestamp"));
+        assert!(field_names.contains(&"tag_host"));
+        assert!(field_names.contains(&"usage"));
+        assert!(field_names.contains(&"count"));
+
+        let none_schema = engine.measurement_schema("nonexistent");
+        assert!(none_schema.is_none());
     }
 }

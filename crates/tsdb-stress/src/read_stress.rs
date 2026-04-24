@@ -1,7 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use std::thread;
-    use std::time::Duration;
     use tsdb_arrow::schema::Tags;
     use tsdb_storage_arrow::config::ArrowStorageConfig;
     use tsdb_storage_arrow::engine::ArrowStorageEngine;
@@ -12,7 +10,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = ArrowStorageConfig {
             wal_enabled: false,
-            max_buffer_rows: 100_000,
+            max_buffer_rows: 10_000,
             flush_interval_ms: 100,
             ..Default::default()
         };
@@ -21,8 +19,6 @@ mod tests {
         let dps = make_simple_datapoints(100_000);
         engine.write_batch(&dps).unwrap();
         engine.flush().unwrap();
-
-        thread::sleep(Duration::from_millis(500));
 
         let tags = Tags::new();
         let start = std::time::Instant::now();

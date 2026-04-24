@@ -1,16 +1,15 @@
 use clap::{Parser, Subcommand};
 use std::path::Path;
 use std::sync::Arc;
+use tsdb_arrow::engine::StorageEngine;
+use tsdb_arrow::schema::Tags;
 
-/// TSDB2 命令行工具
 #[derive(Parser)]
 #[command(name = "tsdb-cli", version, about = "TSDB2 时序数据库命令行工具")]
 struct Cli {
-    /// 子命令
     #[command(subcommand)]
     command: Commands,
 
-    /// 数据目录路径
     #[arg(long, global = true, default_value = "./data")]
     data_dir: String,
 
@@ -60,6 +59,10 @@ enum Commands {
         format: String,
     },
     Doctor,
+    Iceberg {
+        #[command(subcommand)]
+        action: IcebergActions,
+    },
 }
 
 #[derive(Subcommand)]
@@ -80,106 +83,428 @@ enum ArchiveActions {
     },
 }
 
+#[derive(Subcommand)]
+enum IcebergActions {
+    Create {
+        #[arg(long)]
+        name: String,
+    },
+    List,
+    Drop {
+        #[arg(long)]
+        name: String,
+    },
+    Snapshots {
+        #[arg(long)]
+        name: String,
+    },
+    Append {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        file: String,
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
+    Scan {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        sql: Option<String>,
+    },
+    Compact {
+        #[arg(long)]
+        name: String,
+    },
+    Rollback {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        snapshot_id: i64,
+    },
+    Expire {
+        #[arg(long)]
+        name: String,
+        #[arg(long, default_value_t = 7)]
+        keep_days: u64,
+    },
+}
+
+fn open_engine(data_dir: &str, engine_type: &str) -> anyhow::Result<Arc<dyn StorageEngine>> {
+    match engine_type {
+        "rocksdb" => {
+            let db =
+                tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+            Ok(Arc::new(db))
+        }
+        "arrow" | "parquet" => {
+            let config = tsdb_storage_arrow::config::ArrowStorageConfig::default();
+            let engine = tsdb_storage_arrow::engine::ArrowStorageEngine::open(data_dir, config)?;
+            Ok(Arc::new(engine))
+        }
+        _ => anyhow::bail!(
+            "Unknown storage engine: {}. Use 'rocksdb' or 'arrow'.",
+            engine_type
+        ),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Status => execute_status(&cli.data_dir)?,
-        Commands::Query { sql, format } => execute_query(&cli.data_dir, &sql, &format)?,
+        Commands::Status => execute_status(&cli.data_dir, &cli.storage_engine)?,
+        Commands::Query { sql, format } => {
+            execute_query(&cli.data_dir, &cli.storage_engine, &sql, &format)?
+        }
         Commands::Bench {
             mode,
             points,
             workers,
-        } => run_bench(&cli.data_dir, &mode, points, workers)?,
+        } => run_bench(&cli.data_dir, &cli.storage_engine, &mode, points, workers)?,
         Commands::Compact { cf } => execute_compact(&cli.data_dir, cf.as_deref())?,
         Commands::Import {
             file,
             format,
             batch_size,
-        } => execute_import(&cli.data_dir, &file, &format, batch_size)?,
+        } => execute_import(
+            &cli.data_dir,
+            &cli.storage_engine,
+            &file,
+            &format,
+            batch_size,
+        )?,
         Commands::Archive { action } => execute_archive(&cli.data_dir, action)?,
         Commands::Export {
             measurement,
             output,
             format,
-        } => execute_export(&cli.data_dir, &measurement, &output, &format)?,
+        } => execute_export(
+            &cli.data_dir,
+            &cli.storage_engine,
+            &measurement,
+            &output,
+            &format,
+        )?,
         Commands::Doctor => execute_doctor(&cli.data_dir)?,
+        Commands::Iceberg { action } => execute_iceberg(&cli.data_dir, action)?,
     }
 
     Ok(())
 }
 
-/// 显示数据库状态信息
-fn execute_status(data_dir: &str) -> anyhow::Result<()> {
-    let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
-    let cfs = db.list_ts_cfs();
+fn iceberg_catalog_path(data_dir: &str) -> String {
+    format!("{}/iceberg", data_dir)
+}
 
-    println!("TSDB Status (RocksDB Engine)");
-    println!("============================");
-    println!("Data Dir:         {}", data_dir);
-    println!("Column Families:  {}", cfs.len());
-    println!();
+fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()> {
+    let catalog_dir = iceberg_catalog_path(data_dir);
 
-    if !cfs.is_empty() {
-        println!("CF Name                          Est. Entries");
-        println!("--------------------------------------------");
-        for cf_name in &cfs {
-            let stats = db.cf_stats(cf_name).unwrap_or_default();
-            let entries = stats
-                .lines()
-                .find(|l| l.contains("num entries"))
-                .and_then(|l| l.split(':').nth(1))
-                .map(|v| v.trim())
-                .unwrap_or("N/A");
-            println!("{:<32} {}", cf_name, entries);
+    match action {
+        IcebergActions::Create { name } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let schema = tsdb_iceberg::Schema::new(
+                0,
+                vec![
+                    tsdb_iceberg::schema::Field {
+                        id: 1,
+                        name: "timestamp".to_string(),
+                        required: true,
+                        field_type: tsdb_iceberg::schema::IcebergType::Timestamptz,
+                        doc: None,
+                        initial_default: None,
+                        write_default: None,
+                    },
+                    tsdb_iceberg::schema::Field {
+                        id: 2,
+                        name: "tag_host".to_string(),
+                        required: false,
+                        field_type: tsdb_iceberg::schema::IcebergType::String,
+                        doc: None,
+                        initial_default: None,
+                        write_default: None,
+                    },
+                    tsdb_iceberg::schema::Field {
+                        id: 1000,
+                        name: "value".to_string(),
+                        required: false,
+                        field_type: tsdb_iceberg::schema::IcebergType::Double,
+                        doc: None,
+                        initial_default: None,
+                        write_default: None,
+                    },
+                ],
+            );
+            let spec = tsdb_iceberg::PartitionSpec::day_partition(0, 1);
+            catalog.create_table(&name, schema, spec)?;
+            println!("Created Iceberg table: {}", name);
         }
-    }
-
-    println!();
-    println!("{}", db.stats());
-
-    Ok(())
-}
-
-/// 执行 SQL 查询并输出结果
-fn execute_query(data_dir: &str, sql: &str, format: &str) -> anyhow::Result<()> {
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
-
-        let cfs = db.list_ts_cfs();
-        let mut measurements: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for cf_name in &cfs {
-            if let Some(stripped) = cf_name.strip_prefix("ts_") {
-                if let Some(measurement) = stripped.split('_').next() {
-                    measurements.insert(measurement.to_string());
+        IcebergActions::List => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let tables = catalog.list_tables()?;
+            if tables.is_empty() {
+                println!("No Iceberg tables found.");
+            } else {
+                println!("Iceberg Tables:");
+                println!("==============");
+                for name in &tables {
+                    let meta = catalog.load_table(name)?;
+                    let snap_count = meta.snapshots.len();
+                    let current_snap = meta
+                        .current_snapshot()
+                        .map(|s| s.snapshot_id.to_string())
+                        .unwrap_or_else(|| "N/A".to_string());
+                    println!(
+                        "  {} (snapshots: {}, current: {})",
+                        name, snap_count, current_snap
+                    );
                 }
             }
         }
+        IcebergActions::Drop { name } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            catalog.drop_table(&name)?;
+            println!("Dropped Iceberg table: {}", name);
+        }
+        IcebergActions::Snapshots { name } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let meta = catalog.load_table(&name)?;
 
+            println!("Snapshots for table '{}':", name);
+            println!("=========================");
+            for snap in &meta.snapshots {
+                let op = &snap.summary.operation;
+                let added = snap.summary.added_data_files.unwrap_or(0);
+                let deleted = snap.summary.deleted_data_files.unwrap_or(0);
+                let records = snap.summary.total_records.unwrap_or(0);
+                println!(
+                    "  id={} op={} files=+{}/-{} records={} ts={}",
+                    snap.snapshot_id, op, added, deleted, records, snap.timestamp_ms
+                );
+            }
+
+            println!("\nSnapshot Log:");
+            for entry in &meta.snapshot_log {
+                let dt =
+                    chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64).unwrap();
+                println!(
+                    "  snapshot_id={}, time={}",
+                    entry.snapshot_id,
+                    dt.format("%Y-%m-%d %H:%M:%S")
+                );
+            }
+        }
+        IcebergActions::Append { name, file, format } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let meta = catalog.load_table(&name)?;
+            let mut table =
+                tsdb_iceberg::IcebergTable::new(std::sync::Arc::new(catalog), name.clone(), meta);
+
+            let content = std::fs::read_to_string(&file)?;
+            let dps: Vec<tsdb_arrow::schema::DataPoint> = match format.as_str() {
+                "json" | "jsonl" => content
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(serde_json::from_str)
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                "csv" => {
+                    let mut reader = csv::Reader::from_reader(content.as_bytes());
+                    reader
+                        .deserialize()
+                        .map(|r| r.map_err(|e| anyhow::anyhow!(e)))
+                        .collect::<anyhow::Result<Vec<_>>>()?
+                }
+                other => anyhow::bail!("Unsupported import format: {}", other),
+            };
+
+            table.append(&dps)?;
+            println!("Appended {} datapoints to table '{}'", dps.len(), name);
+
+            let snap = table.current_snapshot().unwrap();
+            println!("New snapshot: {}", snap.snapshot_id);
+        }
+        IcebergActions::Scan { name, sql } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let meta = catalog.load_table(&name)?;
+            let table =
+                tsdb_iceberg::IcebergTable::new(std::sync::Arc::new(catalog), name.clone(), meta);
+
+            match sql {
+                Some(query) => {
+                    println!("Executing SQL on Iceberg table '{}': {}", name, query);
+                    println!("==========================================");
+                    eprintln!("Warning: SQL filtering is not yet supported for Iceberg tables. Showing all data.");
+                    let scan = table.scan().build()?;
+                    let batches = scan.execute()?;
+                    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+
+                    use arrow::util::pretty::print_batches;
+                    print_batches(&batches)?;
+
+                    println!("\nTotal rows: {}", total_rows);
+                }
+                None => {
+                    println!("Scanning Iceberg table '{}':", name);
+                    println!("============================");
+                    let scan = table.scan().build()?;
+                    let data_files = scan.plan();
+                    println!("Data files: {}", data_files.len());
+                    for df in data_files {
+                        println!(
+                            "  {} (records={}, size={})",
+                            df.file_path, df.record_count, df.file_size_in_bytes
+                        );
+                    }
+
+                    let batches = scan.execute()?;
+                    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                    println!("\nTotal rows: {}", total_rows);
+                }
+            }
+        }
+        IcebergActions::Compact { name } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let meta = catalog.load_table(&name)?;
+            let mut table =
+                tsdb_iceberg::IcebergTable::new(std::sync::Arc::new(catalog), name.clone(), meta);
+
+            let before_files = table
+                .collect_data_files(table.current_snapshot().unwrap())
+                .unwrap_or_default()
+                .len();
+            println!("Before compact: {} data files", before_files);
+
+            table.compact()?;
+
+            let after_files = table
+                .collect_data_files(table.current_snapshot().unwrap())
+                .unwrap_or_default()
+                .len();
+            println!("After compact: {} data files", after_files);
+            println!("Compacted table '{}'", name);
+        }
+        IcebergActions::Rollback { name, snapshot_id } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let meta = catalog.load_table(&name)?;
+            let mut table =
+                tsdb_iceberg::IcebergTable::new(std::sync::Arc::new(catalog), name.clone(), meta);
+
+            table.rollback_to_snapshot(snapshot_id)?;
+            println!("Rolled back table '{}' to snapshot {}", name, snapshot_id);
+        }
+        IcebergActions::Expire { name, keep_days } => {
+            let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
+            let meta = catalog.load_table(&name)?;
+            let mut table =
+                tsdb_iceberg::IcebergTable::new(std::sync::Arc::new(catalog), name.clone(), meta);
+
+            let before = table.snapshots().len();
+            let cutoff_ms =
+                chrono::Utc::now().timestamp_millis() as u64 - keep_days * 24 * 3600 * 1000;
+
+            table.expire_snapshots(cutoff_ms, 1)?;
+            let after = table.snapshots().len();
+
+            println!(
+                "Expired snapshots for '{}': {} -> {} (kept last {} days)",
+                name, before, after, keep_days
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_status(data_dir: &str, engine_type: &str) -> anyhow::Result<()> {
+    if engine_type == "rocksdb" {
+        let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+        let cfs = db.list_ts_cfs();
+        let measurements = db.list_measurements();
+
+        println!("TSDB Status (rocksdb Engine)");
+        println!("============================");
+        println!("Data Dir:         {}", data_dir);
+        println!("Measurements:     {}", measurements.len());
+        println!("Column Families:  {}", cfs.len());
+        println!();
+
+        if !measurements.is_empty() {
+            println!("Measurement Name");
+            println!("----------------");
+            for m in &measurements {
+                println!("{}", m);
+            }
+        }
+
+        if !cfs.is_empty() {
+            println!();
+            println!("CF Name                          Est. Entries");
+            println!("--------------------------------------------");
+            for cf_name in &cfs {
+                let stats = db.cf_stats(cf_name).unwrap_or_default();
+                let entries = stats
+                    .lines()
+                    .find(|l| l.contains("num entries"))
+                    .and_then(|l| l.split(':').nth(1))
+                    .map(|v| v.trim())
+                    .unwrap_or("N/A");
+                println!("{:<32} {}", cf_name, entries);
+            }
+        }
+
+        println!();
+        println!("{}", db.stats());
+    } else {
+        let engine = open_engine(data_dir, engine_type)?;
+        let measurements = engine.list_measurements();
+
+        println!("TSDB Status ({} Engine)", engine_type);
+        println!("============================");
+        println!("Data Dir:         {}", data_dir);
+        println!("Measurements:     {}", measurements.len());
+        println!();
+
+        if !measurements.is_empty() {
+            println!("Measurement Name");
+            println!("----------------");
+            for m in &measurements {
+                println!("{}", m);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn execute_query(data_dir: &str, engine_type: &str, sql: &str, format: &str) -> anyhow::Result<()> {
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let engine = open_engine(data_dir, engine_type)?;
+
+        let measurements = engine.list_measurements();
         if measurements.is_empty() {
             println!("No data found in database.");
             return Ok::<(), anyhow::Error>(());
         }
 
-        let engine = tsdb_datafusion::DataFusionQueryEngine::new(data_dir);
+        let query_engine = tsdb_datafusion::DataFusionQueryEngine::new(data_dir);
 
         let now = chrono::Utc::now().timestamp_micros();
         let start = now - 7 * 86_400_000_000i64;
 
         for measurement in &measurements {
-            if let Ok(dps) = db.read_range(measurement, start, now) {
+            if let Ok(dps) = engine.read_range(measurement, &Tags::new(), start, now) {
                 if dps.is_empty() {
                     continue;
                 }
-                engine.register_from_datapoints(measurement, &dps)?;
+                query_engine.register_from_datapoints(measurement, &dps)?;
 
                 use datafusion::datasource::MemTable;
                 use tsdb_arrow::converter::datapoints_to_record_batch;
 
-                let table = engine
+                let table = query_engine
                     .session_context()
                     .catalog("datafusion")
                     .unwrap()
@@ -192,14 +517,16 @@ fn execute_query(data_dir: &str, sql: &str, format: &str) -> anyhow::Result<()> 
                 let schema = table.schema();
                 let batch = datapoints_to_record_batch(&dps, schema.clone())?;
                 let mem_table = MemTable::try_new(schema, vec![vec![batch]])?;
-                engine.session_context().deregister_table(measurement)?;
-                engine
+                query_engine
+                    .session_context()
+                    .deregister_table(measurement)?;
+                query_engine
                     .session_context()
                     .register_table(measurement, Arc::new(mem_table))?;
             }
         }
 
-        let result = engine.execute(sql).await?;
+        let result = query_engine.execute(sql).await?;
 
         match format {
             "json" => {
@@ -256,7 +583,6 @@ fn execute_query(data_dir: &str, sql: &str, format: &str) -> anyhow::Result<()> 
     })
 }
 
-/// 手动触发 Compaction
 fn execute_compact(data_dir: &str, cf: Option<&str>) -> anyhow::Result<()> {
     let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
 
@@ -276,14 +602,14 @@ fn execute_compact(data_dir: &str, cf: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 从文件导入数据
 fn execute_import(
     data_dir: &str,
+    engine_type: &str,
     file: &str,
     format: &str,
     batch_size: usize,
 ) -> anyhow::Result<()> {
-    let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+    let engine = open_engine(data_dir, engine_type)?;
     let content = std::fs::read_to_string(file)?;
 
     match format {
@@ -292,7 +618,7 @@ fn execute_import(
             let total = datapoints.len();
 
             for chunk in datapoints.chunks(batch_size) {
-                db.write_batch(chunk)?;
+                engine.write_batch(chunk)?;
             }
 
             println!("Imported {} data points from {}", total, file);
@@ -320,13 +646,25 @@ fn execute_import(
                         h => {
                             if !val.is_empty() {
                                 if let Ok(f) = val.parse::<f64>() {
-                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::Float(f));
+                                    dp.fields.insert(
+                                        h.to_string(),
+                                        tsdb_arrow::schema::FieldValue::Float(f),
+                                    );
                                 } else if let Ok(i) = val.parse::<i64>() {
-                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::Integer(i));
+                                    dp.fields.insert(
+                                        h.to_string(),
+                                        tsdb_arrow::schema::FieldValue::Integer(i),
+                                    );
                                 } else if val == "true" || val == "false" {
-                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::Boolean(val == "true"));
+                                    dp.fields.insert(
+                                        h.to_string(),
+                                        tsdb_arrow::schema::FieldValue::Boolean(val == "true"),
+                                    );
                                 } else {
-                                    dp.fields.insert(h.to_string(), tsdb_arrow::schema::FieldValue::String(val.to_string()));
+                                    dp.fields.insert(
+                                        h.to_string(),
+                                        tsdb_arrow::schema::FieldValue::String(val.to_string()),
+                                    );
                                 }
                             }
                         }
@@ -338,7 +676,7 @@ fn execute_import(
 
             let total = datapoints.len();
             for chunk in datapoints.chunks(batch_size) {
-                db.write_batch(chunk)?;
+                engine.write_batch(chunk)?;
             }
 
             println!("Imported {} data points from {}", total, file);
@@ -354,7 +692,6 @@ fn execute_import(
     Ok(())
 }
 
-/// 归档管理操作: 将过期 RocksDB CF 数据导出为 JSON Lines 文件后删除源 CF
 fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()> {
     match action {
         ArchiveActions::Create {
@@ -425,9 +762,7 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
                 println!("Archives in {}:", archive_dir);
                 for f in &files {
                     let path = archive_path.join(f);
-                    let size = std::fs::metadata(&path)
-                        .map(|m| m.len())
-                        .unwrap_or(0);
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                     println!("  {} ({} bytes)", f, size);
                 }
             }
@@ -437,18 +772,18 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
     Ok(())
 }
 
-/// 导出数据到文件
 fn execute_export(
     data_dir: &str,
+    engine_type: &str,
     measurement: &str,
     output: &str,
     format: &str,
 ) -> anyhow::Result<()> {
-    let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+    let engine = open_engine(data_dir, engine_type)?;
 
     let now = chrono::Utc::now().timestamp_micros();
     let start = now - 365 * 86_400_000_000i64;
-    let datapoints = db.read_range(measurement, start, now)?;
+    let datapoints = engine.read_range(measurement, &Tags::new(), start, now)?;
 
     if datapoints.is_empty() {
         println!("No data found for measurement: {}", measurement);
@@ -477,10 +812,7 @@ fn execute_export(
                 .collect();
             field_keys.sort();
 
-            let mut headers = vec![
-                "measurement".to_string(),
-                "timestamp".to_string(),
-            ];
+            let mut headers = vec!["measurement".to_string(), "timestamp".to_string()];
             for k in &tag_keys {
                 headers.push(format!("tag_{}", k));
             }
@@ -492,10 +824,7 @@ fn execute_export(
             wtr.write_record(&headers)?;
 
             for dp in &datapoints {
-                let mut row = vec![
-                    dp.measurement.clone(),
-                    dp.timestamp.to_string(),
-                ];
+                let mut row = vec![dp.measurement.clone(), dp.timestamp.to_string()];
                 for k in &tag_keys {
                     let v = dp.tags.get(k).map(|s| s.as_str()).unwrap_or("");
                     row.push(v.to_string());
@@ -525,7 +854,6 @@ fn execute_export(
     Ok(())
 }
 
-/// 数据库健康检查
 fn execute_doctor(data_dir: &str) -> anyhow::Result<()> {
     println!("TSDB Doctor");
     println!("==========");
@@ -568,7 +896,6 @@ fn execute_doctor(data_dir: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 解析天数字符串 (如 "30d" → 30)
 fn parse_days(s: &str) -> anyhow::Result<i64> {
     let s = s.trim();
     if let Some(days_str) = s.strip_suffix('d') {
@@ -578,15 +905,20 @@ fn parse_days(s: &str) -> anyhow::Result<i64> {
     }
 }
 
-/// 运行基准测试 (写入/读取)
-fn run_bench(data_dir: &str, mode: &str, points: usize, workers: usize) -> anyhow::Result<()> {
+fn run_bench(
+    data_dir: &str,
+    engine_type: &str,
+    mode: &str,
+    points: usize,
+    workers: usize,
+) -> anyhow::Result<()> {
     use std::time::Instant;
-    use tsdb_arrow::schema::{FieldValue, Tags};
+    use tsdb_arrow::schema::FieldValue;
 
     let bench_dir = std::path::Path::new(data_dir);
     std::fs::create_dir_all(bench_dir)?;
 
-    let db = tsdb_rocksdb::TsdbRocksDb::open(bench_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+    let engine = open_engine(data_dir, engine_type)?;
 
     match mode {
         "write" => {
@@ -608,11 +940,11 @@ fn run_bench(data_dir: &str, mode: &str, points: usize, workers: usize) -> anyho
                 .collect();
 
             let start = Instant::now();
-            db.write_batch(&dps)?;
+            engine.write_batch(&dps)?;
             let elapsed = start.elapsed();
 
             let pts_per_sec = points as f64 / elapsed.as_secs_f64();
-            println!("Write Benchmark Results");
+            println!("Write Benchmark Results ({} engine)", engine_type);
             println!("=======================");
             println!("Points:     {}", points);
             println!("Workers:    {}", workers);
@@ -621,6 +953,7 @@ fn run_bench(data_dir: &str, mode: &str, points: usize, workers: usize) -> anyho
 
             let report = serde_json::json!({
                 "mode": "write",
+                "engine": engine_type,
                 "points": points,
                 "workers": workers,
                 "elapsed_secs": elapsed.as_secs_f64(),
@@ -644,14 +977,19 @@ fn run_bench(data_dir: &str, mode: &str, points: usize, workers: usize) -> anyho
                     }
                 })
                 .collect();
-            db.write_batch(&dps)?;
+            engine.write_batch(&dps)?;
 
             let start = Instant::now();
-            let result = db.read_range("cpu", base_ts, base_ts + (points as i64 - 1) * 1_000)?;
+            let result = engine.read_range(
+                "cpu",
+                &Tags::new(),
+                base_ts,
+                base_ts + (points as i64 - 1) * 1_000,
+            )?;
             let elapsed = start.elapsed();
 
             let pts_per_sec = result.len() as f64 / elapsed.as_secs_f64();
-            println!("Read Benchmark Results");
+            println!("Read Benchmark Results ({} engine)", engine_type);
             println!("======================");
             println!("Points:     {}", result.len());
             println!("Elapsed:    {:.2}s", elapsed.as_secs_f64());
@@ -659,6 +997,7 @@ fn run_bench(data_dir: &str, mode: &str, points: usize, workers: usize) -> anyho
 
             let report = serde_json::json!({
                 "mode": "read",
+                "engine": engine_type,
                 "points": result.len(),
                 "elapsed_secs": elapsed.as_secs_f64(),
                 "ops_per_sec": pts_per_sec,

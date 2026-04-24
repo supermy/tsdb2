@@ -74,7 +74,7 @@ impl ArrowAdapter {
 mod tests {
     use super::*;
     use crate::config::RocksDbConfig;
-    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
     use chrono::Datelike;
     use std::sync::Arc;
     use tsdb_arrow::schema::{FieldValue, Tags};

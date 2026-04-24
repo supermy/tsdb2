@@ -29,7 +29,10 @@ mod tests {
 
                 let mut tags = Tags::new();
                 tags.insert("symbol".to_string(), symbol.to_string());
-                tags.insert("exchange".to_string(), if sym_idx % 2 == 0 { "SSE" } else { "SZSE" }.to_string());
+                tags.insert(
+                    "exchange".to_string(),
+                    if sym_idx % 2 == 0 { "SSE" } else { "SZSE" }.to_string(),
+                );
 
                 let mut fields = tsdb_arrow::schema::Fields::new();
                 fields.insert("open".to_string(), FieldValue::Float(open));
@@ -56,7 +59,9 @@ mod tests {
         measurement: &str,
         datapoints: &[DataPoint],
     ) {
-        engine.register_from_datapoints(measurement, datapoints).unwrap();
+        engine
+            .register_from_datapoints(measurement, datapoints)
+            .unwrap();
 
         let table = engine
             .session_context()
@@ -71,7 +76,10 @@ mod tests {
         let schema = table.schema();
         let batch = datapoints_to_record_batch(datapoints, schema.clone()).unwrap();
         let mem_table = MemTable::try_new(schema, vec![vec![batch]]).unwrap();
-        engine.session_context().deregister_table(measurement).unwrap();
+        engine
+            .session_context()
+            .deregister_table(measurement)
+            .unwrap();
         engine
             .session_context()
             .register_table(measurement, Arc::new(mem_table))
@@ -91,7 +99,12 @@ mod tests {
         db.write_batch(&dps).unwrap();
         let elapsed = start.elapsed();
         let qps = dps.len() as f64 / elapsed.as_secs_f64();
-        eprintln!("Finance tick write: {} points in {:.2}s ({:.0} pts/s)", dps.len(), elapsed.as_secs_f64(), qps);
+        eprintln!(
+            "Finance tick write: {} points in {:.2}s ({:.0} pts/s)",
+            dps.len(),
+            elapsed.as_secs_f64(),
+            qps
+        );
 
         assert!(qps > 1000.0);
     }
@@ -109,10 +122,9 @@ mod tests {
         let result = db.read_range("market_tick", base_ts, ts_now()).unwrap();
         assert!(!result.is_empty());
 
-        let latest_per_symbol: std::collections::HashMap<String, i64> = result.iter()
-            .filter_map(|dp| {
-                dp.tags.get("symbol").map(|s| (s.clone(), dp.timestamp))
-            })
+        let latest_per_symbol: std::collections::HashMap<String, i64> = result
+            .iter()
+            .filter_map(|dp| dp.tags.get("symbol").map(|s| (s.clone(), dp.timestamp)))
             .fold(std::collections::HashMap::new(), |mut acc, (sym, ts)| {
                 let entry = acc.entry(sym).or_insert(i64::MIN);
                 *entry = (*entry).max(ts);
@@ -120,7 +132,7 @@ mod tests {
             });
 
         assert_eq!(latest_per_symbol.len(), 2);
-        for (_, latest_ts) in &latest_per_symbol {
+        for latest_ts in latest_per_symbol.values() {
             assert!(*latest_ts > base_ts);
         }
     }
@@ -191,7 +203,9 @@ mod tests {
         target_tags.insert("exchange".to_string(), "SSE".to_string());
 
         let base_ts = ts_now() - 50 * 1_000_000;
-        let result = db.prefix_scan("market_tick", &target_tags, base_ts, ts_now()).unwrap();
+        let result = db
+            .prefix_scan("market_tick", &target_tags, base_ts, ts_now())
+            .unwrap();
         assert!(!result.is_empty());
 
         for dp in &result {
@@ -222,7 +236,10 @@ mod tests {
         assert_eq!(*result.fields.get("open").unwrap(), FieldValue::Float(10.0));
         assert_eq!(*result.fields.get("high").unwrap(), FieldValue::Float(10.5));
         assert_eq!(*result.fields.get("low").unwrap(), FieldValue::Float(9.8));
-        assert_eq!(*result.fields.get("close").unwrap(), FieldValue::Float(10.2));
+        assert_eq!(
+            *result.fields.get("close").unwrap(),
+            FieldValue::Float(10.2)
+        );
     }
 
     #[test]
@@ -247,8 +264,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_finance_dual_engine_consistency() {
-        use tsdb_parquet::partition::{PartitionConfig, PartitionManager};
-        use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
         use tsdb_storage_arrow::{ArrowStorageConfig, ArrowStorageEngine};
 
         let rocks_dir = tempfile::tempdir().unwrap();
@@ -263,29 +278,43 @@ mod tests {
                 flush_interval_ms: 100,
                 ..Default::default()
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         let symbols = vec!["600000", "000001"];
         let dps = generate_market_data(&symbols, 100);
 
         for dp in &dps {
-            rocks_db.put(&dp.measurement, &dp.tags, dp.timestamp, &dp.fields).unwrap();
+            rocks_db
+                .put(&dp.measurement, &dp.tags, dp.timestamp, &dp.fields)
+                .unwrap();
         }
         parquet_engine.write_batch(&dps).unwrap();
         parquet_engine.flush().unwrap();
 
         let base_ts = ts_now() - 100 * 1_000_000;
-        let rocks_result = rocks_db.read_range("market_tick", base_ts, ts_now()).unwrap();
+        let rocks_result = rocks_db
+            .read_range("market_tick", base_ts, ts_now())
+            .unwrap();
 
         let empty_tags = Tags::new();
-        let parquet_result = parquet_engine.read_range("market_tick", &empty_tags, base_ts, ts_now()).unwrap();
+        let parquet_result = parquet_engine
+            .read_range("market_tick", &empty_tags, base_ts, ts_now())
+            .unwrap();
 
-        assert_eq!(rocks_result.len(), parquet_result.len(), "RocksDB and Parquet should return same count");
+        assert_eq!(
+            rocks_result.len(),
+            parquet_result.len(),
+            "RocksDB and Parquet should return same count"
+        );
 
         let mut rocks_ts: Vec<i64> = rocks_result.iter().map(|dp| dp.timestamp).collect();
         let mut parquet_ts: Vec<i64> = parquet_result.iter().map(|dp| dp.timestamp).collect();
         rocks_ts.sort();
         parquet_ts.sort();
-        assert_eq!(rocks_ts, parquet_ts, "timestamps should match between engines");
+        assert_eq!(
+            rocks_ts, parquet_ts,
+            "timestamps should match between engines"
+        );
     }
 }

@@ -15,7 +15,9 @@ predicates = "3"
 [dependencies]
 tsdb-arrow = { workspace = true }
 tsdb-rocksdb = { workspace = true }
+tsdb-storage-arrow = { workspace = true }
 tsdb-datafusion = { workspace = true }
+tsdb-iceberg = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }

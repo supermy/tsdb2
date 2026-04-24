@@ -8,13 +8,16 @@
 //! - `schema`: 时序 Schema (扩展/紧凑模式)、DataPoint/FieldValue 定义
 //! - `memory`: 线程安全的内存池 (CAS 无锁分配)
 //! - `error`: 错误类型定义
+//! - `engine`: 统一存储引擎 trait (双引擎抽象)
 
 pub mod converter;
+pub mod engine;
 pub mod error;
 pub mod memory;
 pub mod schema;
 
 pub use converter::{datapoints_to_record_batch, record_batch_to_datapoints};
+pub use engine::StorageEngine;
 pub use error::{Result, TsdbArrowError};
 pub use memory::TsdbMemoryPool;
 pub use schema::{compact_tsdb_schema, tsdb_schema, TsdbSchemaBuilder};
