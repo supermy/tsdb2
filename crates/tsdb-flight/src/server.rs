@@ -10,7 +10,6 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tonic::{Request, Response, Status, Streaming};
 use tsdb_arrow::engine::StorageEngine;
-use tsdb_arrow::schema::Tags;
 
 pub struct TsdbFlightServer {
     pub(crate) ctx: SessionContext,
@@ -57,21 +56,17 @@ impl TsdbFlightServer {
     }
 
     fn register_measurement_from_db(&self, measurement: &str) -> crate::error::Result<()> {
-        let now = chrono::Utc::now().timestamp_micros();
-        let start = now - 7 * 86_400_000_000i64;
-        let datapoints = self
-            .engine
-            .read_range(measurement, &Tags::new(), start, now)?;
+        let schema = self.engine.measurement_schema(measurement);
+        let schema = match schema {
+            Some(s) => s,
+            None => return Ok(()),
+        };
 
-        if datapoints.is_empty() {
-            return Ok(());
-        }
-
-        let provider = tsdb_datafusion::TsdbTableProvider::from_datapoints(
+        let provider = tsdb_datafusion::TsdbTableProvider::new(
             measurement,
-            &datapoints,
+            schema,
             std::path::PathBuf::new(),
-        )?;
+        );
 
         self.ctx
             .register_table(measurement, Arc::new(provider))

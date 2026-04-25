@@ -2,6 +2,7 @@ use crate::error::TsdbArrowError;
 use crate::schema::{DataPoint, Tags};
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
+use std::any::Any;
 
 pub type EngineResult<T> = std::result::Result<T, TsdbArrowError>;
 
@@ -41,4 +42,6 @@ pub trait StorageEngine: Send + Sync {
         let _ = measurement;
         None
     }
+
+    fn as_any(&self) -> &dyn Any;
 }

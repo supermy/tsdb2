@@ -281,6 +281,10 @@ impl tsdb_arrow::StorageEngine for ArrowStorageEngine {
         };
         Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(&datapoints))
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

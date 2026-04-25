@@ -98,7 +98,7 @@ impl Schema {
     }
 
     pub fn from_datapoint_schema(
-        measurement: &str,
+        _measurement: &str,
         tags: &BTreeMap<String, String>,
         fields: &BTreeMap<String, tsdb_arrow::schema::FieldValue>,
     ) -> Self {
@@ -148,9 +148,6 @@ impl Schema {
             });
             col_id += 1;
         }
-
-        let mut metadata = BTreeMap::new();
-        metadata.insert("measurement".to_string(), measurement.to_string());
 
         Self {
             schema_id: 0,

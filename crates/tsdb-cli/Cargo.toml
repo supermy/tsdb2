@@ -18,6 +18,9 @@ tsdb-rocksdb = { workspace = true }
 tsdb-storage-arrow = { workspace = true }
 tsdb-datafusion = { workspace = true }
 tsdb-iceberg = { workspace = true }
+tsdb-admin = { workspace = true }
+tsdb-flight = { workspace = true }
+axum = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,3 +33,5 @@ anyhow = "1"
 csv = "1"
 datafusion = { workspace = true }
 arrow = { workspace = true }
+arrow-flight = { workspace = true }
+tonic = { workspace = true }

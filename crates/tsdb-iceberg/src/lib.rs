@@ -9,6 +9,7 @@ pub mod snapshot;
 pub mod stats;
 pub mod table;
 pub mod table_provider;
+pub mod util;
 
 pub use catalog::{IcebergCatalog, TableMetadata};
 pub use error::{IcebergError, Result};

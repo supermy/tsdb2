@@ -89,9 +89,26 @@ impl DataArchiver {
                 let age_days = (now - cf_date).num_days() as u64;
                 if age_days >= retention_days {
                     let output_path = archive_dir.join(format!("{}.jsonl", cf_name));
+                    let marker_path = archive_dir.join(format!("{}.archived", cf_name));
+
+                    if marker_path.exists() {
+                        if output_path.exists() {
+                            db.drop_cf(cf_name)?;
+                            let _ = std::fs::remove_file(&marker_path);
+                            archived_count += 1;
+                            tracing::info!(
+                                "completed previously interrupted archive for CF {}",
+                                cf_name
+                            );
+                        }
+                        continue;
+                    }
+
                     let count = Self::export_cf_to_json(db, cf_name, &output_path)?;
+                    std::fs::write(&marker_path, format!("{}", count))?;
                     total_points += count;
                     db.drop_cf(cf_name)?;
+                    let _ = std::fs::remove_file(&marker_path);
                     archived_count += 1;
                 }
             }
@@ -144,7 +161,13 @@ impl DataArchiver {
             })
             .unwrap_or("unknown");
 
-        let mut all_dps: Vec<tsdb_arrow::schema::DataPoint> = Vec::new();
+        let mut buffer: Vec<tsdb_arrow::schema::DataPoint> = Vec::with_capacity(batch_size);
+        let mut total = 0usize;
+        let mut file_idx = 0usize;
+        let mut schema: Option<arrow::datatypes::SchemaRef> = None;
+
+        std::fs::create_dir_all(output_dir)?;
+
         for item in iter {
             let (raw_key, raw_value) = item?;
             let ts_key = crate::key::TsdbKey::decode(&raw_key)?;
@@ -157,56 +180,74 @@ impl DataArchiver {
             } else {
                 tsdb_arrow::schema::Tags::new()
             };
-            all_dps.push(tsdb_arrow::schema::DataPoint {
+            let dp = tsdb_arrow::schema::DataPoint {
                 measurement: measurement.to_string(),
                 tags,
                 fields,
                 timestamp: ts_key.timestamp,
-            });
+            };
+
+            if schema.is_none() {
+                let tag_keys: Vec<String> = dp.tags.keys().cloned().collect();
+                let field_types: Vec<(String, _)> = dp
+                    .fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), tsdb_arrow::schema::field_value_to_data_type(v)))
+                    .collect();
+                schema = Some(tsdb_arrow::schema::compact_tsdb_schema(
+                    measurement,
+                    &tag_keys,
+                    &field_types,
+                ));
+            }
+
+            buffer.push(dp);
+
+            if buffer.len() >= batch_size {
+                let s = schema.clone().unwrap();
+                Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s)?;
+                total += buffer.len();
+                buffer.clear();
+                file_idx += 1;
+            }
         }
 
-        if all_dps.is_empty() {
-            return Ok(0);
-        }
-
-        std::fs::create_dir_all(output_dir)?;
-
-        let tag_keys: Vec<String> = all_dps[0].tags.keys().cloned().collect();
-        let field_types: Vec<(String, _)> = all_dps[0]
-            .fields
-            .iter()
-            .map(|(k, v)| (k.clone(), tsdb_arrow::schema::field_value_to_data_type(v)))
-            .collect();
-
-        let schema = tsdb_arrow::schema::compact_tsdb_schema(measurement, &tag_keys, &field_types);
-
-        let total = all_dps.len();
-        for (file_idx, chunk) in all_dps.chunks(batch_size).enumerate() {
-            let batch = tsdb_arrow::converter::datapoints_to_record_batch(chunk, schema.clone())?;
-            let file_path = output_dir.join(format!("part-{:08}.parquet", file_idx));
-            let file = std::fs::File::create(&file_path)?;
-            let props = parquet::file::properties::WriterProperties::builder()
-                .set_compression(parquet::basic::Compression::ZSTD(
-                    parquet::basic::ZstdLevel::default(),
-                ))
-                .build();
-            let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(
-                file,
-                schema.clone(),
-                Some(props),
-            )
-            .map_err(|e| {
-                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
-            })?;
-            writer.write(&batch).map_err(|e| {
-                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
-            })?;
-            writer.close().map_err(|e| {
-                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
-            })?;
+        if !buffer.is_empty() {
+            let s = schema.clone().unwrap();
+            Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s)?;
+            total += buffer.len();
         }
 
         Ok(total)
+    }
+
+    fn write_parquet_chunk(
+        output_dir: &Path,
+        file_idx: usize,
+        chunk: &[tsdb_arrow::schema::DataPoint],
+        schema: &arrow::datatypes::SchemaRef,
+    ) -> Result<()> {
+        let batch = tsdb_arrow::converter::datapoints_to_record_batch(chunk, schema.clone())?;
+        let file_path = output_dir.join(format!("part-{:08}.parquet", file_idx));
+        let file = std::fs::File::create(&file_path)?;
+        let props = parquet::file::properties::WriterProperties::builder()
+            .set_compression(parquet::basic::Compression::ZSTD(
+                parquet::basic::ZstdLevel::default(),
+            ))
+            .build();
+        let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(
+            file,
+            schema.clone(),
+            Some(props),
+        )
+        .map_err(|e| crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string())))?;
+        writer
+            .write(&batch)
+            .map_err(|e| crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string())))?;
+        writer
+            .close()
+            .map_err(|e| crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string())))?;
+        Ok(())
     }
 }
 

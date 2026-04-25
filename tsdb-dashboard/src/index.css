@@ -1,0 +1,44 @@
+body {
+  margin: 0;
+  padding: 0;
+  background: #000;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.ant-card {
+  background: #1a1a1a !important;
+  border-color: #333 !important;
+}
+
+.ant-card-head {
+  color: #fff !important;
+  border-color: #333 !important;
+}
+
+.ant-table {
+  background: #1a1a1a !important;
+}
+
+.ant-descriptions-item-label {
+  color: #999 !important;
+}
+
+.ant-descriptions-item-content {
+  color: #fff !important;
+}
+
+.ant-form-item-label > label {
+  color: #ccc !important;
+}
+
+.ant-select-selector {
+  background: #1a1a1a !important;
+}
+
+.ant-input, .ant-input-number {
+  background: #1a1a1a !important;
+  color: #fff !important;
+}

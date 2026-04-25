@@ -5,6 +5,88 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-04-25
+
+### Added
+
+- **Web 管理界面** (`tsdb-admin` + `tsdb-dashboard`)
+  - NNG Admin Server: 基于 nanomsg-next-generation 的管理服务
+  - axum HTTP Gateway: REST API + WebSocket 实时推送
+  - React + Vite + Ant Design 前端，10 个功能页面
+  - 暗色主题，响应式布局
+
+- **Dashboard 页面**
+  - 仪表盘: 服务概览、实时指标、健康状态
+  - 服务管理: 创建/启停/重启服务、日志查看
+  - 配置管理: 配置文件 CRUD、对比、应用
+  - 功能测试: SQL 测试、写入/读取基准测试
+  - 状态监控: CPU/内存/磁盘/网络实时图表、告警
+  - 数据查询: 时间范围查询
+  - RocksDB 管理: CF 统计、KV 扫描、序列 Schema
+  - Parquet 查看: 文件列表、元数据、数据预览
+  - SQL 控制台: SQL 编辑器、结果表格、执行历史、示例 SQL
+  - 数据生命周期: 热温冷分布、归档操作
+
+- **系统指标采集** (`MetricsCollector`)
+  - CPU 使用率、负载、温度
+  - 内存使用率、总量、已用
+  - 磁盘使用率、总量、已用
+  - 网络收发字节数
+  - GPU 温度
+  - 自动写入 RocksDB 作为时序数据 (sys_cpu, sys_memory, sys_disk, sys_network, sys_temp)
+  - WebSocket 实时推送
+
+- **Parquet 数据查看 API** (`ParquetApi`)
+  - 列出 archive/ 和 parquet_data/ 目录下的 Parquet 文件
+  - 读取文件元数据（行数、列数、压缩方式、列类型）
+  - 数据预览（前 N 行，JSON 格式）
+
+- **SQL 执行 API** (`SqlApi`)
+  - 直接从 RocksDB 读取数据，通过 DataFusion 执行 SQL
+  - 支持 SELECT / WHERE / GROUP BY / ORDER BY / LIMIT / 聚合函数
+  - 支持 SHOW TABLES（启用 information_schema）
+  - Timestamp 列自动格式化为可读日期时间
+  - 结果以 JSON 格式返回，最多 1000 行
+
+- **数据生命周期管理 API** (`LifecycleApi`)
+  - 基于 CF 日期分区自动分类热/温/冷数据
+  - 热数据 (≤3天): RocksDB 内存 + SST, SNAPPY 压缩
+  - 温数据 (4-14天): RocksDB SST only, 降级压缩
+  - 冷数据 (>14天): 归档为 Parquet, ZSTD 压缩
+  - 手动归档操作: 将指定天数前的数据导出为 Parquet
+
+- **RocksDB 管理 API**
+  - 统计概览: CF 数量、SST 大小、键数
+  - CF 详情: 每层文件数、memtable 大小、block cache
+  - KV 扫描: 指定 CF 和前缀扫描键值对
+  - KV 获取: 指定 CF 和键获取值
+  - 序列 Schema: 显示 measurement → tags → fields 映射
+  - 手动压缩
+
+- **运维脚本**
+  - `scripts/build.sh`: 完整构建（后端 + 前端）
+  - `scripts/start.sh`: 生产模式启动
+  - `scripts/dev.sh`: 开发模式（前后端热更新）
+  - `scripts/check.sh`: 代码质量检查
+
+### Changed
+
+- HTTP Dashboard 端口从 3000 改为 8902
+- 默认配置从 `default` 改为 `balanced`
+- 构建流程增加前端产物同步到 `target/release/dashboard/`
+
+### Fixed
+
+- NNG Req0 并发竞态: 使用 Mutex 序列化 + spawn_blocking
+- 路径遍历漏洞: 添加名称验证
+- CORS 跨域: 添加 CorsLayer
+- Gateway 启动时序: 拆分 AdminServer bind/run
+- RocksDB LOCK 文件冲突: 进程清理 + LOCK 删除
+- Parquet 元数据 API 兼容: `file_meta` → `parquet_meta`
+- SQL API 直接查询 RocksDB: 从依赖 Parquet 文件改为直接读取
+- Timestamp Arrow 数组 downcast: 按 TimeUnit 分别处理
+- 前端路由缺失: 注册 Parquet/SQL/Lifecycle 三个页面
+
 ## [0.2.0] - 2026-04-22
 
 ### Added

@@ -5,7 +5,7 @@ use arrow::record_batch::RecordBatch;
 use std::path::PathBuf;
 
 use crate::error::{IcebergError, Result};
-use crate::manifest::{DataFile, EntryStatus, ManifestMeta};
+use crate::manifest::{DataFile, EntryStatus, ManifestMeta, PartitionFieldSummary};
 use crate::schema::Schema;
 use crate::snapshot::Snapshot;
 use crate::table::IcebergTable;
@@ -182,7 +182,7 @@ impl IcebergScan {
                 let batch = batch_result?;
 
                 if let Some(ref pred) = self.predicate {
-                    if let Some(filtered) = row_filter(&batch, pred, &self.schema) {
+                    if let Some(filtered) = row_filter(&batch, pred, &self.schema)? {
                         if filtered.num_rows() > 0 {
                             batches.push(filtered);
                         }
@@ -208,11 +208,139 @@ impl IcebergScan {
     }
 }
 
-fn manifest_matches_predicate(mm: &ManifestMeta, _pred: &Predicate) -> bool {
+fn manifest_matches_predicate(mm: &ManifestMeta, pred: &Predicate) -> bool {
     if mm.partitions_summary.is_none() {
         return true;
     }
-    true
+    let summaries = mm.partitions_summary.as_ref().unwrap();
+    if summaries.is_empty() {
+        return true;
+    }
+    manifest_predicate_check(summaries, pred)
+}
+
+fn manifest_predicate_check(summaries: &[PartitionFieldSummary], pred: &Predicate) -> bool {
+    match pred {
+        Predicate::AlwaysTrue => true,
+        Predicate::And(left, right) => {
+            manifest_predicate_check(summaries, left) && manifest_predicate_check(summaries, right)
+        }
+        Predicate::Or(left, right) => {
+            manifest_predicate_check(summaries, left) || manifest_predicate_check(summaries, right)
+        }
+        Predicate::Not(inner) => !manifest_predicate_check(summaries, inner),
+        Predicate::Gt(field_id, val) => {
+            let idx = *field_id as usize;
+            if idx < summaries.len() {
+                if let Some(ref upper) = summaries[idx].upper_bound {
+                    let upper_val = decode_bound_value(upper);
+                    if let Some(uv) = upper_val {
+                        return !value_le(&uv, val);
+                    }
+                }
+            }
+            true
+        }
+        Predicate::GtEq(field_id, val) => {
+            let idx = *field_id as usize;
+            if idx < summaries.len() {
+                if let Some(ref upper) = summaries[idx].upper_bound {
+                    let upper_val = decode_bound_value(upper);
+                    if let Some(uv) = upper_val {
+                        return !value_lt(&uv, val);
+                    }
+                }
+            }
+            true
+        }
+        Predicate::Lt(field_id, val) => {
+            let idx = *field_id as usize;
+            if idx < summaries.len() {
+                if let Some(ref lower) = summaries[idx].lower_bound {
+                    let lower_val = decode_bound_value(lower);
+                    if let Some(lv) = lower_val {
+                        return !value_ge(&lv, val);
+                    }
+                }
+            }
+            true
+        }
+        Predicate::LtEq(field_id, val) => {
+            let idx = *field_id as usize;
+            if idx < summaries.len() {
+                if let Some(ref lower) = summaries[idx].lower_bound {
+                    let lower_val = decode_bound_value(lower);
+                    if let Some(lv) = lower_val {
+                        return !value_gt(&lv, val);
+                    }
+                }
+            }
+            true
+        }
+        Predicate::Eq(field_id, val) => {
+            let idx = *field_id as usize;
+            if idx < summaries.len() {
+                if let (Some(lower), Some(upper)) =
+                    (summaries[idx].lower_bound.as_ref(), summaries[idx].upper_bound.as_ref())
+                {
+                    let lower_val = decode_bound_value(lower);
+                    let upper_val = decode_bound_value(upper);
+                    if let (Some(lv), Some(uv)) = (lower_val, upper_val) {
+                        return value_ge(&lv, val) && value_le(&uv, val);
+                    }
+                }
+            }
+            true
+        }
+        Predicate::NotEq(_, _) => true,
+        Predicate::InList(_, _) => true,
+        Predicate::IsNull(_) => true,
+        Predicate::IsNotNull(_) => true,
+    }
+}
+
+fn decode_bound_value(bytes: &[u8]) -> Option<PredicateValue> {
+    if bytes.len() == 8 {
+        let v = i64::from_be_bytes(bytes.try_into().ok()?);
+        Some(PredicateValue::Long(v))
+    } else if bytes.len() == 16 {
+        let v = f64::from_be_bytes(bytes[8..16].try_into().ok()?);
+        Some(PredicateValue::Double(v))
+    } else {
+        None
+    }
+}
+
+fn value_lt(a: &PredicateValue, b: &PredicateValue) -> bool {
+    match (a, b) {
+        (PredicateValue::Long(av), PredicateValue::Long(bv)) => av < bv,
+        (PredicateValue::Double(av), PredicateValue::Double(bv)) => av < bv,
+        _ => false,
+    }
+}
+
+fn value_le(a: &PredicateValue, b: &PredicateValue) -> bool {
+    match (a, b) {
+        (PredicateValue::Long(av), PredicateValue::Long(bv)) => av <= bv,
+        (PredicateValue::Double(av), PredicateValue::Double(bv)) => av <= bv,
+        _ => false,
+    }
+}
+
+fn value_gt(a: &PredicateValue, b: &PredicateValue) -> bool {
+    match (a, b) {
+        (PredicateValue::Long(av), PredicateValue::Long(bv)) => av > bv,
+        (PredicateValue::Double(av), PredicateValue::Double(bv)) => av > bv,
+        _ => false,
+    }
+}
+
+fn value_ge(a: &PredicateValue, b: &PredicateValue) -> bool {
+    match (a, b) {
+        (PredicateValue::Long(av), PredicateValue::Long(bv)) => av >= bv,
+        (PredicateValue::Double(av), PredicateValue::Double(bv)) => av >= bv,
+        _ => false,
+    }
 }
 
 fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
@@ -315,11 +443,17 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
     }
 }
 
-fn row_filter(batch: &RecordBatch, pred: &Predicate, schema: &Schema) -> Option<RecordBatch> {
-    let mask = evaluate_predicate(batch, pred, schema)?;
+fn row_filter(batch: &RecordBatch, pred: &Predicate, schema: &Schema) -> Result<Option<RecordBatch>> {
+    let mask = match evaluate_predicate(batch, pred, schema) {
+        Some(m) => m,
+        None => return Ok(None),
+    };
     match filter_record_batch(batch, &mask) {
-        Ok(filtered) => Some(filtered),
-        Err(_) => Some(batch.clone()),
+        Ok(filtered) => Ok(Some(filtered)),
+        Err(e) => Err(IcebergError::Internal(format!(
+            "row filter failed: {}",
+            e
+        ))),
     }
 }
 

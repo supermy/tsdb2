@@ -15,6 +15,9 @@ struct Cli {
 
     #[arg(long, global = true, default_value = "rocksdb")]
     storage_engine: String,
+
+    #[arg(long, global = true, default_value = "balanced")]
+    config: String,
 }
 
 #[derive(Subcommand)]
@@ -62,6 +65,16 @@ enum Commands {
     Iceberg {
         #[command(subcommand)]
         action: IcebergActions,
+    },
+    Serve {
+        #[arg(long, default_value = "0.0.0.0")]
+        host: String,
+        #[arg(long, default_value_t = 50051)]
+        flight_port: u16,
+        #[arg(long, default_value_t = 8080)]
+        admin_port: u16,
+        #[arg(long, default_value_t = 3000)]
+        http_port: u16,
     },
 }
 
@@ -130,11 +143,11 @@ enum IcebergActions {
     },
 }
 
-fn open_engine(data_dir: &str, engine_type: &str) -> anyhow::Result<Arc<dyn StorageEngine>> {
+fn open_engine(data_dir: &str, engine_type: &str, config_name: &str) -> anyhow::Result<Arc<dyn StorageEngine>> {
     match engine_type {
         "rocksdb" => {
-            let db =
-                tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+            let config = load_rocksdb_config(config_name)?;
+            let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, config)?;
             Ok(Arc::new(db))
         }
         "arrow" | "parquet" => {
@@ -149,22 +162,35 @@ fn open_engine(data_dir: &str, engine_type: &str) -> anyhow::Result<Arc<dyn Stor
     }
 }
 
+fn load_rocksdb_config(config_name: &str) -> anyhow::Result<tsdb_rocksdb::RocksDbConfig> {
+    let config_path = format!("configs/{}.ini", config_name);
+    if std::path::Path::new(&config_path).exists() {
+        let config = tsdb_rocksdb::RocksDbConfig::from_ini_file(&config_path)
+            .map_err(|e| anyhow::anyhow!("config load error: {}", e))?;
+        tracing::info!("loaded config from {}", config_path);
+        Ok(config)
+    } else {
+        tracing::info!("config file {} not found, using defaults", config_path);
+        Ok(tsdb_rocksdb::RocksDbConfig::default())
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Status => execute_status(&cli.data_dir, &cli.storage_engine)?,
+        Commands::Status => execute_status(&cli.data_dir, &cli.storage_engine, &cli.config)?,
         Commands::Query { sql, format } => {
-            execute_query(&cli.data_dir, &cli.storage_engine, &sql, &format)?
+            execute_query(&cli.data_dir, &cli.storage_engine, &cli.config, &sql, &format)?
         }
         Commands::Bench {
             mode,
             points,
             workers,
-        } => run_bench(&cli.data_dir, &cli.storage_engine, &mode, points, workers)?,
-        Commands::Compact { cf } => execute_compact(&cli.data_dir, cf.as_deref())?,
+        } => run_bench(&cli.data_dir, &cli.storage_engine, &cli.config, &mode, points, workers)?,
+        Commands::Compact { cf } => execute_compact(&cli.data_dir, &cli.config, cf.as_deref())?,
         Commands::Import {
             file,
             format,
@@ -172,11 +198,12 @@ fn main() -> anyhow::Result<()> {
         } => execute_import(
             &cli.data_dir,
             &cli.storage_engine,
+            &cli.config,
             &file,
             &format,
             batch_size,
         )?,
-        Commands::Archive { action } => execute_archive(&cli.data_dir, action)?,
+        Commands::Archive { action } => execute_archive(&cli.data_dir, &cli.config, action)?,
         Commands::Export {
             measurement,
             output,
@@ -184,13 +211,107 @@ fn main() -> anyhow::Result<()> {
         } => execute_export(
             &cli.data_dir,
             &cli.storage_engine,
+            &cli.config,
             &measurement,
             &output,
             &format,
         )?,
-        Commands::Doctor => execute_doctor(&cli.data_dir)?,
+        Commands::Doctor => execute_doctor(&cli.data_dir, &cli.config)?,
         Commands::Iceberg { action } => execute_iceberg(&cli.data_dir, action)?,
+        Commands::Serve {
+            host,
+            flight_port,
+            admin_port,
+            http_port,
+        } => execute_serve(&cli.data_dir, &cli.storage_engine, &cli.config, &host, flight_port, admin_port, http_port)?,
     }
+
+    Ok(())
+}
+
+fn execute_serve(
+    data_dir: &str,
+    engine_type: &str,
+    config_name: &str,
+    host: &str,
+    flight_port: u16,
+    admin_port: u16,
+    http_port: u16,
+) -> anyhow::Result<()> {
+    let engine = open_engine(data_dir, engine_type, config_name)?;
+
+    println!("╔══════════════════════════════════════════════╗");
+    println!("║       TSDB2 Server Starting                 ║");
+    println!("╠══════════════════════════════════════════════╣");
+    println!("║  Flight gRPC:  grpc://{}:{}     ", host, flight_port);
+    println!("║  Admin nng:    tcp://{}:{}       ", host, admin_port);
+    println!("║  Admin pub:    tcp://{}:{}       ", host, admin_port + 1);
+    println!("║  Dashboard:    http://{}:{}     ", host, http_port);
+    println!("║  Config:       {}                          ", config_name);
+    println!("║  Data Dir:     {}                           ", data_dir);
+    println!("║  Engine:       {}                           ", engine_type);
+    println!("╚══════════════════════════════════════════════╝");
+
+    let rt = tokio::runtime::Runtime::new()?;
+    rt.block_on(async {
+        let flight_server = tsdb_flight::TsdbFlightServer::new(
+            engine.clone(),
+            datafusion::prelude::SessionContext::new(),
+            host.to_string(),
+            flight_port,
+        );
+
+        let admin_server = tsdb_admin::AdminServer::new(
+            engine.clone(),
+            data_dir,
+            host,
+            admin_port,
+        );
+
+        let bound_admin = admin_server.bind()
+            .map_err(|e| anyhow::anyhow!("admin bind: {}", e))?;
+
+        let nng_req_url = format!("tcp://{}:{}", host, admin_port);
+        let nng_pub_url = format!("tcp://{}:{}", host, admin_port + 1);
+
+        let gateway_state = tsdb_admin::GatewayState::new(&nng_req_url, &nng_pub_url)
+            .map_err(|e| anyhow::anyhow!("gateway init: {}", e))?;
+        let app = tsdb_admin::gateway::build_router(gateway_state);
+
+        let http_addr = format!("{}:{}", host, http_port);
+        let http_listener = tokio::net::TcpListener::bind(&http_addr).await
+            .map_err(|e| anyhow::anyhow!("bind http {}: {}", http_addr, e))?;
+
+        let service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
+        let flight_addr = format!("{}:{}", host, flight_port).parse().unwrap();
+        let flight_server = tonic::transport::Server::builder()
+            .add_service(service)
+            .serve(flight_addr);
+
+        let admin_handle = tokio::spawn(async move {
+            if let Err(e) = bound_admin.run().await {
+                tracing::error!("admin server error: {}", e);
+            }
+        });
+
+        let flight_handle = tokio::spawn(flight_server);
+
+        let http_handle = tokio::spawn(async move {
+            if let Err(e) = axum::serve(http_listener, app).await {
+                tracing::error!("http server error: {}", e);
+            }
+        });
+
+        println!("\n  Dashboard available at http://{}:{}", host, http_port);
+
+        tokio::signal::ctrl_c().await?;
+        println!("\nShutting down...");
+        admin_server.shutdown();
+        flight_handle.abort();
+        admin_handle.abort();
+        http_handle.abort();
+        Ok::<(), anyhow::Error>(())
+    })?;
 
     Ok(())
 }
@@ -417,9 +538,9 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
     Ok(())
 }
 
-fn execute_status(data_dir: &str, engine_type: &str) -> anyhow::Result<()> {
+fn execute_status(data_dir: &str, engine_type: &str, _config_name: &str) -> anyhow::Result<()> {
     if engine_type == "rocksdb" {
-        let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+        let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
         let cfs = db.list_ts_cfs();
         let measurements = db.list_measurements();
 
@@ -457,7 +578,7 @@ fn execute_status(data_dir: &str, engine_type: &str) -> anyhow::Result<()> {
         println!();
         println!("{}", db.stats());
     } else {
-        let engine = open_engine(data_dir, engine_type)?;
+        let engine = open_engine(data_dir, engine_type, _config_name)?;
         let measurements = engine.list_measurements();
 
         println!("TSDB Status ({} Engine)", engine_type);
@@ -478,10 +599,10 @@ fn execute_status(data_dir: &str, engine_type: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn execute_query(data_dir: &str, engine_type: &str, sql: &str, format: &str) -> anyhow::Result<()> {
+fn execute_query(data_dir: &str, engine_type: &str, _config_name: &str, sql: &str, format: &str) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
-        let engine = open_engine(data_dir, engine_type)?;
+        let engine = open_engine(data_dir, engine_type, _config_name)?;
 
         let measurements = engine.list_measurements();
         if measurements.is_empty() {
@@ -583,8 +704,8 @@ fn execute_query(data_dir: &str, engine_type: &str, sql: &str, format: &str) -> 
     })
 }
 
-fn execute_compact(data_dir: &str, cf: Option<&str>) -> anyhow::Result<()> {
-    let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+fn execute_compact(data_dir: &str, _config_name: &str, cf: Option<&str>) -> anyhow::Result<()> {
+    let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
 
     if let Some(cf_name) = cf {
         db.compact_cf(cf_name)?;
@@ -605,11 +726,12 @@ fn execute_compact(data_dir: &str, cf: Option<&str>) -> anyhow::Result<()> {
 fn execute_import(
     data_dir: &str,
     engine_type: &str,
+    _config_name: &str,
     file: &str,
     format: &str,
     batch_size: usize,
 ) -> anyhow::Result<()> {
-    let engine = open_engine(data_dir, engine_type)?;
+    let engine = open_engine(data_dir, engine_type, _config_name)?;
     let content = std::fs::read_to_string(file)?;
 
     match format {
@@ -692,7 +814,7 @@ fn execute_import(
     Ok(())
 }
 
-fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()> {
+fn execute_archive(data_dir: &str, _config_name: &str, action: ArchiveActions) -> anyhow::Result<()> {
     match action {
         ArchiveActions::Create {
             older_than,
@@ -700,7 +822,7 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
         } => {
             let days = parse_days(&older_than)?;
             let db =
-                tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+                tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
 
             let archive_path = Path::new(&output_dir);
             let (archived_cfs, total_points) =
@@ -725,7 +847,7 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
             }
 
             let db =
-                tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default())?;
+                tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
 
             let f = std::fs::File::open(&file)?;
             let reader = std::io::BufReader::new(f);
@@ -775,11 +897,12 @@ fn execute_archive(data_dir: &str, action: ArchiveActions) -> anyhow::Result<()>
 fn execute_export(
     data_dir: &str,
     engine_type: &str,
+    _config_name: &str,
     measurement: &str,
     output: &str,
     format: &str,
 ) -> anyhow::Result<()> {
-    let engine = open_engine(data_dir, engine_type)?;
+    let engine = open_engine(data_dir, engine_type, _config_name)?;
 
     let now = chrono::Utc::now().timestamp_micros();
     let start = now - 365 * 86_400_000_000i64;
@@ -854,7 +977,7 @@ fn execute_export(
     Ok(())
 }
 
-fn execute_doctor(data_dir: &str) -> anyhow::Result<()> {
+fn execute_doctor(data_dir: &str, _config_name: &str) -> anyhow::Result<()> {
     println!("TSDB Doctor");
     println!("==========");
 
@@ -864,7 +987,7 @@ fn execute_doctor(data_dir: &str) -> anyhow::Result<()> {
     }
     println!("[OK]   Data directory exists: {}", data_dir);
 
-    match tsdb_rocksdb::TsdbRocksDb::open(data_dir, tsdb_rocksdb::RocksDbConfig::default()) {
+    match tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?) {
         Ok(db) => {
             println!("[OK]   Database opened successfully");
 
@@ -908,6 +1031,7 @@ fn parse_days(s: &str) -> anyhow::Result<i64> {
 fn run_bench(
     data_dir: &str,
     engine_type: &str,
+    _config_name: &str,
     mode: &str,
     points: usize,
     workers: usize,
@@ -918,7 +1042,7 @@ fn run_bench(
     let bench_dir = std::path::Path::new(data_dir);
     std::fs::create_dir_all(bench_dir)?;
 
-    let engine = open_engine(data_dir, engine_type)?;
+    let engine = open_engine(data_dir, engine_type, _config_name)?;
 
     match mode {
         "write" => {

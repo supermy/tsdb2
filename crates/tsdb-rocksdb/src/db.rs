@@ -189,14 +189,15 @@ impl TsdbRocksDb {
         let key = TsdbKey::new(tags_hash, timestamp).encode();
 
         let meta_cf = self.ensure_meta_cf()?;
-        self.db
-            .put_cf(&meta_cf, tags_hash.to_be_bytes(), encode_tags(tags))?;
-
         let date = micros_to_date(timestamp)?;
         let cf_name = format!("{}{}_{}", TS_CF_PREFIX, measurement, date.format("%Y%m%d"));
         let data_cf = self.ensure_data_cf(&cf_name)?;
         let value = encode_fields(fields);
-        self.db.put_cf(&data_cf, &key, &value)?;
+
+        let mut batch = WriteBatch::default();
+        batch.put_cf(&meta_cf, tags_hash.to_be_bytes(), encode_tags(tags));
+        batch.put_cf(&data_cf, &key, &value);
+        self.db.write(batch)?;
 
         let dp = DataPoint {
             measurement: measurement.to_string(),
@@ -223,14 +224,24 @@ impl TsdbRocksDb {
         let key = TsdbKey::new(tags_hash, timestamp).encode();
 
         let meta_cf = self.ensure_meta_cf()?;
-        self.db
-            .put_cf(&meta_cf, tags_hash.to_be_bytes(), encode_tags(tags))?;
-
         let date = micros_to_date(timestamp)?;
         let cf_name = format!("{}{}_{}", TS_CF_PREFIX, measurement, date.format("%Y%m%d"));
         let data_cf = self.ensure_data_cf(&cf_name)?;
         let value = encode_fields(fields);
-        self.db.merge_cf(&data_cf, &key, &value)?;
+
+        let mut batch = WriteBatch::default();
+        batch.put_cf(&meta_cf, tags_hash.to_be_bytes(), encode_tags(tags));
+        batch.merge_cf(&data_cf, &key, &value);
+        self.db.write(batch)?;
+
+        let dp = DataPoint {
+            measurement: measurement.to_string(),
+            tags: tags.clone(),
+            fields: fields.clone(),
+            timestamp,
+        };
+        self.last_cache.update(&dp);
+
         Ok(())
     }
 
@@ -415,6 +426,10 @@ impl TsdbRocksDb {
         let start_date = micros_to_date(start_micros)?;
         let end_date = micros_to_date(end_micros)?;
 
+        let meta_cf = self.db.cf_handle(SERIES_META_CF);
+        let mut tags_cache: std::collections::HashMap<u64, tsdb_arrow::schema::Tags> =
+            std::collections::HashMap::new();
+
         let mut results = Vec::new();
         let mut current_date = start_date;
 
@@ -430,25 +445,35 @@ impl TsdbRocksDb {
                 for item in iter {
                     let (raw_key, raw_value) = item?;
                     let ts_key = TsdbKey::decode(&raw_key)?;
-                    if ts_key.timestamp < start_micros || ts_key.timestamp > end_micros {
+                    if ts_key.timestamp < start_micros {
                         continue;
+                    }
+                    if ts_key.timestamp > end_micros {
+                        break;
                     }
                     let fields = decode_fields(&raw_value)?;
 
-                    if let Some(meta_cf) = self.db.cf_handle(SERIES_META_CF) {
-                        if let Some(tags_value) = self
-                            .db
-                            .get_pinned_cf(&meta_cf, ts_key.tags_hash.to_be_bytes())?
-                        {
-                            let tags = decode_tags(&tags_value)?;
-                            results.push(tsdb_arrow::schema::DataPoint {
-                                measurement: measurement.to_string(),
-                                tags,
-                                fields,
-                                timestamp: ts_key.timestamp,
-                            });
+                    let tags = match tags_cache.entry(ts_key.tags_hash) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            let resolved = if let Some(ref meta_cf) = meta_cf {
+                                self.db
+                                    .get_pinned_cf(meta_cf, ts_key.tags_hash.to_be_bytes())?
+                                    .and_then(|v| decode_tags(&v).ok())
+                                    .unwrap_or_default()
+                            } else {
+                                tsdb_arrow::schema::Tags::new()
+                            };
+                            e.insert(resolved).clone()
                         }
-                    }
+                    };
+
+                    results.push(tsdb_arrow::schema::DataPoint {
+                        measurement: measurement.to_string(),
+                        tags,
+                        fields,
+                        timestamp: ts_key.timestamp,
+                    });
                 }
             }
             current_date += chrono::Duration::days(1);
@@ -530,6 +555,10 @@ impl TsdbRocksDb {
         let end_date = micros_to_date(end_micros)?;
         let projection: std::collections::HashSet<&str> = field_names.iter().copied().collect();
 
+        let meta_cf = self.db.cf_handle(SERIES_META_CF);
+        let mut tags_cache: std::collections::HashMap<u64, tsdb_arrow::schema::Tags> =
+            std::collections::HashMap::new();
+
         let mut results = Vec::new();
         let mut current_date = start_date;
 
@@ -545,25 +574,35 @@ impl TsdbRocksDb {
                 for item in iter {
                     let (raw_key, raw_value) = item?;
                     let ts_key = TsdbKey::decode(&raw_key)?;
-                    if ts_key.timestamp < start_micros || ts_key.timestamp > end_micros {
+                    if ts_key.timestamp < start_micros {
                         continue;
+                    }
+                    if ts_key.timestamp > end_micros {
+                        break;
                     }
                     let fields = decode_fields_projection(&raw_value, &projection)?;
 
-                    if let Some(meta_cf) = self.db.cf_handle(SERIES_META_CF) {
-                        if let Some(tags_value) = self
-                            .db
-                            .get_pinned_cf(&meta_cf, ts_key.tags_hash.to_be_bytes())?
-                        {
-                            let tags = decode_tags(&tags_value)?;
-                            results.push(tsdb_arrow::schema::DataPoint {
-                                measurement: measurement.to_string(),
-                                tags,
-                                fields,
-                                timestamp: ts_key.timestamp,
-                            });
+                    let tags = match tags_cache.entry(ts_key.tags_hash) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.get().clone(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            let resolved = if let Some(ref meta_cf) = meta_cf {
+                                self.db
+                                    .get_pinned_cf(meta_cf, ts_key.tags_hash.to_be_bytes())?
+                                    .and_then(|v| decode_tags(&v).ok())
+                                    .unwrap_or_default()
+                            } else {
+                                tsdb_arrow::schema::Tags::new()
+                            };
+                            e.insert(resolved).clone()
                         }
-                    }
+                    };
+
+                    results.push(tsdb_arrow::schema::DataPoint {
+                        measurement: measurement.to_string(),
+                        tags,
+                        fields,
+                        timestamp: ts_key.timestamp,
+                    });
                 }
             }
             current_date += chrono::Duration::days(1);
@@ -785,6 +824,10 @@ impl tsdb_arrow::StorageEngine for TsdbRocksDb {
         Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(
             &datapoints,
         ))
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 

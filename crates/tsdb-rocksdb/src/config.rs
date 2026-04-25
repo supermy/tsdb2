@@ -182,11 +182,9 @@ impl RocksDbConfig {
                         }
                         _ => {}
                     },
-                    "rocksdb.meta_cf" => {
-                        if key == "optimize" {
-                            config.optimize_meta_cf =
-                                value.parse().map_err(|e| format!("optimize: {}", e))?;
-                        }
+                    "rocksdb.meta_cf" if key == "optimize" => {
+                        config.optimize_meta_cf =
+                            value.parse().map_err(|e| format!("optimize: {}", e))?;
                     }
                     _ => {}
                 }

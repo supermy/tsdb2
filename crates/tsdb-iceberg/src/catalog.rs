@@ -260,6 +260,24 @@ impl IcebergCatalog {
         batch.delete_cf(&self.cf(TABLE_META_CF)?, meta_key(old_name));
         batch.put_cf(&self.cf(TABLE_META_CF)?, meta_key(new_name), &meta_json);
 
+        let old_prefix = format!("{}\x00", old_name);
+        let new_prefix = format!("{}\x00", new_name);
+
+        for cf_name in &[SNAPSHOT_CF, MANIFEST_LIST_CF, MANIFEST_CF, REFS_CF, SEQ_CF] {
+            let cf = self.cf(cf_name)?;
+            let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+            for item in iter {
+                let (key, value) = item?;
+                let key_str = String::from_utf8_lossy(&key);
+                if key_str.starts_with(&old_prefix) {
+                    let suffix = &key_str[old_prefix.len()..];
+                    let new_key = format!("{}{}", new_prefix, suffix);
+                    batch.delete_cf(&cf, &key);
+                    batch.put_cf(&cf, new_key, &value);
+                }
+            }
+        }
+
         self.db.write(batch)?;
         Ok(())
     }
@@ -476,12 +494,7 @@ fn ref_key(table: &str, ref_name: &str) -> Vec<u8> {
     format!("{}\x00{}", table, ref_name).into_bytes()
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use crate::util::now_ms;
 
 #[cfg(test)]
 mod tests {

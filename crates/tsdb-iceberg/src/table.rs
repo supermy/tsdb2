@@ -786,22 +786,17 @@ fn generate_snapshot_id() -> i64 {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_bytes();
     let hi = i64::from_be_bytes(bytes[0..8].try_into().expect("8 bytes"));
-    hi.abs()
+    (hi & i64::MAX).max(1)
 }
 
 fn generate_manifest_id() -> i64 {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_bytes();
     let lo = i64::from_be_bytes(bytes[8..16].try_into().expect("8 bytes"));
-    lo.abs()
+    (lo & i64::MAX).max(1)
 }
 
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
+use crate::util::now_ms;
 
 #[cfg(test)]
 mod tests {

@@ -7,3 +7,9 @@
 .vscode/
 *.iml
 .env
+/data/
+/dashboard/
+/tmp/
+*.sst
+*.log
+*.LOCK

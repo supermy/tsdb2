@@ -14,6 +14,7 @@ members = [
     "crates/tsdb-stress-rocksdb",
     "crates/tsdb-cli",
     "crates/tsdb-iceberg",
+    "crates/tsdb-admin",
 ]
 
 [workspace.package]
@@ -50,3 +51,8 @@ rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
 fxhash = "0.2"
 tsdb-rocksdb = { path = "crates/tsdb-rocksdb" }
 tsdb-iceberg = { path = "crates/tsdb-iceberg" }
+tsdb-admin = { path = "crates/tsdb-admin" }
+tsdb-flight = { path = "crates/tsdb-flight" }
+axum = { version = "0.7", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower = "0.5"
