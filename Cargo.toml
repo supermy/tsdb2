@@ -46,7 +46,7 @@ tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 crc32fast = "1"
 async-trait = "0.1"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 rocksdb = { version = "0.24", features = ["multi-threaded-cf"] }
 fxhash = "0.2"
 tsdb-rocksdb = { path = "crates/tsdb-rocksdb" }
