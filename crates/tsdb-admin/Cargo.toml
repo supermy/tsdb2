@@ -22,7 +22,7 @@ nng = "1"
 sys-info = "0.9"
 rocksdb = { workspace = true }
 libc = "0.2"
-which = "6"
+which = "8"
 axum = { workspace = true }
 tower-http = { workspace = true }
 tower = { workspace = true }
