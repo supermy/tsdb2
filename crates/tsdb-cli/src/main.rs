@@ -67,7 +67,7 @@ enum Commands {
         action: IcebergActions,
     },
     Serve {
-        #[arg(long, default_value = "0.0.0.0")]
+        #[arg(long, default_value = "127.0.0.1")]
         host: String,
         #[arg(long, default_value_t = 50051)]
         flight_port: u16,
@@ -366,7 +366,9 @@ fn execute_serve(cfg: ServeConfig) -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("bind http {}: {}", http_addr, e))?;
 
         let service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
-        let flight_addr = format!("{}:{}", cfg.host, cfg.flight_port).parse().unwrap();
+        let flight_addr = format!("{}:{}", cfg.host, cfg.flight_port)
+            .parse()
+            .map_err(|e| anyhow::anyhow!("invalid flight address {}:{}: {}", cfg.host, cfg.flight_port, e))?;
         let flight_server = tonic::transport::Server::builder()
             .add_service(service)
             .serve(flight_addr);
@@ -391,11 +393,32 @@ fn execute_serve(cfg: ServeConfig) -> anyhow::Result<()> {
         );
 
         tokio::signal::ctrl_c().await?;
-        println!("\nShutting down...");
+        println!("\nShutting down gracefully...");
         admin_server.shutdown();
-        flight_handle.abort();
-        admin_handle.abort();
-        http_handle.abort();
+
+        let shutdown_timeout = tokio::time::Duration::from_secs(5);
+
+        tokio::select! {
+            _ = flight_handle => {}
+            _ = tokio::time::sleep(shutdown_timeout) => {
+                tracing::warn!("flight server did not shut down in time, aborting");
+            }
+        }
+
+        tokio::select! {
+            _ = admin_handle => {}
+            _ = tokio::time::sleep(shutdown_timeout) => {
+                tracing::warn!("admin server did not shut down in time, aborting");
+            }
+        }
+
+        tokio::select! {
+            _ = http_handle => {}
+            _ = tokio::time::sleep(shutdown_timeout) => {
+                tracing::warn!("http server did not shut down in time, aborting");
+            }
+        }
+
         Ok::<(), anyhow::Error>(())
     })?;
 

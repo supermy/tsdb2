@@ -178,6 +178,26 @@ impl TsdbParquetReader {
 
         let parquet_metadata = builder.metadata();
         let arrow_schema = builder.schema().clone();
+
+        let arrow_schema = if arrow_schema.metadata().get("measurement").is_none() {
+            if let Some(kv) = parquet_metadata.file_metadata().key_value_metadata() {
+                let mut meta = arrow_schema.metadata().clone();
+                for item in kv {
+                    if item.key == "ARROW:sCHEmA" || item.key == "arrow_schema" {
+                        continue;
+                    }
+                    if let Some(ref val) = item.value {
+                        meta.insert(item.key.clone(), val.clone());
+                    }
+                }
+                Arc::new(arrow_schema.as_ref().clone().with_metadata(meta))
+            } else {
+                arrow_schema
+            }
+        } else {
+            arrow_schema
+        };
+
         let num_row_groups = parquet_metadata.num_row_groups();
 
         let row_groups = prune_row_groups(parquet_metadata, time_range);
@@ -221,7 +241,16 @@ impl TsdbParquetReader {
         let mut batches = Vec::new();
         for batch_result in reader {
             let batch = batch_result?;
-            batches.push(batch);
+            if batch.schema().metadata().get("measurement").is_none()
+                && arrow_schema.metadata().get("measurement").is_some()
+            {
+                let enriched_schema = arrow_schema.clone();
+                let batch = RecordBatch::try_new(enriched_schema, batch.columns().to_vec())
+                    .unwrap_or(batch);
+                batches.push(batch);
+            } else {
+                batches.push(batch);
+            }
         }
 
         if has_pruned {

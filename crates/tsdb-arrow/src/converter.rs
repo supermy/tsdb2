@@ -2,20 +2,27 @@ use crate::error::{Result, TsdbArrowError};
 use crate::schema::{DataPoint, FieldValue, Fields, Tags};
 use arrow::array::*;
 use arrow::datatypes::{DataType, SchemaRef};
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
 
-/// 计算标签集合的哈希值
-///
-/// 使用 DefaultHasher 对标签的键值对依次哈希,
-/// 结果用于 RocksDB 键的前缀部分, 将同一 series 的数据聚集存储。
-pub fn compute_tags_hash(tags: &Tags) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for (k, v) in tags {
-        Hash::hash(&k, &mut hasher);
-        Hash::hash(&v, &mut hasher);
+const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+const FNV_PRIME: u64 = 0x100000001b3;
+
+fn fnv1a_hash_bytes(hash: u64, bytes: &[u8]) -> u64 {
+    let mut h = hash;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(FNV_PRIME);
     }
-    hasher.finish()
+    h
+}
+
+pub fn compute_tags_hash(tags: &Tags) -> u64 {
+    let mut hash = FNV_OFFSET_BASIS;
+    for (k, v) in tags {
+        hash = fnv1a_hash_bytes(hash, k.as_bytes());
+        hash = fnv1a_hash_bytes(hash, v.as_bytes());
+    }
+    hash
 }
 
 /// 将 DataPoint 列表转换为 Arrow RecordBatch
@@ -165,7 +172,13 @@ fn build_field_column_array(
             for dp in datapoints {
                 match dp.fields.get(field_name) {
                     Some(FieldValue::Integer(v)) => builder.append_value(*v),
-                    Some(FieldValue::Float(v)) => builder.append_value(*v as i64),
+                    Some(FieldValue::Float(v)) => {
+                        tracing::warn!(
+                            "field '{}' expected Int64 but got Float({}), truncating",
+                            field_name, v
+                        );
+                        builder.append_value(*v as i64)
+                    }
                     _ => builder.append_null(),
                 }
             }
@@ -242,6 +255,12 @@ pub fn record_batch_to_datapoints(batch: &RecordBatch) -> Result<Vec<DataPoint>>
                 .cloned()
                 .unwrap_or_default()
         };
+        if measurement.is_empty() {
+            tracing::debug!(
+                "measurement name is empty for row {}, no measurement column or schema metadata",
+                i
+            );
+        }
 
         let mut tags = Tags::new();
         let mut fields = Fields::new();
