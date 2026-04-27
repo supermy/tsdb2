@@ -303,8 +303,25 @@ impl PartitionManager {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with(CF_PREFIX) {
-                    let measurement = name.trim_start_matches(CF_PREFIX).to_string();
-                    measurements.insert(measurement);
+                    let date_str = name.trim_start_matches(CF_PREFIX).to_string();
+                    if NaiveDate::parse_from_str(&date_str, "%Y%m%d").is_ok() {
+                        let dir = entry.path();
+                        if let Ok(files) = fs::read_dir(&dir) {
+                            for file_entry in files.flatten() {
+                                let file_path = file_entry.path();
+                                if file_path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                                    if let Ok(file) = std::fs::File::open(&file_path) {
+                                        if let Ok(builder) = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file) {
+                                            let arrow_schema = builder.schema();
+                                            if let Some(mf) = arrow_schema.metadata().get("measurement") {
+                                                measurements.insert(mf.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

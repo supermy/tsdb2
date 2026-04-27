@@ -102,6 +102,29 @@ impl ArrowStorageEngine {
 
         let query_engine = DataFusionQueryEngine::new(&path);
 
+        let mut known_measurements = HashSet::new();
+        {
+            let pm_ref = &partition_manager;
+            pm_ref.refresh().ok();
+            let today = chrono::Utc::now().date_naive();
+            let start = today - chrono::Duration::days(config.retention_days as i64);
+            let partitions = pm_ref.get_partitions_in_range(start, today + chrono::Duration::days(1));
+            for partition in &partitions {
+                if let Ok(files) = pm_ref.list_parquet_files(partition.date) {
+                    for file_path in files {
+                        if let Ok(file) = std::fs::File::open(&file_path) {
+                                if let Ok(builder) = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file) {
+                                    let arrow_schema = builder.schema();
+                                    if let Some(mf) = arrow_schema.metadata().get("measurement") {
+                                        known_measurements.insert(mf.clone());
+                                    }
+                                }
+                            }
+                    }
+                }
+            }
+        }
+
         if !wal_replay_datapoints.is_empty() {
             tracing::info!(
                 "WAL replay: re-writing {} datapoints to storage",
@@ -136,7 +159,7 @@ impl ArrowStorageEngine {
             query_engine,
             _config: config,
             _base_dir: path,
-            known_measurements: std::sync::Mutex::new(HashSet::new()),
+            known_measurements: std::sync::Mutex::new(known_measurements),
         })
     }
 
@@ -251,10 +274,13 @@ impl ArrowStorageEngine {
     }
 
     /// 刷盘 (缓冲区 + WAL)
+    ///
+    /// 将内存缓冲区数据写入 Parquet 文件, 然后截断 WAL 防止重复回放。
     pub fn flush(&self) -> Result<()> {
         self.async_writer.flush()?;
         if let Some(ref wal) = self.wal {
             wal.sync()?;
+            wal.truncate()?;
         }
         Ok(())
     }
@@ -575,12 +601,16 @@ mod tests {
             .with_field("usage", FieldValue::Float(0.5));
 
         engine.write(&dp).unwrap();
-        engine.flush().unwrap();
 
         let wal_path = dir.path().join("wal").join("wal-000001.log");
         assert!(wal_path.exists());
-        let entries = TsdbWAL::recover(&wal_path).unwrap();
-        assert!(!entries.is_empty());
+        let entries_before = TsdbWAL::recover(&wal_path).unwrap();
+        assert!(!entries_before.is_empty());
+
+        engine.flush().unwrap();
+
+        let entries_after = TsdbWAL::recover(&wal_path).unwrap();
+        assert!(entries_after.is_empty(), "WAL should be truncated after flush");
     }
 
     #[test]

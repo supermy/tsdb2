@@ -173,27 +173,27 @@ impl TableProvider for TsdbTableProvider {
             )
             .map_err(|e| DataFusionError::Execution(format!("parquet scan: {}", e)))?;
 
-        let projected_batches: Vec<arrow::record_batch::RecordBatch> = if projection.is_some() {
-            batches
-                .into_iter()
-                .map(|batch| {
-                    let proj_indices: Vec<usize> = projection
-                        .unwrap()
-                        .iter()
-                        .filter_map(|&idx| {
-                            batch.schema().index_of(self.schema.field(idx).name()).ok()
-                        })
-                        .collect();
-                    if proj_indices.is_empty() {
-                        Ok(batch)
-                    } else {
-                        batch.project(&proj_indices)
-                    }
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| DataFusionError::Execution(format!("projection: {}", e)))?
-        } else {
-            batches
+        let projected_batches: Vec<arrow::record_batch::RecordBatch> = match projection {
+            Some(proj) => {
+                batches
+                    .into_iter()
+                    .map(|batch| {
+                        let indices: Vec<usize> = proj
+                            .iter()
+                            .filter_map(|&idx| {
+                                batch.schema().index_of(self.schema.field(idx).name()).ok()
+                            })
+                            .collect();
+                        if indices.is_empty() {
+                            Ok(batch)
+                        } else {
+                            batch.project(&indices)
+                        }
+                    })
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(|e| DataFusionError::Execution(format!("projection: {}", e)))?
+            }
+            None => batches,
         };
 
         let limited_batches = if let Some(limit) = limit {

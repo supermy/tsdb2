@@ -1,5 +1,5 @@
 use crate::error::{Result, TsdbParquetError};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Seek, Write};
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -181,6 +181,25 @@ impl TsdbWAL {
             .get_ref()
             .sync_all()
             .map_err(|e| TsdbParquetError::Wal(format!("WAL sync failed: {}", e)))?;
+        Ok(())
+    }
+
+    /// 截断 WAL 文件 (清空所有已持久化的条目)
+    ///
+    /// 在数据成功刷盘到 Parquet 后调用, 防止重启时重复回放。
+    pub fn truncate(&self) -> Result<()> {
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        writer
+            .flush()
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL flush before truncate failed: {}", e)))?;
+        let file = writer.get_mut();
+        file.set_len(0)
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL truncate failed: {}", e)))?;
+        file.rewind()
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL rewind failed: {}", e)))?;
+        file.sync_all()
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL sync after truncate failed: {}", e)))?;
+        self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
