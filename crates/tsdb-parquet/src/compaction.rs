@@ -1,8 +1,13 @@
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::PartitionManager;
+use arrow::array::{UInt32Array, UInt64Array, TimestampMicrosecondArray};
+use arrow::compute::take;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
+use parquet::format::SortingColumn;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -187,6 +192,12 @@ impl ParquetCompactor {
         let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
         let schema = batches[0].schema();
 
+        let sorted_batches: Vec<RecordBatch> = batches
+            .iter()
+            .map(|b| sort_batch_by_tags_hash_timestamp(b))
+            .collect::<Result<Vec<_>>>()
+            .unwrap_or_else(|_| batches.to_vec());
+
         let file = File::create(tmp_path).map_err(|e| {
             TsdbParquetError::Io(std::io::Error::other(format!(
                 "failed to create compacted file: {}",
@@ -194,26 +205,12 @@ impl ParquetCompactor {
             )))
         })?;
 
-        let writer_props = match level {
-            CompactionLevel::L0 => crate::encoding::hot_writer_props(),
-            CompactionLevel::L1 => crate::encoding::hot_writer_props(),
-            CompactionLevel::L2 => {
-                if total_rows <= self.config.l2_target_rows {
-                    crate::encoding::hot_writer_props()
-                } else {
-                    crate::encoding::cold_writer_props()
-                }
-            }
-        };
+        let writer_props = build_compaction_writer_props(&schema, level, total_rows);
 
-        let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(
-            file,
-            schema.clone(),
-            Some(writer_props),
-        )
-        .map_err(TsdbParquetError::Parquet)?;
+        let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_props))
+            .map_err(TsdbParquetError::Parquet)?;
 
-        for batch in batches {
+        for batch in &sorted_batches {
             writer.write(batch).map_err(TsdbParquetError::Parquet)?;
         }
 
@@ -310,6 +307,95 @@ impl ParquetCompactor {
     }
 }
 
+fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let tags_hash_idx = match schema.index_of("tags_hash") {
+        Ok(idx) => idx,
+        Err(_) => return Ok(batch.clone()),
+    };
+    let ts_idx = match schema.index_of("timestamp") {
+        Ok(idx) => idx,
+        Err(_) => return Ok(batch.clone()),
+    };
+
+    let tags_hash_col = match batch
+        .column(tags_hash_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+    {
+        Some(col) => col,
+        None => return Ok(batch.clone()),
+    };
+    let ts_col = match batch
+        .column(ts_idx)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+    {
+        Some(col) => col,
+        None => return Ok(batch.clone()),
+    };
+
+    let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+    indices.sort_by(|&a, &b| {
+        tags_hash_col
+            .value(a)
+            .cmp(&tags_hash_col.value(b))
+            .then_with(|| ts_col.value(a).cmp(&ts_col.value(b)))
+    });
+
+    let index_array = UInt32Array::from_iter(indices.iter().map(|&i| i as u32));
+    let sorted_cols: Vec<std::sync::Arc<dyn arrow::array::Array>> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(col_idx, _)| {
+            take(batch.column(col_idx), &index_array, None)
+                .map_err(|e| TsdbParquetError::Conversion(e.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(RecordBatch::try_new(schema, sorted_cols)
+        .map_err(|e| TsdbParquetError::Conversion(e.to_string()))?)
+}
+
+fn build_compaction_writer_props(
+    schema: &arrow::datatypes::SchemaRef,
+    level: CompactionLevel,
+    total_rows: usize,
+) -> WriterProperties {
+    let compression = match level {
+        CompactionLevel::L0 | CompactionLevel::L1 => parquet::basic::Compression::SNAPPY,
+        CompactionLevel::L2 => {
+            if total_rows <= 1_000_000 {
+                parquet::basic::Compression::SNAPPY
+            } else {
+                parquet::basic::Compression::ZSTD(parquet::basic::ZstdLevel::default())
+            }
+        }
+    };
+
+    let max_row_group_size = match level {
+        CompactionLevel::L0 | CompactionLevel::L1 => 1024 * 1024,
+        CompactionLevel::L2 => 64 * 1024,
+    };
+
+    let mut builder = WriterProperties::builder()
+        .set_compression(compression)
+        .set_max_row_group_size(max_row_group_size)
+        .set_statistics_enabled(EnabledStatistics::Page);
+
+    if let Ok(tags_hash_idx) = schema.index_of("tags_hash") {
+        if let Ok(ts_idx) = schema.index_of("timestamp") {
+            builder = builder.set_sorting_columns(Some(vec![
+                SortingColumn::new(tags_hash_idx as i32, false, false),
+                SortingColumn::new(ts_idx as i32, false, false),
+            ]));
+        }
+    }
+
+    builder.build()
+}
+
 fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
     if batches.is_empty() {
         return Ok(Vec::new());
@@ -400,7 +486,7 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
                 })
                 .collect();
             let new_batch =
-                RecordBatch::try_new(schema.clone(), new_cols).map_err(TsdbParquetError::Arrow)?;
+                RecordBatch::try_new(schema.clone(), new_cols).map_err(|e| TsdbParquetError::Conversion(e.to_string()))?;
             deduped_batches.push(new_batch);
         }
     }

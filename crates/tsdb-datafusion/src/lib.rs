@@ -12,10 +12,12 @@
 
 pub mod engine;
 pub mod error;
+pub mod predicate;
 pub mod schema;
 pub mod table_provider;
 pub mod udf;
 
 pub use engine::DataFusionQueryEngine;
 pub use error::{Result, TsdbDatafusionError};
+pub use predicate::{ExtractedFilters, extract_filters};
 pub use table_provider::TsdbTableProvider;

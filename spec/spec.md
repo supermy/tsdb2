@@ -1,523 +1,525 @@
-# TSDB2 Iceberg Table Format Simulation Spec
+# TSDB2 Parquet 存储优化规格
 
-## 1. 目标
+## 1. 概述
 
-在 TSDB2 中使用 RocksDB 模拟 Apache Iceberg 表格式核心概念，实现 Snapshot 隔离、Manifest 元数据管理、Schema 演化、Time Travel 查询等能力，并直接对接 Parquet 数据文件，形成 **RocksDB 元数据 + Parquet 数据** 的 Iceberg 兼容架构。
+本规格定义了 TSDB2 Parquet 存储层的三大优化目标：
+1. **时间分区 + 标签排序**：Parquet 文件按时间分区组织，文件内数据按 `(tags_hash, timestamp)` 排序
+2. **范围查询剪枝**：利用文件级 min/max 统计信息，范围查询只读取边界文件
+3. **自定义 Parquet 页索引**：为标签列生成 Column Index + Offset Index，加速标签过滤
 
-## 2. 设计原则
+## 2. 现状分析
 
-| 原则 | 说明 |
-|------|------|
-| **Iceberg 兼容** | 元数据模型遵循 Iceberg V2 规范，支持未来对接 Iceberg 生态 |
-| **RocksDB 元数据** | 所有元数据 (Snapshot/Manifest/Schema) 存储在 RocksDB CF 中，利用其事务和原子性 |
-| **Parquet 数据** | 数据文件使用 Parquet 格式，支持列投影和谓词下推 |
-| **渐进式实现** | 先实现核心 (Snapshot/Manifest/Scan)，再扩展 (Schema 演化/Delete 文件) |
-| **TDD 驱动** | 每个模块先写测试，再实现功能 |
+### 2.1 当前问题
 
-## 3. Iceberg 核心概念映射
+| 问题 | 影响 | 严重性 |
+|------|------|--------|
+| 写入时无排序，数据按到达顺序写入 | 范围查询无法跳过不相关行组 | P0 |
+| 无 Parquet 页索引（Column Index / Offset Index） | 标签过滤需全量解码 | P0 |
+| 无文件级 min/max 统计用于剪枝 | 范围查询读取所有文件 | P0 |
+| 查询全量加载到 MemTable | 内存占用大，无法流式处理 | P1 |
+| 无 Parquet 谓词下推 | 所有过滤在内存中完成 | P1 |
+| 两种目录布局不统一 | 维护复杂，查询路径分裂 | P2 |
 
-### 3.1 Iceberg 元数据层级
-
-```
-Catalog (表入口)
-  └── Metadata File (JSON, 表级元数据)
-        ├── Schema (表结构定义, 支持 ID 引用和演化)
-        ├── Partition Spec (分区规范, 支持 day(timestamp) 等 Transform)
-        ├── Sort Order (排序规范)
-        └── Snapshots[] (快照列表)
-              └── Snapshot (某时刻的表状态)
-                    ├── manifest_list (Avro/Parquet, 清单文件列表)
-                    │     └── Manifest File (Avro/Parquet, 数据文件列表)
-                    │           ├── Data File Entry (status=ADDED/EXISTING/DELETED)
-                    │           │     ├── file_path (Parquet 文件路径)
-                    │           │     ├── partition (分区值元组)
-                    │           │     ├── record_count (行数)
-                    │           │     ├── file_size_in_bytes (文件大小)
-                    │           │     ├── lower_bounds / upper_bounds (列统计)
-                    │           │     └── column_sizes / null_value_counts (列指标)
-                    │           └── Delete File Entry (V2, 行级删除)
-                    └── summary (operation=append/replace/overwrite/delete)
-```
-
-### 3.2 RocksDB CF 映射方案
-
-| Iceberg 概念 | RocksDB 存储 | CF 名称 | Key 编码 | Value 编码 |
-|-------------|-------------|---------|---------|-----------|
-| Catalog | 全局元数据 | `_catalog` | `table_name` (Utf8) | TableMetadata (JSON) |
-| Table Metadata | 表级元数据 | `_table_meta` | `{table}\x00meta` | TableMetadata JSON |
-| Schema History | Schema 版本链 | `_table_meta` | `{table}\x00schema\x00{id}` | Schema JSON |
-| Partition Spec | 分区规范 | `_table_meta` | `{table}\x00part_spec\x00{id}` | PartitionSpec JSON |
-| Snapshot | 快照元数据 | `_snapshot` | `{table}\x00snap\x00{id}` | Snapshot JSON |
-| Manifest List | 清单文件列表 | `_manifest_list` | `{table}\x00{snap_id}\x00{seq}` | ManifestEntry JSON |
-| Manifest Entry | 数据文件条目 | `_manifest` | `{table}\x00{manifest_id}\x00{file_idx}` | DataFileEntry JSON |
-| Branch/Tag | 快照引用 | `_refs` | `{table}\x00{ref_name}` | Ref JSON |
-
-### 3.3 数据流
+### 2.2 当前架构
 
 ```
 写入路径:
-  DataPoint → WriteBuffer → Parquet File (data_{date}/part-{n}.parquet)
-                         → DataFileEntry (含列统计) → Manifest → ManifestList → Snapshot → TableMetadata
-                         → RocksDB 元数据 CF 原子提交
+  DataPoint → TsdbParquetWriter → 按日期缓冲 → ArrowWriter(无排序/无索引)
 
-查询路径:
-  SQL → DataFusion → IcebergTableProvider.scan()
-      → load current_snapshot → load manifest_list → 过滤 manifest (分区统计)
-      → 过滤 data_file (列统计 lower_bounds/upper_bounds) → 只读匹配的 Parquet 文件
-      → RecordBatch → DataFusion 执行
-
-Time Travel:
-  SQL: SELECT * FROM cpu FOR SYSTEM_VERSION AS OF {snapshot_id}
-  → load specified snapshot → 同上查询路径
-
-Compaction:
-  小文件合并 → 新 Parquet 文件 → 新 Manifest (旧文件标记 DELETED) → 新 Snapshot (operation=replace)
+读取路径:
+  SQL → SqlApi → TsdbTableProvider → TsdbParquetReader → 全量读取 → MemTable → 内存过滤
 ```
 
-## 4. 核心数据结构
+### 2.3 目标架构
 
-### 4.1 TableMetadata
+```
+写入路径:
+  DataPoint → TsdbParquetWriter → 按日期缓冲 → 排序(tags_hash, timestamp)
+    → ArrowWriter(sorting_columns + column_index + offset_index)
+    → 文件元数据记录 min/max 统计
 
-```rust
-struct TableMetadata {
-    format_version: u32,              // 2
-    table_uuid: String,               // UUID v4
-    location: String,                 // 表数据根目录
-    last_sequence_number: u64,        // 单调递增
-    last_updated_ms: u64,             // 最后更新时间
-    last_column_id: i32,              // 最大列 ID
-    current_schema_id: i32,           // 当前 Schema ID
-    schemas: Vec<Schema>,             // Schema 历史
-    default_spec_id: i32,             // 默认分区规范 ID
-    partition_specs: Vec<PartitionSpec>, // 分区规范历史
-    current_snapshot_id: i64,         // 当前快照 ID (-1 表示空表)
-    snapshots: Vec<Snapshot>,         // 快照列表
-    snapshot_log: Vec<SnapshotLogEntry>, // 快照变更日志
-    properties: BTreeMap<String, String>, // 表属性
-}
+读取路径:
+  SQL → SqlApi → TsdbTableProvider → ParquetExec(原生)
+    → 文件级剪枝(min/max统计) → 行组级剪枝(Column Index) → 页级剪枝(Offset Index)
 ```
 
-### 4.2 Schema
+## 3. 详细设计
 
-```rust
-struct Schema {
-    schema_id: i32,
-    fields: Vec<Field>,  // 与 Iceberg Schema 兼容
-}
+### 3.1 时间分区 + 标签排序
 
-struct Field {
-    id: i32,                  // 全局唯一列 ID
-    name: String,
-    required: bool,
-    field_type: IcebergType,
-    doc: Option<String>,
-    initial_default: Option<serde_json::Value>,
-    write_default: Option<serde_json::Value>,
-}
+#### 3.1.1 分区目录结构
 
-enum IcebergType {
-    Boolean, Int, Long, Float, Double,
-    Decimal { precision: u8, scale: u8 },
-    Date, Time, Timestamp, Timestamptz,
-    String, Uuid, Binary,
-    Struct { fields: Vec<Field> },
-    List { element_id: i32, element_required: bool, element: Box<IcebergType> },
-    Map { key_id: i32, key: Box<IcebergType>, value_id: i32, value_required: bool, value: Box<IcebergType> },
-}
+统一现有两种目录布局，采用以下结构：
+
+```
+{parquet_dir}/
+  {tier}/                              # warm / cold / archive
+    {measurement}/                     # 指标名称，如 cpu, memory
+      {YYYYMMDD}/                      # 日期分区
+        {measurement}_{YYYYMMDD}_{seq:06}.parquet
 ```
 
-### 4.3 PartitionSpec
-
-```rust
-struct PartitionSpec {
-    spec_id: i32,
-    fields: Vec<PartitionField>,
-}
-
-struct PartitionField {
-    source_id: i32,          // 源列 ID
-    field_id: i32,           // 分区字段 ID
-    name: String,            // 分区名 (如 "ts_day")
-    transform: Transform,    // 转换函数
-}
-
-enum Transform {
-    Identity,
-    Bucket { n: u32 },
-    Truncate { w: u32 },
-    Year, Month, Day, Hour,
-    Void,
-}
+示例：
+```
+data_parquet/
+  warm/
+    cpu/
+      20260427/
+        cpu_20260427_000001.parquet    # 包含 min/max 统计
+        cpu_20260427_000002.parquet
+    memory/
+      20260427/
+        memory_20260427_000001.parquet
+  cold/
+    cpu/
+      20260315/
+        cpu_20260315_000001.parquet
 ```
 
-### 4.4 Snapshot
+#### 3.1.2 文件内排序
+
+Parquet 文件内数据按 `(tags_hash, timestamp)` 排序：
 
 ```rust
-struct Snapshot {
-    snapshot_id: i64,
-    parent_snapshot_id: Option<i64>,
-    sequence_number: u64,
-    timestamp_ms: u64,
-    manifest_list: String,       // Manifest list 存储位置标识
-    summary: SnapshotSummary,
-    schema_id: i32,
-}
-
-struct SnapshotSummary {
-    operation: String,           // "append" | "replace" | "overwrite" | "delete"
-    added_data_files: Option<i32>,
-    deleted_data_files: Option<i32>,
-    added_records: Option<i64>,
-    deleted_records: Option<i64>,
-    total_data_files: Option<i32>,
-    total_records: Option<i64>,
-    extra: BTreeMap<String, String>,
-}
+// WriterProperties 配置
+let sorting_columns = vec![
+    SortingColumn {
+        column_idx: tags_hash_column_idx,
+        descending: false,
+        nulls_first: false,
+    },
+    SortingColumn {
+        column_idx: timestamp_column_idx,
+        descending: false,
+        nulls_first: false,
+    },
+];
 ```
 
-### 4.5 ManifestEntry / DataFileEntry
+#### 3.1.3 Schema 变更
+
+在 compact schema 基础上增加 `tags_hash` 列用于排序：
+
+```
+timestamp:     Timestamp(Microsecond) NOT NULL    # 列 0
+tags_hash:     UInt64 NOT NULL                    # 列 1 (新增，用于排序和索引)
+tag_{key}:     Utf8 (nullable)                    # 列 2..N
+{field_name}:  {DataType} (nullable)              # 列 N+1..
+```
+
+`tags_hash` 列值由 `compute_tags_hash()` 生成，与 RocksDB 中使用的哈希算法一致。
+
+#### 3.1.4 写入流程
+
+```
+1. DataPoints 按日期分组缓冲
+2. 缓冲区满或 flush 时：
+   a. 计算 tags_hash
+   b. 转换为 RecordBatch
+   c. 按 (tags_hash, timestamp) 排序
+   d. 配置 WriterProperties:
+      - set_sorting_columns([(tags_hash, ASC), (timestamp, ASC)])
+      - set_column_index_enabled(true)     # 启用列索引
+      - set_offset_index_enabled(true)     # 启用偏移索引
+      - set_statistics_enabled(EnabledStatistics::Page)  # 页级统计
+   e. 写入 Parquet 文件
+   f. 读取文件元数据，提取各列 min/max 统计
+   g. 将统计信息写入 sidecar metadata 文件
+```
+
+### 3.2 范围查询剪枝
+
+#### 3.2.1 文件级统计信息
+
+每个 Parquet 文件写入后，提取行组级统计信息并保存到 sidecar 文件：
 
 ```rust
-struct ManifestEntry {
-    status: EntryStatus,         // Existing=0, Added=1, Deleted=2
-    snapshot_id: i64,
-    sequence_number: Option<u64>,
-    file_sequence_number: Option<u64>,
-    data_file: DataFile,
-}
-
-enum EntryStatus { Existing, Added, Deleted }
-
-struct DataFile {
-    content: DataContentType,    // Data=0, PositionDeletes=1, EqualityDeletes=2
+struct FileStats {
     file_path: String,
-    file_format: String,         // "parquet"
-    partition: PartitionData,    // 分区值元组
-    record_count: i64,
-    file_size_in_bytes: i64,
-    column_sizes: Option<BTreeMap<i32, i64>>,
-    value_counts: Option<BTreeMap<i32, i64>>,
-    null_value_counts: Option<BTreeMap<i32, i64>>,
-    lower_bounds: Option<BTreeMap<i32, Vec<u8>>>,
-    upper_bounds: Option<BTreeMap<i32, Vec<u8>>>,
-    split_offsets: Option<Vec<i64>>,
-    sort_order_id: Option<i32>,
+    measurement: String,
+    date: String,
+    tier: String,
+    row_count: u64,
+    size_bytes: u64,
+    timestamp_min: i64,           // 微秒
+    timestamp_max: i64,           // 微秒
+    tags_hash_min: u64,
+    tags_hash_max: u64,
+    tag_values: HashMap<String, ValueStats>,  // 每个标签列的统计
+}
+
+struct ValueStats {
+    min: Option<String>,
+    max: Option<String>,
+    null_count: u64,
+    distinct_count: Option<u64>,  // 近似基数
 }
 ```
 
-## 5. 新增 Crate: tsdb-iceberg
+Sidecar 文件路径：`{parquet_file}.stats.json`
 
-```
-crates/tsdb-iceberg/
-├── Cargo.toml
-└── src/
-    ├── lib.rs              — crate 入口 + 重导出
-    ├── catalog.rs          — IcebergCatalog (RocksDB-backed)
-    ├── table.rs            — IcebergTable (表操作入口)
-    ├── snapshot.rs         — Snapshot 管理 (创建/提交/过期)
-    ├── manifest.rs         — Manifest 读写 (数据文件条目管理)
-    ├── scan.rs             — IcebergScan (文件规划 + 谓词下推)
-    ├── schema.rs           — Schema 定义 + 演化
-    ├── partition.rs        — PartitionSpec + Transform
-    ├── stats.rs            — 列统计收集 (Parquet → lower/upper bounds)
-    ├── commit.rs           — 原子提交 (乐观并发 + 重试)
-    ├── error.rs            — 错误类型
-    └── time_travel.rs      — Time Travel 查询
-```
+#### 3.2.2 分区清单文件
 
-### 5.1 依赖关系
+每个日期分区维护一个 `_manifest.json` 文件，记录该分区所有 Parquet 文件的统计信息：
 
-```toml
-[dependencies]
-tsdb-arrow = { workspace = true }
-tsdb-rocksdb = { workspace = true }
-tsdb-parquet = { workspace = true }
-tsdb-datafusion = { workspace = true }
-arrow = { workspace = true }
-parquet = { workspace = true }
-datafusion = { workspace = true }
-rocksdb = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-chrono = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-uuid = { version = "1", features = ["v4"] }
-```
-
-## 6. 核心接口设计
-
-### 6.1 IcebergCatalog
-
-```rust
-pub struct IcebergCatalog {
-    db: rocksdb::DB,
-    base_dir: PathBuf,
-}
-
-impl IcebergCatalog {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self>;
-    pub fn create_table(&self, name: &str, schema: Schema, partition_spec: PartitionSpec) -> Result<IcebergTable>;
-    pub fn load_table(&self, name: &str) -> Result<IcebergTable>;
-    pub fn drop_table(&self, name: &str) -> Result<()>;
-    pub fn list_tables(&self) -> Result<Vec<String>>;
-    pub fn rename_table(&self, old_name: &str, new_name: &str) -> Result<()>;
-}
-```
-
-### 6.2 IcebergTable
-
-```rust
-pub struct IcebergTable {
-    catalog: Arc<IcebergCatalog>,
-    name: String,
-    metadata: TableMetadata,
-}
-
-impl IcebergTable {
-    // 写入
-    pub fn append(&mut self, datapoints: &[DataPoint]) -> Result<()>;
-    pub fn overwrite(&mut self, datapoints: &[DataPoint], predicate: Option<Expr>) -> Result<()>;
-    pub fn delete(&mut self, predicate: Expr) -> Result<()>;
-
-    // 查询
-    pub fn scan(&self) -> IcebergScanBuilder;
-    pub fn scan_at_snapshot(&self, snapshot_id: i64) -> IcebergScanBuilder;
-
-    // 元数据
-    pub fn current_snapshot(&self) -> Option<&Snapshot>;
-    pub fn snapshots(&self) -> &[Snapshot];
-    pub fn schema(&self) -> &Schema;
-    pub fn partition_spec(&self) -> &PartitionSpec;
-    pub fn history(&self) -> &[SnapshotLogEntry];
-
-    // 维护
-    pub fn compact(&mut self) -> Result<()>;
-    pub fn expire_snapshots(&mut self, older_than_ms: u64, min_snapshots: u32) -> Result<()>;
-    pub fn update_schema(&mut self, changes: SchemaChange) -> Result<()>;
-    pub fn update_partition_spec(&mut self, new_spec: PartitionSpec) -> Result<()>;
-}
-```
-
-### 6.3 IcebergScanBuilder
-
-```rust
-pub struct IcebergScanBuilder<'a> {
-    table: &'a IcebergTable,
-    snapshot_id: Option<i64>,
-    predicate: Option<Expr>,
-    projection: Option<Vec<i32>>,
-    case_sensitive: bool,
-}
-
-impl<'a> IcebergScanBuilder<'a> {
-    pub fn predicate(mut self, expr: Expr) -> Self;
-    pub fn projection(mut self, field_ids: Vec<i32>) -> Self;
-    pub fn case_insensitive(mut self) -> Self;
-    pub fn build(self) -> Result<IcebergScan>;
-}
-```
-
-### 6.4 IcebergScan
-
-```rust
-pub struct IcebergScan {
-    data_files: Vec<DataFile>,
-    predicate: Option<Expr>,
-    projection: Option<Vec<i32>>,
-}
-
-impl IcebergScan {
-    pub fn plan(&self) -> &[DataFile];
-    pub async fn execute(&self) -> Result<Vec<RecordBatch>>;
-    pub fn to_execution_plan(&self) -> Arc<dyn ExecutionPlan>;
-}
-```
-
-## 7. 原子提交协议
-
-### 7.1 乐观并发提交
-
-```
-1. 读取 current TableMetadata (版本 V)
-2. 创建新数据文件 (Parquet)
-3. 收集列统计 → 构建 DataFileEntry
-4. 创建新 Manifest (包含新 DataFileEntry)
-5. 创建新 ManifestList (引用新 Manifest + 旧 Manifest)
-6. 创建新 Snapshot
-7. 创建新 TableMetadata (版本 V+1)
-8. 原子提交: CAS(current_version=V, new_version=V+1)
-   - 成功: 提交完成
-   - 失败: 重试 (从步骤1重新开始)
-```
-
-### 7.2 RocksDB 原子性保证
-
-使用 RocksDB WriteBatch 保证元数据写入原子性:
-
-```rust
-fn commit(&self, old_meta: &TableMetadata, new_meta: &TableMetadata) -> Result<()> {
-    let current = self.load_metadata()?;
-    if current.last_updated_ms != old_meta.last_updated_ms {
-        return Err(IcebergError::CommitConflict);
+```json
+{
+  "measurement": "cpu",
+  "date": "20260427",
+  "tier": "warm",
+  "files": [
+    {
+      "path": "cpu_20260427_000001.parquet",
+      "row_count": 100000,
+      "timestamp_min": 1742774400000000,
+      "timestamp_max": 1742860799999000,
+      "tags_hash_min": 1234567890,
+      "tags_hash_max": 9876543210,
+      "tag_host": { "min": "server01", "max": "server99", "null_count": 0 },
+      "tag_region": { "min": "east", "max": "west", "null_count": 0 }
     }
-
-    let mut batch = rocksdb::WriteBatch::default();
-    // 写入新 Snapshot
-    batch.put_cf(snapshot_cf, snap_key, snap_json);
-    // 写入新 ManifestList
-    batch.put_cf(manifest_list_cf, ml_key, ml_json);
-    // 写入新 Manifest entries
-    for entry in new_entries {
-        batch.put_cf(manifest_cf, entry_key, entry_json);
-    }
-    // 更新 TableMetadata
-    batch.put_cf(meta_cf, meta_key, new_meta_json);
-
-    self.db.write(batch)?;  // 原子提交
-    Ok(())
+  ]
 }
 ```
 
-## 8. 谓词下推设计
-
-### 8.1 三级过滤
-
-```
-Level 1: Manifest 级别
-  - 使用 partition field_summary (contains_null, lower_bound, upper_bound)
-  - 跳过不包含匹配分区的整个 Manifest
-
-Level 2: DataFile 级别
-  - 使用 lower_bounds / upper_bounds 列统计
-  - 跳过列值范围不匹配的数据文件
-
-Level 3: Parquet RowGroup 级别
-  - 使用 Parquet 文件内的 RowGroup 统计
-  - 跳过不匹配的 RowGroup
-```
-
-### 8.2 过滤流程
+#### 3.2.3 查询剪枝逻辑
 
 ```rust
-fn plan_files(&self, predicate: &Expr) -> Vec<DataFile> {
-    let snapshot = self.current_snapshot();
-    let manifest_list = self.load_manifest_list(snapshot);
-
-    let mut result = Vec::new();
-    for manifest_meta in manifest_list {
-        // Level 1: Manifest 级别过滤
-        if !manifest_matches_predicate(&manifest_meta, predicate) {
-            continue;
+fn prune_files(
+    files: &[FileStats],
+    time_range: Option<(i64, i64)>,
+    tag_filters: &HashMap<String, String>,
+) -> Vec<FileStats> {
+    files.iter().filter(|f| {
+        // 时间范围剪枝
+        if let Some((start, end)) = time_range {
+            if f.timestamp_max < start || f.timestamp_min > end {
+                return false;
+            }
         }
-
-        let entries = self.load_manifest_entries(&manifest_meta);
-        for entry in entries {
-            if entry.status == EntryStatus::Deleted {
-                continue;
+        // 标签值剪枝
+        for (tag_key, tag_value) in tag_filters {
+            if let Some(stats) = f.tag_values.get(tag_key) {
+                if let (Some(min), Some(max)) = (&stats.min, &stats.max) {
+                    if tag_value < min || tag_value > max {
+                        return false;
+                    }
+                }
             }
+        }
+        true
+    }).cloned().collect()
+}
+```
 
-            // Level 2: DataFile 级别过滤
-            if !file_matches_predicate(&entry.data_file, predicate) {
-                continue;
-            }
+### 3.3 自定义 Parquet 页索引
 
-            result.push(entry.data_file.clone());
+#### 3.3.1 Column Index（列索引）
+
+Parquet 格式原生支持 Column Index，存储每个数据页的统计信息：
+
+```
+ColumnIndex {
+    null_pages: Vec<bool>,        // 该页是否全为 null
+    min_values: Vec<Vec<u8>>,     // 每页最小值（编码后）
+    max_values: Vec<Vec<u8>>,     // 每页最大值（编码后）
+    boundary_order: BoundaryOrder, // 升序/降序/无序
+    null_counts: Vec<i64>,        // 每页 null 计数
+}
+```
+
+启用方式：
+```rust
+let props = WriterProperties::builder()
+    .set_column_index_enabled(true)
+    .set_offset_index_enabled(true)
+    .set_statistics_enabled(EnabledStatistics::Page)
+    .build();
+```
+
+#### 3.3.2 标签列索引优化
+
+对标签列（`tag_*` 列）启用页级统计，使标签过滤可以跳过不相关的数据页：
+
+```
+Parquet 文件结构:
+  Row Group 0:
+    Column Chunk (tag_host):
+      Page 0: min="server01", max="server10"  ← 查询 server50 可跳过
+      Page 1: min="server40", max="server60"  ← 查询 server50 需读取
+      Page 2: min="server70", max="server99"  ← 查询 server50 可跳过
+    Column Chunk (timestamp):
+      Page 0: min=08:00, max=10:00            ← 时间范围剪枝
+      Page 1: min=10:00, max=14:00
+      Page 2: min=14:00, max=18:00
+```
+
+#### 3.3.3 读取端利用页索引
+
+```rust
+fn read_with_page_index(
+    file_path: &Path,
+    time_range: (i64, i64),
+    tag_filters: &HashMap<String, String>,
+    projection: Option<&[String]>,
+) -> Result<Vec<RecordBatch>> {
+    let file = File::open(file_path)?;
+    let builder = ParquetRecordBatchReaderBuilder::new(file)?;
+
+    // 1. 利用行组统计信息跳过整个行组
+    let metadata = builder.metadata();
+    let row_groups = filter_row_groups(metadata, time_range, tag_filters);
+
+    // 2. 利用 Column Index 跳过数据页
+    let row_filter = build_row_filter(tag_filters, metadata);
+
+    // 3. 构建带谓词下推的读取器
+    let reader = builder
+        .with_row_groups(row_groups)
+        .with_row_filter(row_filter)
+        .with_projection(projection)
+        .build()?;
+
+    reader.collect()
+}
+```
+
+#### 3.3.4 RowFilter 实现
+
+```rust
+fn build_row_filter(
+    tag_filters: &HashMap<String, String>,
+    schema: &Schema,
+) -> Option<RowFilter> {
+    let mut filters = Vec::new();
+    for (tag_key, tag_value) in tag_filters {
+        let col_name = format!("tag_{}", tag_key);
+        if let Ok(idx) = schema.index_of(&col_name) {
+            let filter = ArrowPredicateFn::new(
+                ProjectionMask::from_indices(schema.clone(), [idx]),
+                move |batch| {
+                    let col = batch.column(0);
+                    let string_col = col.as_any().downcast_ref::<StringArray>().unwrap();
+                    Ok(Arc::new(BooleanArray::from_unary(string_col, |s| s == tag_value.as_str())) as _)
+                },
+            );
+            filters.push(Arc::new(filter) as Arc<dyn ArrowPredicate>);
         }
     }
-    result
+    if filters.is_empty() { None } else { Some(RowFilter::new(filters)) }
 }
 ```
 
-## 9. DataFusion 集成
+### 3.4 DataFusion 原生 Parquet 集成
 
-### 9.1 IcebergTableProvider
+#### 3.4.1 替换 MemTable 为 ParquetExec
+
+当前 `TsdbTableProvider::scan()` 将所有数据加载到 `MemTable`，改为使用 DataFusion 原生 `ParquetExec`：
 
 ```rust
-pub struct IcebergTableProvider {
-    table: Arc<Mutex<IcebergTable>>,
-    schema: SchemaRef,
-}
+impl TableProvider for TsdbTableProvider {
+    fn scan(&self, ...filters, projection) -> Result<Arc<dyn ExecutionPlan>> {
+        // 1. 从 filters 提取时间范围和标签过滤
+        let (time_range, tag_filters) = extract_filters(&filters);
 
-#[async_trait]
-impl TableProvider for IcebergTableProvider {
-    fn as_any(&self) -> &dyn Any { self }
-    fn schema(&self) -> SchemaRef { self.schema.clone() }
-    fn table_type(&self) -> TableType { TableType::Base }
+        // 2. 利用文件统计信息剪枝
+        let pruned_files = prune_files(&self.file_stats, time_range, &tag_filters);
 
-    async fn scan(
-        &self,
-        state: &dyn Session,
-        projection: Option<&Vec<usize>>,
-        filters: &[Expr],
-        limit: Option<usize>,
-    ) -> Result<Arc<dyn ExecutionPlan>> {
-        let table = self.table.lock().unwrap();
-        let scan = table.scan();
-        // 将 DataFusion filters 转为 Iceberg 谓词
-        let predicate = filters_to_predicate(filters);
-        let iceberg_scan = scan.predicate(predicate).build()?;
+        // 3. 构建 ParquetExec 执行计划
+        let parquet_exec = ParquetExec::new(
+            FileScanConfig {
+                object_store_url: ...,
+                file_groups: partition_files_into_groups(pruned_files),
+                statistics: ...,
+                projection: ...,
+                limit: ...,
+                table_partition_cols: vec![],
+            },
+            Some(parquet_predicate),
+            None,
+        );
 
-        // 使用 Parquet 文件列表创建 ParquetExec
-        let data_files = iceberg_scan.plan();
-        let plan = self.create_parquet_exec(data_files, projection, limit, state)?;
-        Ok(plan)
+        Ok(Arc::new(parquet_exec))
     }
 }
 ```
 
-## 10. Time Travel
+#### 3.4.2 ObjectStore 适配
 
-```sql
--- 查询特定快照
-SELECT * FROM cpu FOR SYSTEM_VERSION AS OF 3051729675574597004;
-
--- 查询特定时间点
-SELECT * FROM cpu FOR SYSTEM_TIME AS OF '2026-04-20 00:00:00';
-
--- 查看快照历史
-SELECT * FROM cpu.snapshots;
-
--- 回滚到特定快照
-ROLLBACK TABLE cpu TO SNAPSHOT 3051729675574597004;
-```
-
-## 11. Compaction (Iceberg 风格)
-
-```
-1. 选择小文件 (file_size < target_file_size)
-2. 读取小文件内容 → 合并为大文件
-3. 创建新 Manifest:
-   - 旧文件标记为 DELETED
-   - 新文件标记为 ADDED
-4. 创建新 Snapshot (operation="replace")
-5. 原子提交
-6. 后台清理: 删除只被 DELETED 快照引用的物理文件
-```
-
-## 12. Schema 演化
+为 DataFusion 提供本地文件系统的 `ObjectStore` 实现：
 
 ```rust
-enum SchemaChange {
-    AddField { parent_id: Option<i32>, name: String, field_type: IcebergType, required: bool, write_default: Option<serde_json::Value> },
-    DeleteField { field_id: i32 },
-    RenameField { field_id: i32, new_name: String },
-    PromoteType { field_id: i32, new_type: IcebergType },  // int→long, float→double
-    MoveField { field_id: i32, new_position: usize },
+let object_store = LocalFileSystem::new();
+let store_url = ObjectStoreUrl::local_filesystem();
+ctx.register_object_store(&store_url.as_ref(), Arc::new(object_store));
+```
+
+### 3.5 兼容性设计
+
+#### 3.5.1 向后兼容
+
+- 旧格式 Parquet 文件（无排序、无索引）仍可读取
+- 读取时检测文件是否包含 Column Index，有则利用，无则回退到全量读取
+- 旧格式文件在下次 compaction 时自动升级为新格式
+
+#### 3.5.2 迁移策略
+
+- 新写入的文件自动使用新格式
+- 提供 `make parquet-upgrade` 命令批量重写旧文件
+- compaction 过程中自动应用排序和索引
+
+## 4. 性能预期
+
+| 场景 | 当前 | 优化后 | 提升 |
+|------|------|--------|------|
+| 时间范围查询（1天/30天数据） | 读取30天所有文件 | 只读取1天文件 | ~30x |
+| 标签过滤查询（1个标签值/100个） | 全量解码 | 页级剪枝跳过99% | ~100x |
+| 列投影查询（2列/20列） | 读取20列 | 只读2列 | ~10x |
+| 大范围查询内存占用 | 全量加载 | 流式处理 | ~10x |
+
+## 5. 关键实现细节
+
+### 5.1 RecordBatch 排序实现
+
+```rust
+fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let tags_hash_idx = schema.index_of("tags_hash")
+        .map_err(|_| TsdbParquetError::Conversion("tags_hash column not found".into()))?;
+    let ts_idx = schema.index_of("timestamp")
+        .map_err(|_| TsdbParquetError::Conversion("timestamp column not found".into()))?;
+
+    let tags_hash_col = batch.column(tags_hash_idx)
+        .as_any().downcast_ref::<UInt64Array>().unwrap();
+    let ts_col = batch.column(ts_idx)
+        .as_any().downcast_ref::<TimestampMicrosecondArray>().unwrap();
+
+    let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+    indices.sort_by(|&a, &b| {
+        tags_hash_col.value(a).cmp(&tags_hash_col.value(b))
+            .then(ts_col.value(a).cmp(&ts_col.value(b)))
+    });
+
+    let index_array = UInt32Array::from_iter(indices.iter().map(|&i| i as u32));
+    let sorted_cols: Vec<Arc<dyn Array>> = schema.fields().iter().enumerate()
+        .map(|(col_idx, _)| arrow::compute::take(batch.column(col_idx), &index_array, None).unwrap())
+        .collect();
+
+    Ok(RecordBatch::try_new(schema.clone(), sorted_cols)?)
 }
 ```
 
-## 13. 实施优先级
+### 5.2 SortingColumn 配置
 
-| Phase | 内容 | 优先级 | 依赖 |
-|-------|------|--------|------|
-| P1 | Catalog + TableMetadata + Schema | P0 | 无 |
-| P2 | Snapshot + Manifest + DataFile | P0 | P1 |
-| P3 | Append 写入 + 列统计收集 | P0 | P2 |
-| P4 | Scan + 谓词下推 (三级过滤) | P0 | P3 |
-| P5 | IcebergTableProvider (DataFusion) | P0 | P4 |
-| P6 | Time Travel 查询 | P1 | P5 |
-| P7 | Compaction (Iceberg 风格) | P1 | P3 |
-| P8 | Snapshot 过期清理 | P1 | P6 |
-| P9 | Schema 演化 | P2 | P5 |
-| P10 | 分区演化 | P2 | P9 |
+```rust
+use parquet::file::properties::SortingColumn;
+
+fn build_sorting_columns(schema: &SchemaRef) -> Vec<SortingColumn> {
+    let tags_hash_idx = schema.index_of("tags_hash").unwrap() as i32;
+    let ts_idx = schema.index_of("timestamp").unwrap() as i32;
+    vec![
+        SortingColumn::new(tags_hash_idx, false, false), // desc=false, nulls_first=false
+        SortingColumn::new(ts_idx, false, false),
+    ]
+}
+```
+
+### 5.3 行组统计信息提取
+
+```rust
+fn extract_row_group_stats(metadata: &ParquetMetaData) -> FileStats {
+    let row_groups = metadata.row_groups();
+    let mut ts_min = i64::MAX;
+    let mut ts_max = i64::MIN;
+    let mut th_min = u64::MAX;
+    let mut th_max = u64::MIN;
+    let mut total_rows = 0u64;
+
+    for rg in row_groups {
+        total_rows += rg.num_rows() as u64;
+        for col in rg.columns() {
+            if let Some(stats) = col.statistics() {
+                // 解码 min/max 根据列类型
+            }
+        }
+    }
+
+    FileStats { timestamp_min: ts_min, timestamp_max: ts_max, tags_hash_min: th_min, tags_hash_max: th_max, row_count: total_rows, ... }
+}
+```
+
+### 5.4 读取端行组剪枝
+
+```rust
+fn filter_row_groups(
+    metadata: &ParquetMetaData,
+    time_range: (i64, i64),
+) -> Vec<usize> {
+    let ts_col_idx = 0; // timestamp is always column 0
+    metadata.row_groups().iter().enumerate()
+        .filter(|(_, rg)| {
+            if let Some(col) = rg.columns().get(ts_col_idx) {
+                if let Some(stats) = col.statistics() {
+                    // 检查时间范围是否重叠
+                    let min_ts = decode_timestamp_min(stats);
+                    let max_ts = decode_timestamp_max(stats);
+                    return max_ts >= time_range.0 && min_ts <= time_range.1;
+                }
+            }
+            true // 无统计信息时不跳过
+        })
+        .map(|(idx, _)| idx)
+        .collect()
+}
+```
+
+### 5.5 向后兼容读取
+
+```rust
+fn read_parquet_file_compat(path: &Path, ...) -> Result<Vec<RecordBatch>> {
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+
+    // 检查是否有 Column Index
+    let has_column_index = builder.metadata()
+        .row_groups().iter()
+        .any(|rg| rg.columns().iter().any(|c| c.column_index().is_some()));
+
+    if has_column_index {
+        // 利用 Column Index 进行页级剪枝
+        read_with_page_index(builder, ...)
+    } else {
+        // 回退到全量读取
+        let reader = builder.build()?;
+        reader.collect::<Result<Vec<_>, _>>()
+    }
+}
+```
+
+## 6. 涉及文件
+
+### 修改文件
+
+| 文件 | 变更内容 |
+|------|----------|
+| `crates/tsdb-arrow/src/schema.rs` | compact schema 增加 tags_hash 列 |
+| `crates/tsdb-arrow/src/converter.rs` | DataPoint 转换时计算 tags_hash |
+| `crates/tsdb-parquet/src/writer.rs` | 写入前排序 + 启用索引 + 写统计文件 |
+| `crates/tsdb-parquet/src/reader.rs` | 利用页索引 + 行组剪枝 + 谓词下推 |
+| `crates/tsdb-parquet/src/encoding.rs` | WriterProperties 配置更新 |
+| `crates/tsdb-parquet/src/partition.rs` | 统一目录布局 + manifest 管理 |
+| `crates/tsdb-parquet/src/compaction.rs` | compaction 时保持排序 + 生成索引 |
+| `crates/tsdb-datafusion/src/table_provider.rs` | 替换 MemTable 为 ParquetExec |
+| `crates/tsdb-datafusion/src/engine.rs` | 注册 ObjectStore |
+| `crates/tsdb-admin/src/lifecycle_api.rs` | 导出时使用新格式 |
+| `crates/tsdb-admin/src/sql_api.rs` | 利用文件剪枝优化查询 |
+| `crates/tsdb-rocksdb/src/archiver.rs` | 导出时排序 + 索引 |
+
+### 新增文件
+
+| 文件 | 内容 |
+|------|------|
+| `crates/tsdb-parquet/src/file_stats.rs` | 文件统计信息提取与持久化 |
+| `crates/tsdb-parquet/src/manifest.rs` | 分区清单文件管理 |
+| `crates/tsdb-parquet/src/pruning.rs` | 文件/行组/页级剪枝逻辑 |
+| `crates/tsdb-datafusion/src/predicate.rs` | DataFusion 过滤表达式转换 |

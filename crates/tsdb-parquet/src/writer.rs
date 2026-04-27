@@ -1,9 +1,12 @@
-use crate::encoding::{cold_writer_props, hot_writer_props};
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
+use arrow::array::{UInt32Array, UInt64Array, TimestampMicrosecondArray};
+use arrow::compute::take;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
 use parquet::arrow::arrow_writer::ArrowWriter;
+use parquet::file::properties::{EnabledStatistics, WriterProperties};
+use parquet::format::SortingColumn;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::PathBuf;
@@ -152,7 +155,6 @@ impl TsdbParquetWriter {
         }
 
         let dir = self.partition_manager.ensure_partition(date)?;
-        let _is_hot = self.partition_manager.config().hot_days;
 
         let file_id = self.file_counter.fetch_add(1, Ordering::Relaxed);
         let file_name = format!("part-{:08}.parquet", file_id);
@@ -166,23 +168,25 @@ impl TsdbParquetWriter {
             )))
         })?;
 
-        let writer_props = if buffer.row_count <= 10000 {
-            hot_writer_props()
-        } else {
-            cold_writer_props()
-        };
+        let sorted_batches: Vec<RecordBatch> = buffer
+            .batches
+            .into_iter()
+            .map(|b| sort_batch_by_tags_hash_timestamp(&b))
+            .collect::<Result<Vec<_>>>()?;
+
+        let writer_props = build_indexed_writer_props(&schema, buffer.row_count);
 
         let mut writer = ArrowWriter::try_new(file, schema.clone(), Some(writer_props))
             .map_err(TsdbParquetError::Parquet)?;
 
-        for batch in &buffer.batches {
+        for batch in &sorted_batches {
             writer.write(batch).map_err(TsdbParquetError::Parquet)?;
         }
 
         writer.close().map_err(TsdbParquetError::Parquet)?;
 
         tracing::info!(
-            "flushed partition {}: {} rows to {}",
+            "flushed partition {}: {} rows to {} (sorted, indexed)",
             date,
             buffer.row_count,
             file_name
@@ -224,6 +228,83 @@ impl TsdbParquetWriter {
     pub fn buffer_row_count(&self) -> usize {
         self.buffers.values().map(|b| b.row_count).sum()
     }
+}
+
+fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch> {
+    let schema = batch.schema();
+    let tags_hash_idx = schema.index_of("tags_hash").map_err(|_| {
+        TsdbParquetError::Conversion("tags_hash column not found for sorting".into())
+    })?;
+    let ts_idx = schema.index_of("timestamp").map_err(|_| {
+        TsdbParquetError::Conversion("timestamp column not found for sorting".into())
+    })?;
+
+    let tags_hash_col = batch
+        .column(tags_hash_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| {
+            TsdbParquetError::Conversion("tags_hash column is not UInt64".into())
+        })?;
+    let ts_col = batch
+        .column(ts_idx)
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .ok_or_else(|| {
+            TsdbParquetError::Conversion("timestamp column is not TimestampMicrosecond".into())
+        })?;
+
+    let mut indices: Vec<usize> = (0..batch.num_rows()).collect();
+    indices.sort_by(|&a, &b| {
+        tags_hash_col
+            .value(a)
+            .cmp(&tags_hash_col.value(b))
+            .then_with(|| ts_col.value(a).cmp(&ts_col.value(b)))
+    });
+
+    let index_array = UInt32Array::from_iter(indices.iter().map(|&i| i as u32));
+    let sorted_cols: Vec<std::sync::Arc<dyn arrow::array::Array>> = schema
+        .fields()
+        .iter()
+        .enumerate()
+        .map(|(col_idx, _)| {
+            take(batch.column(col_idx), &index_array, None)
+                .map_err(|e| TsdbParquetError::Conversion(e.to_string()))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(RecordBatch::try_new(schema, sorted_cols)
+        .map_err(|e| TsdbParquetError::Conversion(e.to_string()))?)
+}
+
+fn build_indexed_writer_props(schema: &arrow::datatypes::SchemaRef, row_count: usize) -> WriterProperties {
+    let compression = if row_count <= 10000 {
+        parquet::basic::Compression::SNAPPY
+    } else {
+        parquet::basic::Compression::ZSTD(parquet::basic::ZstdLevel::default())
+    };
+
+    let max_row_group_size = if row_count <= 10000 {
+        1024 * 1024
+    } else {
+        64 * 1024
+    };
+
+    let mut builder = WriterProperties::builder()
+        .set_compression(compression)
+        .set_max_row_group_size(max_row_group_size)
+        .set_statistics_enabled(EnabledStatistics::Page);
+
+    if let Ok(tags_hash_idx) = schema.index_of("tags_hash") {
+        if let Ok(ts_idx) = schema.index_of("timestamp") {
+            builder = builder.set_sorting_columns(Some(vec![
+                SortingColumn::new(tags_hash_idx as i32, false, false),
+                SortingColumn::new(ts_idx as i32, false, false),
+            ]));
+        }
+    }
+
+    builder.build()
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use crate::db::TsdbRocksDb;
 use crate::error::Result;
 use std::path::Path;
+use tsdb_arrow::converter::datapoints_to_record_batch;
 
 pub struct DataArchiver;
 
@@ -229,12 +230,35 @@ impl DataArchiver {
         schema: &arrow::datatypes::SchemaRef,
         compression: parquet::basic::Compression,
     ) -> Result<()> {
-        let batch = tsdb_arrow::converter::datapoints_to_record_batch(chunk, schema.clone())?;
+        let mut sorted_chunk = chunk.to_vec();
+        sorted_chunk.sort_by(|a, b| {
+            let ha = tsdb_arrow::converter::compute_tags_hash(&a.tags);
+            let hb = tsdb_arrow::converter::compute_tags_hash(&b.tags);
+            ha.cmp(&hb).then_with(|| a.timestamp.cmp(&b.timestamp))
+        });
+
+        let batch = datapoints_to_record_batch(&sorted_chunk, schema.clone())?;
         let file_path = output_dir.join(format!("part-{:08}.parquet", file_idx));
         let file = std::fs::File::create(&file_path)?;
-        let props = parquet::file::properties::WriterProperties::builder()
+
+        let mut props_builder = parquet::file::properties::WriterProperties::builder()
             .set_compression(compression)
-            .build();
+            .set_statistics_enabled(parquet::file::properties::EnabledStatistics::Page);
+
+        if let Ok(tags_hash_idx) = schema.index_of("tags_hash") {
+            if let Ok(ts_idx) = schema.index_of("timestamp") {
+                props_builder = props_builder.set_sorting_columns(Some(vec![
+                    parquet::format::SortingColumn::new(
+                        tags_hash_idx as i32,
+                        false,
+                        false,
+                    ),
+                    parquet::format::SortingColumn::new(ts_idx as i32, false, false),
+                ]));
+            }
+        }
+
+        let props = props_builder.build();
         let mut writer =
             parquet::arrow::arrow_writer::ArrowWriter::try_new(file, schema.clone(), Some(props))
                 .map_err(|e| {

@@ -58,11 +58,14 @@ pub fn compact_tsdb_schema(
     tag_keys: &[String],
     field_types: &[(String, DataType)],
 ) -> SchemaRef {
-    let mut fields = vec![Field::new(
-        "timestamp",
-        DataType::Timestamp(TimeUnit::Microsecond, None),
-        false,
-    )];
+    let mut fields = vec![
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Microsecond, None),
+            false,
+        ),
+        Field::new("tags_hash", DataType::UInt64, false),
+    ];
 
     for key in tag_keys {
         fields.push(Field::new(format!("tag_{}", key), DataType::Utf8, true));

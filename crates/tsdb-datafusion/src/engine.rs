@@ -2,6 +2,7 @@ use crate::error::{Result, TsdbDatafusionError};
 use crate::table_provider::TsdbTableProvider;
 use arrow::array::{
     Array, BooleanArray, Float64Array, Int64Array, StringArray, TimestampMicrosecondArray,
+    UInt64Array,
 };
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -45,6 +46,11 @@ fn extract_field_value_from_array(
             .downcast_ref::<TimestampMicrosecondArray>()
             .map(|a| FieldValue::Integer(a.value(index)))
             .ok_or_else(|| TsdbDatafusionError::Query("failed to downcast Timestamp".into())),
+        DataType::UInt64 => col
+            .as_any()
+            .downcast_ref::<UInt64Array>()
+            .map(|a| FieldValue::Integer(a.value(index) as i64))
+            .ok_or_else(|| TsdbDatafusionError::Query("failed to downcast UInt64".into())),
         _ => Err(TsdbDatafusionError::Query(format!(
             "unsupported data type: {:?}",
             dtype

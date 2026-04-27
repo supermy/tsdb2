@@ -1,7 +1,13 @@
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
+use crate::pruning::prune_row_groups;
+use arrow::array::{BooleanArray, StringArray};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::arrow::arrow_reader::{
+    ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter,
+};
+use parquet::arrow::ProjectionMask;
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,6 +75,25 @@ impl TsdbParquetReader {
         end_micros: i64,
         projection: Option<&[String]>,
     ) -> Result<Vec<RecordBatch>> {
+        self.read_range_arrow_with_filters(
+            _measurement,
+            start_micros,
+            end_micros,
+            projection,
+            Some((start_micros, end_micros)),
+            None,
+        )
+    }
+
+    pub fn read_range_arrow_with_filters(
+        &self,
+        _measurement: &str,
+        start_micros: i64,
+        end_micros: i64,
+        projection: Option<&[String]>,
+        time_range: Option<(i64, i64)>,
+        tag_filters: Option<&HashMap<String, String>>,
+    ) -> Result<Vec<RecordBatch>> {
         self.partition_manager.refresh()?;
 
         let start_date = micros_to_date(start_micros);
@@ -84,7 +109,12 @@ impl TsdbParquetReader {
             let files = self.partition_manager.list_parquet_files(partition.date)?;
 
             for file_path in files {
-                let file_batches = self.read_parquet_file(&file_path, projection)?;
+                let file_batches = self.read_parquet_file_with_pruning(
+                    &file_path,
+                    time_range,
+                    tag_filters,
+                    projection,
+                )?;
                 batches.extend(file_batches);
             }
         }
@@ -107,6 +137,16 @@ impl TsdbParquetReader {
     pub fn read_parquet_file(
         &self,
         path: &PathBuf,
+        projection: Option<&[String]>,
+    ) -> Result<Vec<RecordBatch>> {
+        self.read_parquet_file_with_pruning(path, None, None, projection)
+    }
+
+    pub fn read_parquet_file_with_pruning(
+        &self,
+        path: &PathBuf,
+        time_range: Option<(i64, i64)>,
+        tag_filters: Option<&HashMap<String, String>>,
         projection: Option<&[String]>,
     ) -> Result<Vec<RecordBatch>> {
         let metadata = std::fs::metadata(path).map_err(|e| {
@@ -136,21 +176,64 @@ impl TsdbParquetReader {
             }
         };
 
+        let parquet_metadata = builder.metadata();
+        let arrow_schema = builder.schema().clone();
+        let num_row_groups = parquet_metadata.num_row_groups();
+
+        let row_groups = prune_row_groups(parquet_metadata, time_range);
+        let has_pruned = row_groups.len() < num_row_groups;
+
+        let row_filter = if let Some(filters) = tag_filters {
+            if !filters.is_empty() {
+                let parquet_schema = parquet_metadata.file_metadata().schema_descr();
+                build_tag_row_filter(filters, parquet_schema, &arrow_schema)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let projection_mask = if let Some(cols) = projection {
+            let parquet_schema = parquet_metadata.file_metadata().schema_descr();
+            Some(ProjectionMask::columns(parquet_schema, cols.iter().map(|s| s.as_str())))
+        } else {
+            None
+        };
+
+        let builder = builder.with_row_groups(row_groups);
+
+        let builder = if let Some(filter) = row_filter {
+            builder.with_row_filter(filter)
+        } else {
+            builder
+        };
+
+        let builder = if let Some(mask) = projection_mask {
+            builder.with_projection(mask)
+        } else {
+            builder
+        };
+
         let reader = builder.build()?;
 
         let mut batches = Vec::new();
         for batch_result in reader {
             let batch = batch_result?;
-            if let Some(cols) = projection {
-                let proj_indices: Vec<usize> = cols
-                    .iter()
-                    .filter_map(|c| batch.schema().index_of(c).ok())
-                    .collect();
-                let projected = batch.project(&proj_indices)?;
-                batches.push(projected);
+            if projection.is_some() {
+                batches.push(batch);
             } else {
                 batches.push(batch);
             }
+        }
+
+        if has_pruned {
+            tracing::debug!(
+                "read_parquet_file {:?}: pruned to {}/{} row groups",
+                path.file_name().unwrap_or_default(),
+                batches.len(),
+                num_row_groups
+            );
         }
 
         Ok(batches)
@@ -188,6 +271,44 @@ impl TsdbParquetReader {
 
         all_points.sort_by_key(|dp| dp.timestamp);
         Ok(all_points)
+    }
+}
+
+fn build_tag_row_filter(
+    tag_filters: &HashMap<String, String>,
+    parquet_schema: &parquet::schema::types::SchemaDescriptor,
+    arrow_schema: &arrow::datatypes::Schema,
+) -> Option<RowFilter> {
+    let mut filters: Vec<Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>> = Vec::new();
+
+    for (tag_key, tag_value) in tag_filters {
+        let col_name = format!("tag_{}", tag_key);
+        let idx = match arrow_schema.index_of(&col_name) {
+            Ok(idx) => idx,
+            Err(_) => continue,
+        };
+
+        let mask = ProjectionMask::leaves(parquet_schema, [idx]);
+        let tag_value_clone = tag_value.clone();
+        let predicate = ArrowPredicateFn::new(mask, move |batch| {
+            let col = batch.column(0);
+            let string_col = match col.as_any().downcast_ref::<StringArray>() {
+                Some(c) => c,
+                None => return Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|_| Some(true)))),
+            };
+            let filtered: BooleanArray = string_col
+                .iter()
+                .map(|opt| opt.map(|s| s == tag_value_clone.as_str()))
+                .collect();
+            Ok(filtered)
+        });
+        filters.push(Box::new(predicate) as Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>);
+    }
+
+    if filters.is_empty() {
+        None
+    } else {
+        Some(RowFilter::new(filters))
     }
 }
 
