@@ -232,12 +232,18 @@ impl TsdbParquetWriter {
 
 fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch> {
     let schema = batch.schema();
-    let tags_hash_idx = schema.index_of("tags_hash").map_err(|_| {
-        TsdbParquetError::Conversion("tags_hash column not found for sorting".into())
-    })?;
-    let ts_idx = schema.index_of("timestamp").map_err(|_| {
-        TsdbParquetError::Conversion("timestamp column not found for sorting".into())
-    })?;
+    let tags_hash_idx = match schema.index_of("tags_hash") {
+        Ok(idx) => idx,
+        Err(_) => return Ok(batch.clone()),
+    };
+    let ts_idx = match schema.index_of("timestamp") {
+        Ok(idx) => idx,
+        Err(_) => return Ok(batch.clone()),
+    };
+
+    if batch.num_rows() == 0 {
+        return Ok(batch.clone());
+    }
 
     let tags_hash_col = batch
         .column(tags_hash_idx)

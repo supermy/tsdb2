@@ -1,5 +1,4 @@
-use datafusion::logical_expr::{BinaryExpr, Expr, Operator};
-use datafusion::common::Column;
+use datafusion::logical_expr::{Expr, Operator};
 use datafusion::scalar::ScalarValue;
 use std::collections::HashMap;
 
@@ -81,31 +80,41 @@ fn try_extract_comparison(
         "timestamp" => {
             let ts_micros = scalar_to_i64(scalar);
             if let Some(ts) = ts_micros {
-                let (gt_op, lt_op) = if flipped {
-                    (Operator::Lt, Operator::Gt)
+                let effective_op = if flipped {
+                    match op {
+                        Operator::Gt => Operator::Lt,
+                        Operator::GtEq => Operator::LtEq,
+                        Operator::Lt => Operator::Gt,
+                        Operator::LtEq => Operator::GtEq,
+                        other => *other,
+                    }
                 } else {
-                    (Operator::Gt, Operator::Lt)
+                    *op
                 };
 
-                match op {
-                    o if *o == gt_op || *o == Operator::GtEq => {
+                match effective_op {
+                    Operator::Gt => {
                         match time_range {
-                            Some((start, end)) => {
-                                *start = (*start).max(ts);
-                            }
-                            None => {
-                                *time_range = Some((ts, i64::MAX));
-                            }
+                            Some((start, _)) => { *start = (*start).max(ts + 1); }
+                            None => { *time_range = Some((ts + 1, i64::MAX)); }
                         }
                     }
-                    o if *o == lt_op || *o == Operator::LtEq => {
+                    Operator::GtEq => {
                         match time_range {
-                            Some((start, end)) => {
-                                *end = (*end).min(ts);
-                            }
-                            None => {
-                                *time_range = Some((0, ts));
-                            }
+                            Some((start, _)) => { *start = (*start).max(ts); }
+                            None => { *time_range = Some((ts, i64::MAX)); }
+                        }
+                    }
+                    Operator::Lt => {
+                        match time_range {
+                            Some((_, end)) => { *end = (*end).min(ts - 1); }
+                            None => { *time_range = Some((0, ts - 1)); }
+                        }
+                    }
+                    Operator::LtEq => {
+                        match time_range {
+                            Some((_, end)) => { *end = (*end).min(ts); }
+                            None => { *time_range = Some((0, ts)); }
                         }
                     }
                     Operator::Eq => {

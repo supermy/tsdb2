@@ -158,22 +158,23 @@ impl ParquetApi {
         if !dir.is_dir() {
             return;
         }
+        Self::scan_parquet_dir_recursive(dir, tier, files, 0);
+    }
+
+    fn scan_parquet_dir_recursive(
+        dir: &std::path::Path,
+        tier: &str,
+        files: &mut Vec<ParquetFileInfo>,
+        depth: usize,
+    ) {
+        if depth > 5 {
+            return;
+        }
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
-                        for sub_entry in sub_entries.flatten() {
-                            let p = sub_entry.path();
-                            if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                                if let Some(mut info) = Self::read_parquet_meta_internal(&p) {
-                                    info.tier = tier.to_string();
-                                    info.measurement = Self::extract_measurement_from_path(&p);
-                                    files.push(info);
-                                }
-                            }
-                        }
-                    }
+                    Self::scan_parquet_dir_recursive(&path, tier, files, depth + 1);
                 } else if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
                     if let Some(mut info) = Self::read_parquet_meta_internal(&path) {
                         info.tier = tier.to_string();
@@ -186,7 +187,6 @@ impl ParquetApi {
     }
 
     fn detect_tier_from_path(path: &Path) -> String {
-        let path_str = path.to_string_lossy();
         for component in path.components() {
             if let std::path::Component::Normal(os_str) = component {
                 if let Some(s) = os_str.to_str() {

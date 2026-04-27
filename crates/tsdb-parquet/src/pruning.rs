@@ -8,7 +8,13 @@ pub fn prune_files_by_time_range(
 ) -> Vec<&FileStats> {
     files
         .iter()
-        .filter(|f| f.timestamp_max >= start_micros && f.timestamp_min <= end_micros)
+        .filter(|f| {
+            if let (Some(min), Some(max)) = (f.timestamp_min, f.timestamp_max) {
+                max >= start_micros && min <= end_micros
+            } else {
+                true
+            }
+        })
         .collect()
 }
 
@@ -44,7 +50,16 @@ pub fn prune_files<'a>(
     tag_filters: &HashMap<String, String>,
 ) -> Vec<&'a FileStats> {
     let result: Vec<&FileStats> = if let Some((start, end)) = time_range {
-        prune_files_by_time_range(files, start, end)
+        files
+            .iter()
+            .filter(|f| {
+                if let (Some(min), Some(max)) = (f.timestamp_min, f.timestamp_max) {
+                    max >= start && min <= end
+                } else {
+                    true
+                }
+            })
+            .collect()
     } else {
         files.iter().collect()
     };
@@ -89,9 +104,7 @@ pub fn prune_row_groups(
             for col in rg.columns() {
                 if col.column_path().string() == "timestamp" {
                     if let Some(stats) = col.statistics() {
-                        if stats.has_min_max_set() {
-                            let max_bs = stats.max_bytes();
-                            let min_bs = stats.min_bytes();
+                        if let (Some(max_bs), Some(min_bs)) = (stats.max_bytes_opt(), stats.min_bytes_opt()) {
                             if max_bs.len() == 8 {
                                 let max_ts = i64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8]));
                                 if max_ts < start {
@@ -148,10 +161,10 @@ mod tests {
             tier: "warm".to_string(),
             row_count: 1000,
             size_bytes: 4096,
-            timestamp_min: ts_min,
-            timestamp_max: ts_max,
-            tags_hash_min: 0,
-            tags_hash_max: 0,
+            timestamp_min: Some(ts_min),
+            timestamp_max: Some(ts_max),
+            tags_hash_min: None,
+            tags_hash_max: None,
             tag_values,
         }
     }
@@ -166,7 +179,7 @@ mod tests {
 
         let result = prune_files_by_time_range(&files, 250, 450);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].timestamp_min, 300);
+        assert_eq!(result[0].timestamp_min, Some(300));
     }
 
     #[test]
@@ -182,7 +195,7 @@ mod tests {
 
         let result = prune_files_by_tags(&files, &filters);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].timestamp_min, 300);
+        assert_eq!(result[0].timestamp_min, Some(300));
     }
 
     #[test]
@@ -198,7 +211,7 @@ mod tests {
 
         let result = prune_files(&files, Some((250, 450)), &filters);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].timestamp_min, 300);
+        assert_eq!(result[0].timestamp_min, Some(300));
     }
 
     #[test]

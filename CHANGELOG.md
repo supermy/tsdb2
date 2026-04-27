@@ -5,6 +5,78 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3b] - 2026-04-27
+
+### Added
+
+- **Parquet 存储优化**: 时间分区 + 标签排序 + 查询剪枝
+  - `tags_hash` 列: Schema 新增 UInt64 列，写入时自动计算并存储标签哈希值
+  - 文件内排序: 数据按 `tags_hash ASC, timestamp ASC` 排序后写入 Parquet
+  - Parquet SortingColumn 元数据: 记录排序信息，供读取端利用
+  - 分层目录结构: `data/{measurement}/{date}/{tier}/xxx.parquet`，支持热/温/冷数据隔离
+
+- **文件级统计信息** (`FileStats`)
+  - `timestamp_min` / `timestamp_max`: 时间范围统计
+  - `tags_hash_min` / `tags_hash_max`: 标签哈希范围统计
+  - `tag_values`: 每个标签列的 min/max/null_count 统计
+  - 统计信息持久化为 `.stats.json` 伴生文件
+  - 无统计信息时使用 `Option` 类型，避免默认零值导致错误剪枝
+
+- **分区清单** (`PartitionManifest`)
+  - 每个分区维护 `manifest.json`，记录所有文件及其统计信息
+  - `files_in_time_range()`: 基于时间范围快速筛选文件
+  - `add_file()` / `remove_file()`: 自动去重更新
+
+- **查询剪枝** (`pruning` 模块)
+  - 文件级剪枝: 根据时间范围和标签值范围跳过不相关文件
+  - Row Group 级剪枝: 读取 Parquet 元数据中的列统计，跳过不相关 Row Group
+  - 标签行级过滤: 使用 `ArrowPredicateFn` + `RowFilter` 在 Parquet 读取时过滤标签
+
+- **Compaction 增强去重**
+  - 无 `tags_hash` 列时回退到使用 tag 列拼接作为去重 key，避免数据丢失
+  - 排序失败时返回错误而非静默使用未排序数据
+
+- **谓词提取修复** (`predicate` 模块)
+  - 正确处理操作数翻转的比较表达式（如 `1000 < timestamp` 等价于 `timestamp > 1000`）
+  - 支持 Gt/GtEq/Lt/LtEq/Eq 五种比较操作符
+
+### Changed
+
+- **FileStats 字段类型变更** (不兼容)
+  - `timestamp_min/max`: `i64` → `Option<i64>`
+  - `tags_hash_min/max`: `u64` → `Option<u64>`
+  - 无统计信息时为 `None`，剪枝时安全跳过
+
+- **Parquet 文件目录结构变更**
+  - 旧: `data/{date}/xxx.parquet`
+  - 新: `data/{measurement}/{date}/{tier}/xxx.parquet`
+  - 目录扫描改为递归扫描，深度限制 5 层
+
+- **排序函数向后兼容**
+  - 无 `tags_hash` 或 `timestamp` 列时返回原始 batch，不报错
+
+### Fixed
+
+- **Critical**: predicate.rs 翻转比较符导致时间范围提取错误
+- **Critical**: compaction.rs 无 tags_hash 列时去重丢失数据
+- **Critical**: parquet_api.rs 目录扫描只有 2 层深度，新目录结构下文件不可见
+- **High**: writer.rs 排序函数不向后兼容旧 Schema
+- **Medium**: file_stats.rs 无统计信息时默认零值导致错误剪枝
+- **Medium**: compaction 排序失败时静默回退为未排序数据
+- **Low**: reader.rs 调试日志 batch 数误报为 row group 数
+- 替换 deprecated 的 `has_min_max_set()`/`min_bytes()`/`max_bytes()` 为 `min_bytes_opt()`/`max_bytes_opt()`
+
+### Performance
+
+- 范围查询: 仅读取时间范围内的边界文件，减少 I/O
+- 标签过滤: Row Group 剪枝 + 行级过滤，减少解码开销
+- Compaction 去重: tags_hash 快速比较，避免逐字段对比
+
+### Test Coverage
+
+- 总测试数: 421+ (v0.3.0: 360)
+- 新增测试: Parquet 剪枝 (4)、文件统计 (2)、谓词提取 (3)
+
 ## [0.3.0] - 2026-04-25
 
 ### Added

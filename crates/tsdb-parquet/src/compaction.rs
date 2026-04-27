@@ -1,6 +1,6 @@
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::PartitionManager;
-use arrow::array::{UInt32Array, UInt64Array, TimestampMicrosecondArray};
+use arrow::array::{Array, UInt32Array, UInt64Array, TimestampMicrosecondArray};
 use arrow::compute::take;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
@@ -196,7 +196,10 @@ impl ParquetCompactor {
             .iter()
             .map(|b| sort_batch_by_tags_hash_timestamp(b))
             .collect::<Result<Vec<_>>>()
-            .unwrap_or_else(|_| batches.to_vec());
+            .map_err(|e| {
+                tracing::error!("compaction sort failed: {}", e);
+                e
+            })?;
 
         let file = File::create(tmp_path).map_err(|e| {
             TsdbParquetError::Io(std::io::Error::other(format!(
@@ -415,6 +418,18 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
 
     let tags_hash_idx = schema.index_of("tags_hash").ok();
 
+    let tag_column_indices: Vec<usize> = if tags_hash_idx.is_none() {
+        schema
+            .fields()
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.name().starts_with("tag_"))
+            .map(|(i, _)| i)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
     let mut deduped_batches = Vec::new();
 
@@ -441,6 +456,23 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
                 {
                     if row_idx < num_rows {
                         key_bytes.extend_from_slice(arr.value(row_idx).as_bytes());
+                    }
+                }
+            } else {
+                for &tag_idx in &tag_column_indices {
+                    let tag_col = batch.column(tag_idx);
+                    if let Some(arr) = tag_col
+                        .as_any()
+                        .downcast_ref::<arrow::array::StringArray>()
+                    {
+                        if row_idx < arr.len() {
+                            if arr.is_null(row_idx) {
+                                key_bytes.push(0u8);
+                            } else {
+                                key_bytes.push(1u8);
+                                key_bytes.extend_from_slice(arr.value(row_idx).as_bytes());
+                            }
+                        }
                     }
                 }
             }

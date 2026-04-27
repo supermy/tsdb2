@@ -328,6 +328,103 @@ opts.set_compression_per_level(&compression_per_level);
 
 ---
 
+## 13. Parquet 存储优化
+
+### 13.1 设计目标
+
+在 Parquet 存储层实现三大优化：
+1. **时间分区 + 标签排序**: 数据按日期分区，文件内按 tags_hash + timestamp 排序
+2. **范围查询剪枝**: 利用文件级和 Row Group 级统计信息跳过不相关数据
+3. **标签过滤加速**: 行级 ArrowPredicate 过滤 + RowFilter 管道
+
+### 13.2 tags_hash 列
+
+```rust
+// Schema 新增列
+Field::new("tags_hash", DataType::UInt64, false)
+
+// 写入时自动计算
+let tags_hash = compute_tags_hash(&dp.tags);
+```
+
+**设计决策**:
+- 使用 FxHash（与 RocksDB 引擎相同的哈希算法），保证跨引擎一致性
+- 存储为 UInt64 列而非 Binary，支持 Parquet 原生 min/max 统计
+- 排序时 tags_hash 优先于 timestamp，同一 series 数据连续存储
+
+### 13.3 文件内排序
+
+```rust
+fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch> {
+    // 1. 提取 tags_hash 和 timestamp 列
+    // 2. 生成排序索引: tags_hash ASC, timestamp ASC
+    // 3. 使用 take() 重排列
+}
+```
+
+**排序元数据**:
+```rust
+SortingColumn {
+    column_idx: tags_hash_idx,
+    descending: false,
+    nulls_first: false,
+}
+```
+
+写入 Parquet 时设置 `SortingColumn` 元数据，读取端可利用此信息优化查询。
+
+### 13.4 文件级统计信息
+
+```rust
+pub struct FileStats {
+    pub file_path: String,
+    pub measurement: String,
+    pub date: String,
+    pub tier: String,
+    pub row_count: u64,
+    pub size_bytes: u64,
+    pub timestamp_min: Option<i64>,    // None = 无统计
+    pub timestamp_max: Option<i64>,
+    pub tags_hash_min: Option<u64>,
+    pub tags_hash_max: Option<u64>,
+    pub tag_values: HashMap<String, ValueStats>,
+}
+```
+
+**关键设计**: 使用 `Option` 类型而非默认零值。零值会导致错误剪枝（如 `timestamp_max = 0` 会使所有正时间戳查询跳过该文件）。
+
+**持久化**: 每个 Parquet 文件生成 `.stats.json` 伴生文件，分区级别维护 `manifest.json`。
+
+### 13.5 查询剪枝流程
+
+```
+SQL 查询: SELECT * FROM cpu WHERE timestamp > T1 AND tag_host = 'server05'
+    │
+    ├─ 1. 谓词提取 (predicate.rs)
+    │     timestamp > T1 → time_range = (T1+1, i64::MAX)
+    │     tag_host = 'server05' → tag_filters = {"host": "server05"}
+    │
+    ├─ 2. 文件级剪枝 (pruning.rs)
+    │     ├─ 时间剪枝: timestamp_max < T1+1 → 跳过
+    │     └─ 标签剪枝: host.max < 'server05' 或 host.min > 'server05' → 跳过
+    │
+    ├─ 3. Row Group 级剪枝 (reader.rs)
+    │     读取 Parquet 列统计 → 跳过不满足条件的 Row Group
+    │
+    └─ 4. 行级过滤 (reader.rs)
+          ArrowPredicateFn + RowFilter → 解码时过滤标签
+```
+
+### 13.6 性能预期
+
+| 场景 | 优化前 | 优化后 | 说明 |
+|------|--------|--------|------|
+| 1 天范围查询 (30 天数据) | 扫描 30 个文件 | 扫描 1-2 个文件 | 文件级时间剪枝 |
+| 标签等值查询 (1000 series) | 全表扫描 | 跳过 90%+ Row Group | Row Group 统计剪枝 |
+| Compaction 去重 | 逐字段对比 | tags_hash 快速比较 | 8 字节整数 vs 字符串比较 |
+
+---
+
 ## 12. RocksDB 调优参数
 
 ### 12.1 Write Buffer

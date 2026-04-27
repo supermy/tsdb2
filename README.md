@@ -1,6 +1,6 @@
 # TSDB2
 
-高性能时序数据库，双引擎架构（RocksDB + Parquet/Iceberg），支持 Flight SQL、Web 管理界面和数据生命周期管理。
+高性能时序数据库，双引擎架构（RocksDB + Parquet/Iceberg），支持 Flight SQL、Web 管理界面、数据生命周期管理和 Parquet 查询剪枝。
 
 ## 架构
 
@@ -34,6 +34,7 @@
 - **双引擎存储**: RocksDB 热数据 + Parquet/Iceberg 冷数据归档
 - **Flight SQL**: Arrow Flight gRPC 协议，支持 SQL 查询和流式写入
 - **Web SQL 控制台**: 浏览器内直接执行 SQL，自动合并 RocksDB + Parquet 数据
+- **Parquet 查询剪枝**: 时间分区 + 标签排序 + 文件/Row Group 级统计信息剪枝
 - **数据生命周期**: 热数据(RocksDB) → 温数据(Parquet SNAPPY) → 冷数据(Parquet ZSTD)
 - **Iceberg 表管理**: 创建/扫描/快照/回滚/压缩/过期清理
 - **Parquet 数据查看**: 文件列表、元数据、数据预览

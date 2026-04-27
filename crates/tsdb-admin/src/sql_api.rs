@@ -170,29 +170,16 @@ impl SqlApi {
 
         for tier in &["warm", "cold"] {
             let tier_dir = self.parquet_dir.join(tier);
-            if let Ok(entries) = std::fs::read_dir(&tier_dir) {
-                for entry in entries.flatten() {
-                    let partition_dir = entry.path();
-                    if !partition_dir.is_dir() {
-                        continue;
-                    }
-                    let dir_name = partition_dir
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-                    let (measurement, _) = parse_partition_dir(&dir_name);
-                    if let Ok(sub_entries) = std::fs::read_dir(&partition_dir) {
-                        for sub_entry in sub_entries.flatten() {
-                            let p = sub_entry.path();
-                            if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                                parquet_files_by_measurement
-                                    .entry(measurement.clone())
-                                    .or_default()
-                                    .push(p);
-                            }
-                        }
-                    }
+            let mut all_parquet_files = Vec::new();
+            Self::collect_parquet_files_recursive(&tier_dir, &mut all_parquet_files, 0);
+
+            for pq_path in all_parquet_files {
+                let measurement = Self::extract_measurement_from_parquet_path(&pq_path);
+                if !measurement.is_empty() {
+                    parquet_files_by_measurement
+                        .entry(measurement)
+                        .or_default()
+                        .push(pq_path);
                 }
             }
         }
@@ -308,6 +295,56 @@ impl SqlApi {
         }
         arrow::record_batch::RecordBatch::try_new(target.clone(), columns)
             .unwrap_or(batch)
+    }
+
+    fn collect_parquet_files_recursive(
+        dir: &std::path::Path,
+        files: &mut Vec<std::path::PathBuf>,
+        depth: usize,
+    ) {
+        if depth > 5 || !dir.is_dir() {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::collect_parquet_files_recursive(&path, files, depth + 1);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    fn extract_measurement_from_parquet_path(path: &std::path::Path) -> String {
+        for ancestor in path.ancestors() {
+            let name = ancestor
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if name.starts_with("ts_") {
+                let (m, _) = crate::utils::parse_partition_dir(&name);
+                return m;
+            }
+            if name.starts_with("data_") {
+                if let Some(parent) = ancestor.parent() {
+                    if let Some(parent_name) = parent.file_name() {
+                        let parent_str = parent_name.to_string_lossy().to_string();
+                        if !parent_str.starts_with("ts_")
+                            && !parent_str.starts_with("data_")
+                            && parent_str != "warm"
+                            && parent_str != "cold"
+                            && parent_str != "archive"
+                        {
+                            return parent_str;
+                        }
+                    }
+                }
+            }
+        }
+        String::new()
     }
 
     fn register_iceberg_tables(

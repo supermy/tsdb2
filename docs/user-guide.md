@@ -222,6 +222,81 @@ let config = ArrowStorageConfig {
 - 调大 `row_group_size` 提高列式读取效率
 - 设置合理的 `retention_days` 自动清理过期数据
 
+## Parquet 存储优化
+
+v0.3b 引入了 Parquet 存储优化，通过时间分区 + 标签排序 + 查询剪枝显著提升查询性能。
+
+### 目录结构
+
+```
+data_parquet/
+└── {measurement}/
+    └── {date}/
+        ├── hot/
+        │   └── {uuid}.parquet      # 热数据, Snappy 压缩
+        ├── warm/
+        │   └── {uuid}.parquet      # 温数据, Snappy 压缩
+        └── cold/
+            └── {uuid}.parquet      # 冷数据, ZSTD 压缩
+```
+
+### tags_hash 列
+
+写入时自动计算标签哈希并存储为 `tags_hash` (UInt64) 列：
+
+```rust
+// 自动包含 tags_hash 列
+let dps = vec![
+    DataPoint::new("cpu", timestamp)
+        .with_tag("host", "server01")
+        .with_field("usage", FieldValue::Float(0.85)),
+];
+writer.write_batch(&dps)?;
+```
+
+Parquet 文件内数据按 `tags_hash ASC, timestamp ASC` 排序，同一 series 的数据连续存储。
+
+### 文件统计信息
+
+每个 Parquet 文件自动生成 `.stats.json` 伴生文件，包含：
+
+```json
+{
+  "file_path": "cpu/20260427/hot/abc123.parquet",
+  "measurement": "cpu",
+  "date": "20260427",
+  "tier": "hot",
+  "row_count": 100000,
+  "size_bytes": 4096000,
+  "timestamp_min": 1700000000000,
+  "timestamp_max": 1700086400000,
+  "tags_hash_min": 1234567890,
+  "tags_hash_max": 9876543210,
+  "tag_values": {
+    "host": { "min": "server01", "max": "server99", "null_count": 0 }
+  }
+}
+```
+
+### 查询剪枝
+
+范围查询自动利用统计信息跳过不相关文件和 Row Group：
+
+```
+查询: timestamp ∈ [T1, T2] AND tag_host = 'server05'
+
+1. 文件级剪枝: 跳过 timestamp_max < T1 或 timestamp_min > T2 的文件
+2. 标签值剪枝: 跳过 host min > 'server05' 或 host max < 'server05' 的文件
+3. Row Group 剪枝: 读取 Parquet 列统计，跳过不满足条件的 Row Group
+4. 行级过滤: 使用 ArrowPredicateFn 在解码时过滤标签
+```
+
+### 向后兼容
+
+- 旧格式 Parquet 文件（无 `tags_hash` 列）仍可正常读取
+- 排序函数遇到旧 Schema 时返回原始数据，不报错
+- Compaction 去重时无 `tags_hash` 列自动回退到 tag 列拼接
+
 ## 常见问题
 
 ### Q: 写入后读取不到数据？

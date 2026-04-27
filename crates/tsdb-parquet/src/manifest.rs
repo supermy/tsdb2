@@ -190,7 +190,10 @@ impl ManifestIndex {
     ) -> Vec<&FileStats> {
         self.files_for_measurement(measurement)
             .into_iter()
-            .filter(|f| f.timestamp_max >= start_micros && f.timestamp_min <= end_micros)
+            .filter(|f| {
+                f.timestamp_max.map_or(false, |max| max >= start_micros)
+                    && f.timestamp_min.map_or(false, |min| min <= end_micros)
+            })
             .collect()
     }
 }
@@ -211,10 +214,10 @@ mod tests {
             tier: "warm".to_string(),
             row_count: 1000,
             size_bytes: 4096,
-            timestamp_min: 1000,
-            timestamp_max: 2000,
-            tags_hash_min: 100,
-            tags_hash_max: 200,
+            timestamp_min: Some(1000),
+            timestamp_max: Some(2000),
+            tags_hash_min: Some(100),
+            tags_hash_max: Some(200),
             tag_values: HashMap::new(),
         });
 
@@ -236,10 +239,10 @@ mod tests {
             tier: "warm".to_string(),
             row_count: 100,
             size_bytes: 100,
-            timestamp_min: 0,
-            timestamp_max: 0,
-            tags_hash_min: 0,
-            tags_hash_max: 0,
+            timestamp_min: None,
+            timestamp_max: None,
+            tags_hash_min: None,
+            tags_hash_max: None,
             tag_values: HashMap::new(),
         });
         assert_eq!(manifest.files.len(), 1);
@@ -251,10 +254,10 @@ mod tests {
             tier: "warm".to_string(),
             row_count: 200,
             size_bytes: 200,
-            timestamp_min: 0,
-            timestamp_max: 0,
-            tags_hash_min: 0,
-            tags_hash_max: 0,
+            timestamp_min: None,
+            timestamp_max: None,
+            tags_hash_min: None,
+            tags_hash_max: None,
             tag_values: HashMap::new(),
         });
         assert_eq!(manifest.files.len(), 1);

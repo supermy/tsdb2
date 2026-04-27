@@ -182,6 +182,7 @@ impl TsdbParquetReader {
 
         let row_groups = prune_row_groups(parquet_metadata, time_range);
         let has_pruned = row_groups.len() < num_row_groups;
+        let pruned_count = row_groups.len();
 
         let row_filter = if let Some(filters) = tag_filters {
             if !filters.is_empty() {
@@ -229,9 +230,9 @@ impl TsdbParquetReader {
 
         if has_pruned {
             tracing::debug!(
-                "read_parquet_file {:?}: pruned to {}/{} row groups",
+                "read_parquet_file {:?}: selected {}/{} row groups",
                 path.file_name().unwrap_or_default(),
-                batches.len(),
+                pruned_count,
                 num_row_groups
             );
         }

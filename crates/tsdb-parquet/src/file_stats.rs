@@ -14,10 +14,10 @@ pub struct FileStats {
     pub tier: String,
     pub row_count: u64,
     pub size_bytes: u64,
-    pub timestamp_min: i64,
-    pub timestamp_max: i64,
-    pub tags_hash_min: u64,
-    pub tags_hash_max: u64,
+    pub timestamp_min: Option<i64>,
+    pub timestamp_max: Option<i64>,
+    pub tags_hash_min: Option<u64>,
+    pub tags_hash_max: Option<u64>,
     pub tag_values: HashMap<String, ValueStats>,
 }
 
@@ -34,10 +34,6 @@ pub fn extract_file_stats(
     date: &str,
     tier: &str,
 ) -> Result<FileStats> {
-    let file_size = std::fs::metadata(file_path)
-        .map(|m| m.len())
-        .unwrap_or(0);
-
     let file = File::open(file_path).map_err(|e| {
         TsdbParquetError::Io(std::io::Error::other(format!(
             "failed to open parquet file for stats: {}",
@@ -85,34 +81,40 @@ pub fn extract_stats_from_metadata(
         for col in rg.columns() {
             let col_path = col.column_path().string();
             if let Some(stats) = col.statistics() {
-                if !stats.has_min_max_set() {
+                let min_opt = stats.min_bytes_opt();
+                let max_opt = stats.max_bytes_opt();
+                if min_opt.is_none() && max_opt.is_none() {
                     continue;
                 }
                 match col_path.as_str() {
                     "timestamp" => {
-                        let min_bs = stats.min_bytes();
-                        let max_bs = stats.max_bytes();
-                        if min_bs.len() == 8 {
-                            ts_min = ts_min.min(i64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8])));
+                        if let Some(min_bs) = min_opt {
+                            if min_bs.len() == 8 {
+                                ts_min = ts_min.min(i64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8])));
+                            }
                         }
-                        if max_bs.len() == 8 {
-                            ts_max = ts_max.max(i64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8])));
+                        if let Some(max_bs) = max_opt {
+                            if max_bs.len() == 8 {
+                                ts_max = ts_max.max(i64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8])));
+                            }
                         }
                     }
                     "tags_hash" => {
-                        let min_bs = stats.min_bytes();
-                        let max_bs = stats.max_bytes();
-                        if min_bs.len() == 8 {
-                            th_min = th_min.min(u64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8])));
+                        if let Some(min_bs) = min_opt {
+                            if min_bs.len() == 8 {
+                                th_min = th_min.min(u64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8])));
+                            }
                         }
-                        if max_bs.len() == 8 {
-                            th_max = th_max.max(u64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8])));
+                        if let Some(max_bs) = max_opt {
+                            if max_bs.len() == 8 {
+                                th_max = th_max.max(u64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8])));
+                            }
                         }
                     }
                     _ => {
                         if let Some(tag_key) = col_path.strip_prefix("tag_") {
-                            let min_val = String::from_utf8(stats.min_bytes().to_vec()).ok();
-                            let max_val = String::from_utf8(stats.max_bytes().to_vec()).ok();
+                            let min_val = min_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
+                            let max_val = max_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
                             let null_count = stats.null_count_opt().unwrap_or(0);
 
                             tag_values
@@ -149,6 +151,9 @@ pub fn extract_stats_from_metadata(
     if th_min == u64::MAX { th_min = 0; }
     if th_max == u64::MIN { th_max = 0; }
 
+    let has_ts_stats = ts_min != 0 || ts_max != 0;
+    let has_th_stats = th_min != 0 || th_max != 0;
+
     let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
 
     FileStats {
@@ -158,10 +163,10 @@ pub fn extract_stats_from_metadata(
         tier: tier.to_string(),
         row_count: total_rows,
         size_bytes: file_size,
-        timestamp_min: ts_min,
-        timestamp_max: ts_max,
-        tags_hash_min: th_min,
-        tags_hash_max: th_max,
+        timestamp_min: if has_ts_stats { Some(ts_min) } else { None },
+        timestamp_max: if has_ts_stats { Some(ts_max) } else { None },
+        tags_hash_min: if has_th_stats { Some(th_min) } else { None },
+        tags_hash_max: if has_th_stats { Some(th_max) } else { None },
         tag_values,
     }
 }
@@ -197,8 +202,8 @@ mod tests {
         let stats = extract_file_stats(&paths[0], "cpu", "20010101", "hot").unwrap();
         assert_eq!(stats.measurement, "cpu");
         assert!(stats.row_count > 0);
-        assert!(stats.timestamp_min > 0);
-        assert!(stats.timestamp_max > 0);
+        assert!(stats.timestamp_min.is_some());
+        assert!(stats.timestamp_max.is_some());
     }
 
     #[test]
@@ -211,10 +216,10 @@ mod tests {
             tier: "warm".to_string(),
             row_count: 1000,
             size_bytes: 4096,
-            timestamp_min: 1000,
-            timestamp_max: 2000,
-            tags_hash_min: 100,
-            tags_hash_max: 200,
+            timestamp_min: Some(1000),
+            timestamp_max: Some(2000),
+            tags_hash_min: Some(100),
+            tags_hash_max: Some(200),
             tag_values: {
                 let mut m = HashMap::new();
                 m.insert("host".to_string(), ValueStats {

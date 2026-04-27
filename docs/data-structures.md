@@ -260,10 +260,87 @@ prefix_scan(measurement, tags, start, end)
 ### 4.2 Compact Schema
 
 ```
-| timestamp (Int64) | tag_host (Utf8) | tag_region (Utf8) | usage (Float64) | idle (Float64) | count (Int64) |
+| timestamp (Int64) | tags_hash (UInt64) | tag_host (Utf8) | tag_region (Utf8) | usage (Float64) | idle (Float64) | count (Int64) |
 ```
 
-适用于 tag key 固定的场景，每个 tag 作为独立列，查询性能更优。
+适用于 tag key 固定的场景，每个 tag 作为独立列，查询性能更优。`tags_hash` 列在 v0.3b 新增，用于排序和剪枝。
+
+---
+
+## 5. Parquet 存储优化数据结构
+
+### 5.1 FileStats — 文件级统计信息
+
+```rust
+pub struct FileStats {
+    pub file_path: String,
+    pub measurement: String,
+    pub date: String,
+    pub tier: String,
+    pub row_count: u64,
+    pub size_bytes: u64,
+    pub timestamp_min: Option<i64>,     // None = 无统计信息
+    pub timestamp_max: Option<i64>,
+    pub tags_hash_min: Option<u64>,
+    pub tags_hash_max: Option<u64>,
+    pub tag_values: HashMap<String, ValueStats>,
+}
+```
+
+**持久化格式** (JSON):
+```json
+{
+  "file_path": "cpu/20260427/hot/abc123.parquet",
+  "timestamp_min": 1700000000000,
+  "timestamp_max": 1700086400000,
+  "tags_hash_min": 1234567890,
+  "tags_hash_max": 9876543210,
+  "tag_values": {
+    "host": { "min": "server01", "max": "server99", "null_count": 0 }
+  }
+}
+```
+
+**Option 类型设计**: `timestamp_min/max` 和 `tags_hash_min/max` 使用 `Option` 而非默认零值。零值会导致错误剪枝——例如 `timestamp_max = 0` 会使所有正时间戳查询错误跳过该文件。
+
+### 5.2 ValueStats — 标签值统计
+
+```rust
+pub struct ValueStats {
+    pub min: Option<String>,
+    pub max: Option<String>,
+    pub null_count: u64,
+}
+```
+
+### 5.3 PartitionManifest — 分区清单
+
+```rust
+pub struct PartitionManifest {
+    pub measurement: String,
+    pub date: String,
+    pub tier: String,
+    pub files: Vec<FileStats>,
+}
+```
+
+**持久化**: `data/{measurement}/{date}/{tier}/manifest.json`
+
+**查询方法**:
+- `files_in_time_range(measurement, start, end)`: 基于时间范围筛选文件
+- `add_file(stats)`: 添加文件统计（自动去重）
+- `remove_file(path)`: 移除文件统计
+
+### 5.4 ExtractedFilters — 查询谓词提取结果
+
+```rust
+pub struct ExtractedFilters {
+    pub time_range: Option<(i64, i64)>,
+    pub tag_filters: HashMap<String, String>,
+}
+```
+
+从 DataFusion 表达式树中提取时间范围和标签等值条件，用于文件级和 Row Group 级剪枝。
 
 ---
 
