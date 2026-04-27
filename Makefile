@@ -8,7 +8,7 @@
        docker docker-build docker-run docker-push \
        bench bench-write bench-read bench-full \
        coverage \
-      install dist dist-clean release \
+      install dist dist-clean release uninstall \
        test-data test-data-iot test-data-devops test-data-ecommerce \
        test-data-clean test-data-lifecycle \
        client-test client-sql client-status client-doctor \
@@ -99,7 +99,7 @@ build-windows-amd64:
 	@echo "==> Building for Windows x86_64..."
 	cargo build --release -p tsdb-cli --target x86_64-pc-windows-msvc
 	@$(MAKE) build-frontend
-	@$(MAKE) _package_target TARGET=x86_64-pc-windows-msvc
+	@$(MAKE) _package_target TARGET=x86_64-pc-windows-msvc SUFFIX=.exe
 
 build-cross:
 	@echo "==> Cross-compiling for $(CROSS_ARCH)..."
@@ -114,9 +114,13 @@ _package_target:
 	@cp -r $(DASHBOARD_DIR)/dist $(DIST_DIR)/tsdb2-$(VERSION)-$(TARGET)/dashboard
 	@cp -r configs $(DIST_DIR)/tsdb2-$(VERSION)-$(TARGET)/
 	@cp README.md $(DIST_DIR)/tsdb2-$(VERSION)-$(TARGET)/
-	@cd $(DIST_DIR) && tar czf tsdb2-$(VERSION)-$(TARGET).tar.gz tsdb2-$(VERSION)-$(TARGET)
+	@if echo "$(TARGET)" | grep -q "windows"; then \
+		cd $(DIST_DIR) && zip -r tsdb2-$(VERSION)-$(TARGET).zip tsdb2-$(VERSION)-$(TARGET); \
+	else \
+		cd $(DIST_DIR) && tar czf tsdb2-$(VERSION)-$(TARGET).tar.gz tsdb2-$(VERSION)-$(TARGET); \
+	fi
 	@rm -rf $(DIST_DIR)/tsdb2-$(VERSION)-$(TARGET)
-	@echo "✅ Packaged: $(DIST_DIR)/tsdb2-$(VERSION)-$(TARGET).tar.gz"
+	@echo "✅ Packaged: $(DIST_DIR)/tsdb2-$(VERSION)-$(TARGET)$(shell echo $(TARGET) | grep -q windows && echo .zip || echo .tar.gz)"
 
 # ============================================================
 # Distribution & Release
@@ -136,9 +140,15 @@ dist: build-release
 dist-clean:
 	@rm -rf $(DIST_DIR)
 
-release: dist build-linux-amd64 build-linux-arm64
+release: dist build-linux-amd64 build-linux-arm64 build-macos-amd64 build-macos-arm64 build-windows-amd64
 	@echo "✅ Release packages built in $(DIST_DIR)/"
-	@ls -lh $(DIST_DIR)/*.tar.gz
+	@ls -lh $(DIST_DIR)/*.tar.gz $(DIST_DIR)/*.zip 2>/dev/null || true
+
+tag:
+	@if [ -z "$(VERSION)" ]; then echo "❌ VERSION not set"; exit 1; fi
+	@git tag -a v$(VERSION) -m "TSDB2 v$(VERSION)"
+	@git push origin v$(VERSION)
+	@echo "✅ Tagged and pushed v$(VERSION)"
 
 # ============================================================
 # Server Start / Stop

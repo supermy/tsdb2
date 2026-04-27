@@ -279,8 +279,8 @@ fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch>
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(RecordBatch::try_new(schema, sorted_cols)
-        .map_err(|e| TsdbParquetError::Conversion(e.to_string()))?)
+    RecordBatch::try_new(schema, sorted_cols)
+        .map_err(|e| TsdbParquetError::Conversion(e.to_string()))
 }
 
 fn build_indexed_writer_props(schema: &arrow::datatypes::SchemaRef, row_count: usize) -> WriterProperties {

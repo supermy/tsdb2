@@ -1,0 +1,23 @@
+[build.env]
+passthrough = [
+    "ROCKSDB_LIB_DIR",
+    "SNAPPY_LIB_DIR",
+    "LZ4_LIB_DIR",
+    "ZSTD_LIB_DIR",
+    "ZLIB_LIB_DIR",
+    "BZ2_LIB_DIR",
+]
+
+[target.aarch64-unknown-linux-gnu]
+image = "ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main"
+pre-build = [
+    "dpkg --add-architecture arm64",
+    "apt-get update && apt-get install -y librocksdb-dev:arm64 libsnappy-dev:arm64 liblz4-dev:arm64 libzstd-dev:arm64 zlib1g-dev:arm64 libbz2-dev:arm64",
+]
+
+[target.armv7-unknown-linux-gnueabihf]
+image = "ghcr.io/cross-rs/armv7-unknown-linux-gnueabihf:main"
+pre-build = [
+    "dpkg --add-architecture armhf",
+    "apt-get update && apt-get install -y librocksdb-dev:armhf libsnappy-dev:armhf liblz4-dev:armhf libzstd-dev:armhf zlib1g-dev:armhf libbz2-dev:armhf",
+]

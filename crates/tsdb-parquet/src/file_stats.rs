@@ -50,7 +50,7 @@ pub fn extract_file_stats(
 pub fn write_stats_file(parquet_path: &Path, stats: &FileStats) -> Result<PathBuf> {
     let stats_path = parquet_path.with_extension("stats.json");
     let json = serde_json::to_string_pretty(stats)
-        .map_err(|e| TsdbParquetError::Serde(e))?;
+        .map_err(TsdbParquetError::Serde)?;
     std::fs::write(&stats_path, json)?;
     Ok(stats_path)
 }

@@ -78,7 +78,7 @@ impl PartitionManifest {
         let mut manifest = Self::new(measurement, date, tier);
 
         let entries = std::fs::read_dir(partition_dir)
-            .map_err(|e| TsdbParquetError::Io(e))?;
+            .map_err(TsdbParquetError::Io)?;
 
         for entry in entries {
             let entry = entry?;
@@ -119,7 +119,7 @@ impl ManifestIndex {
             }
 
             let measurement_entries = std::fs::read_dir(&tier_dir)
-                .map_err(|e| TsdbParquetError::Io(e))?;
+                .map_err(TsdbParquetError::Io)?;
 
             for measurement_entry in measurement_entries {
                 let measurement_entry = measurement_entry?;
@@ -129,7 +129,7 @@ impl ManifestIndex {
                 }
 
                 let date_entries = std::fs::read_dir(&measurement_path)
-                    .map_err(|e| TsdbParquetError::Io(e))?;
+                    .map_err(TsdbParquetError::Io)?;
 
                 for date_entry in date_entries {
                     let date_entry = date_entry?;
@@ -191,10 +191,16 @@ impl ManifestIndex {
         self.files_for_measurement(measurement)
             .into_iter()
             .filter(|f| {
-                f.timestamp_max.map_or(false, |max| max >= start_micros)
-                    && f.timestamp_min.map_or(false, |min| min <= end_micros)
+                f.timestamp_max.is_some_and(|max| max >= start_micros)
+                    && f.timestamp_min.is_some_and(|min| min <= end_micros)
             })
             .collect()
+    }
+}
+
+impl Default for ManifestIndex {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

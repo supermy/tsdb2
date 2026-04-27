@@ -26,30 +26,27 @@ fn extract_from_expr(
     time_range: &mut Option<(i64, i64)>,
     tag_filters: &mut HashMap<String, String>,
 ) {
-    match expr {
-        Expr::BinaryExpr(binary) => {
-            match binary.op {
-                Operator::And => {
-                    extract_from_expr(&binary.left, time_range, tag_filters);
-                    extract_from_expr(&binary.right, time_range, tag_filters);
-                }
-                Operator::Gt
-                | Operator::GtEq
-                | Operator::Lt
-                | Operator::LtEq
-                | Operator::Eq => {
-                    try_extract_comparison(
-                        &binary.left,
-                        &binary.right,
-                        &binary.op,
-                        time_range,
-                        tag_filters,
-                    );
-                }
-                _ => {}
+    if let Expr::BinaryExpr(binary) = expr {
+        match binary.op {
+            Operator::And => {
+                extract_from_expr(&binary.left, time_range, tag_filters);
+                extract_from_expr(&binary.right, time_range, tag_filters);
             }
+            Operator::Gt
+            | Operator::GtEq
+            | Operator::Lt
+            | Operator::LtEq
+            | Operator::Eq => {
+                try_extract_comparison(
+                    &binary.left,
+                    &binary.right,
+                    &binary.op,
+                    time_range,
+                    tag_filters,
+                );
+            }
+            _ => {}
         }
-        _ => {}
     }
 }
 
@@ -94,27 +91,31 @@ fn try_extract_comparison(
 
                 match effective_op {
                     Operator::Gt => {
-                        match time_range {
-                            Some((start, _)) => { *start = (*start).max(ts + 1); }
-                            None => { *time_range = Some((ts + 1, i64::MAX)); }
+                        if let Some((start, _)) = time_range {
+                            *start = (*start).max(ts + 1);
+                        } else {
+                            *time_range = Some((ts + 1, i64::MAX));
                         }
                     }
                     Operator::GtEq => {
-                        match time_range {
-                            Some((start, _)) => { *start = (*start).max(ts); }
-                            None => { *time_range = Some((ts, i64::MAX)); }
+                        if let Some((start, _)) = time_range {
+                            *start = (*start).max(ts);
+                        } else {
+                            *time_range = Some((ts, i64::MAX));
                         }
                     }
                     Operator::Lt => {
-                        match time_range {
-                            Some((_, end)) => { *end = (*end).min(ts - 1); }
-                            None => { *time_range = Some((0, ts - 1)); }
+                        if let Some((_, end)) = time_range {
+                            *end = (*end).min(ts - 1);
+                        } else {
+                            *time_range = Some((0, ts - 1));
                         }
                     }
                     Operator::LtEq => {
-                        match time_range {
-                            Some((_, end)) => { *end = (*end).min(ts); }
-                            None => { *time_range = Some((0, ts)); }
+                        if let Some((_, end)) = time_range {
+                            *end = (*end).min(ts);
+                        } else {
+                            *time_range = Some((0, ts));
                         }
                     }
                     Operator::Eq => {

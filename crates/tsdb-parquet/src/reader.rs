@@ -221,11 +221,7 @@ impl TsdbParquetReader {
         let mut batches = Vec::new();
         for batch_result in reader {
             let batch = batch_result?;
-            if projection.is_some() {
-                batches.push(batch);
-            } else {
-                batches.push(batch);
-            }
+            batches.push(batch);
         }
 
         if has_pruned {

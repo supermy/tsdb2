@@ -194,7 +194,7 @@ impl ParquetCompactor {
 
         let sorted_batches: Vec<RecordBatch> = batches
             .iter()
-            .map(|b| sort_batch_by_tags_hash_timestamp(b))
+            .map(sort_batch_by_tags_hash_timestamp)
             .collect::<Result<Vec<_>>>()
             .map_err(|e| {
                 tracing::error!("compaction sort failed: {}", e);
@@ -357,8 +357,8 @@ fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch>
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(RecordBatch::try_new(schema, sorted_cols)
-        .map_err(|e| TsdbParquetError::Conversion(e.to_string()))?)
+    RecordBatch::try_new(schema, sorted_cols)
+        .map_err(|e| TsdbParquetError::Conversion(e.to_string()))
 }
 
 fn build_compaction_writer_props(

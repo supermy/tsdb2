@@ -82,6 +82,7 @@ impl TsdbTableProvider {
         })
     }
 
+    #[allow(dead_code)]
     fn load_data_parquet(
         &self,
         projection: Option<&Vec<usize>>,
