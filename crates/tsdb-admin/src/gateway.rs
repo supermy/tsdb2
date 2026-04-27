@@ -28,6 +28,8 @@ fn validate_parquet_path(path: &str) -> std::result::Result<(), String> {
         && !path.starts_with("/tmp/")
         && !path.starts_with("/data/")
         && !path.starts_with("/var/")
+        && !path.starts_with("/opt/")
+        && !path.starts_with("/home/")
     {
         return Err("absolute path must be within allowed directories".to_string());
     }

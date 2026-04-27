@@ -187,14 +187,17 @@ impl ParquetApi {
 
     fn detect_tier_from_path(path: &Path) -> String {
         let path_str = path.to_string_lossy();
-        if path_str.contains("parquet_data/warm/") {
-            return "warm".to_string();
-        }
-        if path_str.contains("parquet_data/cold/") {
-            return "cold".to_string();
-        }
-        if path_str.contains("/archive/") {
-            return "archive".to_string();
+        for component in path.components() {
+            if let std::path::Component::Normal(os_str) = component {
+                if let Some(s) = os_str.to_str() {
+                    match s {
+                        "warm" => return "warm".to_string(),
+                        "cold" => return "cold".to_string(),
+                        "archive" => return "archive".to_string(),
+                        _ => {}
+                    }
+                }
+            }
         }
         "unknown".to_string()
     }
@@ -209,6 +212,25 @@ impl ParquetApi {
             if name.starts_with("ts_") {
                 let (m, _) = parse_partition_dir(&name);
                 return m;
+            }
+            if name.starts_with("data_") {
+                if let Some(rest) = name.strip_prefix("data_") {
+                    if rest.len() == 8 && rest.chars().all(|c| c.is_ascii_digit()) {
+                        if let Some(parent) = ancestor.parent() {
+                            if let Some(parent_name) = parent.file_name() {
+                                let parent_str = parent_name.to_string_lossy();
+                                if !parent_str.starts_with("ts_")
+                                    && !parent_str.starts_with("data_")
+                                    && parent_str != "warm"
+                                    && parent_str != "cold"
+                                    && parent_str != "archive"
+                                {
+                                    return parent_str.to_string();
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         String::new()

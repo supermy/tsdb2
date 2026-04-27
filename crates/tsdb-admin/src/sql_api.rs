@@ -75,6 +75,7 @@ impl SqlApi {
                     .schema()
                     .fields()
                     .iter()
+                    .filter(|f| f.name() != "tags_hash")
                     .map(|f| f.name().clone())
                     .collect();
             }
@@ -83,7 +84,8 @@ impl SqlApi {
                 if rows.len() < MAX_SQL_RESULT_ROWS {
                     let mut map = serde_json::Map::new();
                     for (col_idx, col_name) in columns.iter().enumerate() {
-                        let val = Self::arrow_col_to_json(batch, col_idx, row_idx);
+                        let real_idx = batch.schema().index_of(col_name).unwrap_or(col_idx);
+                        let val = Self::arrow_col_to_json(batch, real_idx, row_idx);
                         map.insert(col_name.clone(), val);
                     }
                     rows.push(serde_json::Value::Object(map));
@@ -251,7 +253,8 @@ impl SqlApi {
                                         match batch_result {
                                             Ok(batch) => {
                                                 row_count += batch.num_rows();
-                                                all_batches.push(batch);
+                                                let aligned = Self::align_schema(batch, &schema_ref);
+                                                all_batches.push(aligned);
                                                 if row_count >= MAX_ROCKSDB_LOAD_ROWS {
                                                     break;
                                                 }
@@ -285,6 +288,26 @@ impl SqlApi {
         }
 
         Ok(())
+    }
+
+    fn align_schema(
+        batch: arrow::record_batch::RecordBatch,
+        target_schema: &Option<arrow::datatypes::SchemaRef>,
+    ) -> arrow::record_batch::RecordBatch {
+        let Some(target) = target_schema else { return batch };
+        if batch.schema() == *target {
+            return batch;
+        }
+        let mut columns = Vec::new();
+        for field in target.fields() {
+            if let Ok(idx) = batch.schema().index_of(field.name()) {
+                columns.push(batch.column(idx).clone());
+            } else {
+                columns.push(arrow::array::new_null_array(field.data_type(), batch.num_rows()));
+            }
+        }
+        arrow::record_batch::RecordBatch::try_new(target.clone(), columns)
+            .unwrap_or(batch)
     }
 
     fn register_iceberg_tables(
