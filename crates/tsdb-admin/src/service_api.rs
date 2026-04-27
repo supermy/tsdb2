@@ -20,10 +20,60 @@ pub struct ServiceManager {
 
 impl ServiceManager {
     pub fn new(config_dir: impl AsRef<Path>) -> Self {
-        Self {
-            services: Arc::new(RwLock::new(HashMap::new())),
-            processes: Arc::new(RwLock::new(HashMap::new())),
-            config_dir: config_dir.as_ref().to_path_buf(),
+        let config_dir = config_dir.as_ref().to_path_buf();
+        let services = Arc::new(RwLock::new(HashMap::new()));
+        let processes = Arc::new(RwLock::new(HashMap::new()));
+
+        let sm = Self {
+            services,
+            processes,
+            config_dir,
+        };
+        sm.load_persisted_services();
+        sm
+    }
+
+    fn persist_state_path(&self) -> PathBuf {
+        self.config_dir.join("services").join("state.json")
+    }
+
+    fn load_persisted_services(&self) {
+        let path = self.persist_state_path();
+        if !path.exists() {
+            return;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(data) => match serde_json::from_str::<Vec<ServiceInfo>>(&data) {
+                Ok(list) => {
+                    if let Ok(mut services) = self.services.try_write() {
+                        for info in list {
+                            let mut stopped = info.clone();
+                            stopped.status = ServiceStatus::Stopped;
+                            stopped.pid = None;
+                            stopped.uptime_secs = None;
+                            services.insert(info.name.clone(), stopped);
+                        }
+                        tracing::info!("loaded {} persisted services", services.len());
+                    }
+                }
+                Err(e) => tracing::warn!("parse persisted services: {}", e),
+            },
+            Err(e) => tracing::debug!("read persisted services: {}", e),
+        }
+    }
+
+    fn persist_services(&self) {
+        let path = self.persist_state_path();
+        if let Ok(services) = self.services.try_read() {
+            let list: Vec<ServiceInfo> = services.values().cloned().collect();
+            if let Ok(data) = serde_json::to_string_pretty(&list) {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Err(e) = std::fs::write(&path, data) {
+                    tracing::warn!("persist services: {}", e);
+                }
+            }
         }
     }
 
@@ -35,12 +85,10 @@ impl ServiceManager {
         data_dir: &str,
         engine: &str,
     ) {
-        let services = self.services.read().await;
+        let mut services = self.services.write().await;
         if services.contains_key(name) {
             return;
         }
-        drop(services);
-        let mut services = self.services.write().await;
         let info = ServiceInfo {
             name: name.to_string(),
             status: ServiceStatus::Running,
@@ -95,6 +143,7 @@ impl ServiceManager {
             uptime_secs: None,
         };
         services.insert(name.to_string(), info.clone());
+        self.persist_services();
         Ok(info)
     }
 
@@ -134,7 +183,11 @@ impl ServiceManager {
             .arg(info.port.to_string())
             .arg("--admin-port")
             .arg((info.port + 100).to_string())
-            .stdout(log_file.try_clone().map_err(|e| AdminError::Config(format!("clone stdout: {}", e)))?)
+            .stdout(
+                log_file
+                    .try_clone()
+                    .map_err(|e| AdminError::Config(format!("clone stdout: {}", e)))?,
+            )
             .stderr(log_file);
 
         let child = cmd
@@ -160,6 +213,7 @@ impl ServiceManager {
         info.pid = Some(pid);
         info.uptime_secs = Some(0);
 
+        self.persist_services();
         Ok(info.clone())
     }
 
@@ -184,11 +238,15 @@ impl ServiceManager {
         info.pid = None;
         info.uptime_secs = None;
 
+        self.persist_services();
         Ok(info.clone())
     }
 
     pub async fn restart_service(&self, name: &str) -> Result<ServiceInfo> {
-        self.stop_service(name).await.ok();
+        if let Err(e) = self.stop_service(name).await {
+            tracing::warn!("stop service {} during restart: {}", name, e);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         self.start_service(name).await
     }
 
@@ -210,6 +268,7 @@ impl ServiceManager {
             return Err(AdminError::ServiceAlreadyRunning(name.to_string()));
         }
         services.remove(name);
+        self.persist_services();
         Ok(())
     }
 
@@ -249,11 +308,7 @@ impl ServiceManager {
         let file = std::fs::File::open(&log_path)
             .map_err(|e| AdminError::Config(format!("open log: {}", e)))?;
         let mut reader = std::io::BufReader::new(file);
-        let file_size = reader
-            .get_ref()
-            .metadata()
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let file_size = reader.get_ref().metadata().map(|m| m.len()).unwrap_or(0);
 
         if file_size > 1024 * 1024 {
             let seek_pos = file_size - 1024 * 1024;
@@ -328,11 +383,9 @@ impl ServiceManager {
                 }
                 let _ = child.wait();
             }
-            Err(_) => {
-                unsafe {
-                    libc::kill(child.id() as i32, libc::SIGKILL);
-                }
-            }
+            Err(_) => unsafe {
+                libc::kill(child.id() as i32, libc::SIGKILL);
+            },
         }
     }
 

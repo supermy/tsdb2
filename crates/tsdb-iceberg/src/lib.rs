@@ -14,7 +14,7 @@ pub mod util;
 pub use catalog::{IcebergCatalog, TableMetadata};
 pub use error::{IcebergError, Result};
 pub use manifest::{DataFile, ManifestEntry, ManifestMeta};
-pub use partition::PartitionSpec;
+pub use partition::{PartitionField, PartitionSpec, Transform};
 pub use scan::{IcebergScan, IcebergScanBuilder, Predicate, PredicateValue};
 pub use schema::{Field, IcebergType, Schema, SchemaChange};
 pub use snapshot::{Ref, RefType, Snapshot, SnapshotSummary};

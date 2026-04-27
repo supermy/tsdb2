@@ -255,6 +255,7 @@ impl TsdbRocksDb {
         }
 
         let mut by_cf: BTreeMap<String, Vec<&tsdb_arrow::schema::DataPoint>> = BTreeMap::new();
+        let mut invalid_ts_count = 0usize;
         for dp in dps {
             let date = micros_to_date(dp.timestamp).ok();
             if let Some(date) = date {
@@ -265,7 +266,15 @@ impl TsdbRocksDb {
                     date.format("%Y%m%d")
                 );
                 by_cf.entry(cf_name).or_default().push(dp);
+            } else {
+                invalid_ts_count += 1;
             }
+        }
+        if invalid_ts_count > 0 {
+            tracing::warn!(
+                "write_batch: {} datapoints with invalid timestamps skipped",
+                invalid_ts_count
+            );
         }
 
         let meta_cf = self.ensure_meta_cf()?;
@@ -449,7 +458,7 @@ impl TsdbRocksDb {
                         continue;
                     }
                     if ts_key.timestamp > end_micros {
-                        break;
+                        continue;
                     }
                     let fields = decode_fields(&raw_value)?;
 
@@ -578,7 +587,7 @@ impl TsdbRocksDb {
                         continue;
                     }
                     if ts_key.timestamp > end_micros {
-                        break;
+                        continue;
                     }
                     let fields = decode_fields_projection(&raw_value, &projection)?;
 

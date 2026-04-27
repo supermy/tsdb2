@@ -62,11 +62,8 @@ impl TsdbFlightServer {
             None => return Ok(()),
         };
 
-        let provider = tsdb_datafusion::TsdbTableProvider::new(
-            measurement,
-            schema,
-            std::path::PathBuf::new(),
-        );
+        let provider =
+            tsdb_datafusion::TsdbTableProvider::new(measurement, schema, std::path::PathBuf::new());
 
         self.ctx
             .register_table(measurement, Arc::new(provider))

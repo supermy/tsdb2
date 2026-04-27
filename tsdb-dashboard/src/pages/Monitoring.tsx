@@ -2,15 +2,9 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Card, Row, Col, Statistic, Tag, Typography, Select, Spin, Progress } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { api, useWebSocket, type HealthStatus, type MetricsSnapshot, type Alert } from '../api';
+import { fmtBytes } from '../utils';
 
 const { Title, Text } = Typography;
-
-const fmtBytes = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-};
 
 const fmtUptime = (secs: number): string => {
   const d = Math.floor(secs / 86400);
@@ -317,8 +311,8 @@ const Monitoring: React.FC = () => {
           </Col>
           <Col span={12}>
             <Card title="告警" size="small">
-              {alerts.map((alert, i) => (
-                <div key={i} style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
+              {alerts.map((alert) => (
+                <div key={`${alert.timestamp_ms}-${alert.message}`} style={{ marginBottom: 8, display: 'flex', gap: 8, alignItems: 'center' }}>
                   <Tag color={alertColor(alert.level)}>{alert.level}</Tag>
                   <span style={{ color: '#ccc' }}>{alert.message}</span>
                   <span style={{ color: '#666', fontSize: 12 }}>{new Date(alert.timestamp_ms).toLocaleTimeString()}</span>

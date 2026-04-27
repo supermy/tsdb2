@@ -8,6 +8,15 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+fn uuid_short() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{:08x}", (ts & 0xFFFFFFFF) as u32)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompactionLevel {
     L0 = 0,
@@ -111,8 +120,9 @@ impl ParquetCompactor {
         let deduped = deduplicate_batches(&all_batches)?;
 
         let dir = self.partition_manager.ensure_partition(date)?;
-        let tmp_path = dir.join(format!(".tmp-L1-{}", date.format("%Y%m%d")));
-        let final_path = dir.join(format!("L1-{}.parquet", date.format("%Y%m%d")));
+        let uid = &uuid_short();
+        let tmp_path = dir.join(format!(".tmp-L1-{}-{}", date.format("%Y%m%d"), uid));
+        let final_path = dir.join(format!("L1-{}-{}.parquet", date.format("%Y%m%d"), uid));
 
         self.write_compacted(&deduped, &tmp_path, &final_path, CompactionLevel::L1)?;
 
@@ -152,8 +162,9 @@ impl ParquetCompactor {
         let deduped = deduplicate_batches(&all_batches)?;
 
         let dir = self.partition_manager.ensure_partition(date)?;
-        let tmp_path = dir.join(format!(".tmp-L2-{}", date.format("%Y%m%d")));
-        let final_path = dir.join(format!("L2-{}.parquet", date.format("%Y%m%d")));
+        let uid = &uuid_short();
+        let tmp_path = dir.join(format!(".tmp-L2-{}-{}", date.format("%Y%m%d"), uid));
+        let final_path = dir.join(format!("L2-{}-{}.parquet", date.format("%Y%m%d"), uid));
 
         self.write_compacted(&deduped, &tmp_path, &final_path, CompactionLevel::L2)?;
 
@@ -314,7 +325,98 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
         return Ok(batches.to_vec());
     }
 
-    Ok(batches.to_vec())
+    let ts_idx = ts_idx.unwrap();
+
+    let tags_hash_idx = schema.index_of("tags_hash").ok();
+
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut deduped_batches = Vec::new();
+
+    for batch in batches {
+        let ts_col = batch.column(ts_idx);
+        let num_rows = batch.num_rows();
+        let mut keep_indices: Vec<usize> = Vec::new();
+
+        for row_idx in 0..num_rows {
+            let mut key_bytes = Vec::new();
+
+            if let Some(th_idx) = tags_hash_idx {
+                let tags_hash_col = batch.column(th_idx);
+                if let Some(arr) = tags_hash_col
+                    .as_any()
+                    .downcast_ref::<arrow::array::UInt64Array>()
+                {
+                    if row_idx < arr.len() {
+                        key_bytes.extend_from_slice(&arr.value(row_idx).to_be_bytes());
+                    }
+                } else if let Some(arr) = tags_hash_col
+                    .as_any()
+                    .downcast_ref::<arrow::array::StringArray>()
+                {
+                    if row_idx < num_rows {
+                        key_bytes.extend_from_slice(arr.value(row_idx).as_bytes());
+                    }
+                }
+            }
+
+            if let Some(arr) = ts_col.as_any().downcast_ref::<arrow::array::Int64Array>() {
+                if row_idx < arr.len() {
+                    key_bytes.extend_from_slice(&arr.value(row_idx).to_be_bytes());
+                }
+            } else if let Some(arr) = ts_col
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+            {
+                if row_idx < arr.len() {
+                    key_bytes.extend_from_slice(&arr.value(row_idx).to_be_bytes());
+                }
+            } else if let Some(arr) = ts_col
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampMillisecondArray>()
+            {
+                if row_idx < arr.len() {
+                    key_bytes.extend_from_slice(&arr.value(row_idx).to_be_bytes());
+                }
+            }
+
+            if seen.insert(key_bytes) {
+                keep_indices.push(row_idx);
+            }
+        }
+
+        if keep_indices.len() == num_rows {
+            deduped_batches.push(batch.clone());
+        } else if !keep_indices.is_empty() {
+            let index_array =
+                arrow::array::UInt32Array::from_iter(keep_indices.iter().map(|&i| i as u32));
+            let new_cols: Vec<Arc<dyn arrow::array::Array>> = schema
+                .fields()
+                .iter()
+                .enumerate()
+                .map(|(col_idx, _)| {
+                    let col = batch.column(col_idx);
+                    arrow::compute::take(col, &index_array, None)
+                        .expect("take should not fail with valid indices")
+                })
+                .collect();
+            let new_batch =
+                RecordBatch::try_new(schema.clone(), new_cols).map_err(TsdbParquetError::Arrow)?;
+            deduped_batches.push(new_batch);
+        }
+    }
+
+    let original_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    let deduped_rows: usize = deduped_batches.iter().map(|b| b.num_rows()).sum();
+    if original_rows != deduped_rows {
+        tracing::info!(
+            "deduplicate_batches: {} rows -> {} rows (removed {} duplicates)",
+            original_rows,
+            deduped_rows,
+            original_rows - deduped_rows
+        );
+    }
+
+    Ok(deduped_batches)
 }
 
 #[cfg(test)]
@@ -439,5 +541,96 @@ mod tests {
 
         let result = compactor.compact_all_levels().unwrap();
         assert!(result.is_empty() || !result.is_empty());
+    }
+
+    #[test]
+    fn test_deduplicate_batches_empty() {
+        let batches: Vec<RecordBatch> = vec![];
+        let result = deduplicate_batches(&batches).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_deduplicate_batches_no_timestamp_column() {
+        let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+            "value",
+            arrow::datatypes::DataType::Float64,
+            false,
+        )]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(arrow::array::Float64Array::from(vec![
+                1.0, 2.0, 3.0,
+            ]))],
+        )
+        .unwrap();
+
+        let result = deduplicate_batches(&[batch]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_deduplicate_batches_removes_duplicates() {
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("tags_hash", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Float64, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(arrow::array::UInt64Array::from(vec![
+                    1u64, 1u64, 2u64, 1u64,
+                ])),
+                Arc::new(arrow::array::Int64Array::from(vec![
+                    100i64, 100i64, 200i64, 200i64,
+                ])),
+                Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0, 3.0, 4.0])),
+            ],
+        )
+        .unwrap();
+
+        let result = deduplicate_batches(&[batch]).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_deduplicate_batches_no_duplicates() {
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("tags_hash", arrow::datatypes::DataType::UInt64, false),
+            arrow::datatypes::Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Float64, false),
+        ]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(arrow::array::UInt64Array::from(vec![1u64, 1u64, 2u64])),
+                Arc::new(arrow::array::Int64Array::from(vec![100i64, 200i64, 100i64])),
+                Arc::new(arrow::array::Float64Array::from(vec![1.0, 2.0, 3.0])),
+            ],
+        )
+        .unwrap();
+
+        let result = deduplicate_batches(&[batch]).unwrap();
+        assert_eq!(result[0].num_rows(), 3);
+    }
+
+    #[test]
+    fn test_uuid_short_format() {
+        let uid = uuid_short();
+        assert_eq!(uid.len(), 8);
+        assert!(uid.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_uuid_short_unique() {
+        let a = uuid_short();
+        std::thread::sleep(std::time::Duration::from_nanos(1));
+        let b = uuid_short();
+        // Not guaranteed unique in theory, but extremely likely with nanosecond precision
+        assert_eq!(a.len(), 8);
+        assert_eq!(b.len(), 8);
     }
 }

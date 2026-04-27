@@ -140,6 +140,7 @@ impl DataArchiver {
         cf_name: &str,
         output_dir: &Path,
         batch_size: usize,
+        compression: parquet::basic::Compression,
     ) -> Result<usize> {
         let data_cf = db
             .db()
@@ -205,7 +206,7 @@ impl DataArchiver {
 
             if buffer.len() >= batch_size {
                 let s = schema.clone().unwrap();
-                Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s)?;
+                Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s, compression)?;
                 total += buffer.len();
                 buffer.clear();
                 file_idx += 1;
@@ -214,7 +215,7 @@ impl DataArchiver {
 
         if !buffer.is_empty() {
             let s = schema.clone().unwrap();
-            Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s)?;
+            Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s, compression)?;
             total += buffer.len();
         }
 
@@ -226,27 +227,25 @@ impl DataArchiver {
         file_idx: usize,
         chunk: &[tsdb_arrow::schema::DataPoint],
         schema: &arrow::datatypes::SchemaRef,
+        compression: parquet::basic::Compression,
     ) -> Result<()> {
         let batch = tsdb_arrow::converter::datapoints_to_record_batch(chunk, schema.clone())?;
         let file_path = output_dir.join(format!("part-{:08}.parquet", file_idx));
         let file = std::fs::File::create(&file_path)?;
         let props = parquet::file::properties::WriterProperties::builder()
-            .set_compression(parquet::basic::Compression::ZSTD(
-                parquet::basic::ZstdLevel::default(),
-            ))
+            .set_compression(compression)
             .build();
-        let mut writer = parquet::arrow::arrow_writer::ArrowWriter::try_new(
-            file,
-            schema.clone(),
-            Some(props),
-        )
-        .map_err(|e| crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string())))?;
-        writer
-            .write(&batch)
-            .map_err(|e| crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string())))?;
-        writer
-            .close()
-            .map_err(|e| crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string())))?;
+        let mut writer =
+            parquet::arrow::arrow_writer::ArrowWriter::try_new(file, schema.clone(), Some(props))
+                .map_err(|e| {
+                crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
+            })?;
+        writer.write(&batch).map_err(|e| {
+            crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
+        })?;
+        writer.close().map_err(|e| {
+            crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
+        })?;
         Ok(())
     }
 }

@@ -5,6 +5,8 @@ use tsdb_arrow::schema::DataPoint;
 use tsdb_parquet::partition::micros_to_date;
 use tsdb_parquet::writer::TsdbParquetWriter;
 
+const MAX_FAILED_DATAPPOINTS_BEFORE_DROP: usize = 10000;
+
 /// 同步写入缓冲区
 ///
 /// 按日期分区缓冲 DataPoint, 达到行数阈值时返回 true 表示需要刷盘。
@@ -129,13 +131,19 @@ impl AsyncWriteBuffer {
 
     /// 写入单个数据点 (线程安全)
     pub fn write(&self, dp: &DataPoint) -> Result<bool> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in write(), recovering: {}", e);
+            e.into_inner()
+        });
         Ok(guard.write(dp))
     }
 
     /// 批量写入数据点 (线程安全)
     pub fn write_batch(&self, datapoints: &[DataPoint]) -> Result<bool> {
-        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in write_batch(), recovering: {}", e);
+            e.into_inner()
+        });
         Ok(guard.write_batch(datapoints))
     }
 
@@ -148,7 +156,10 @@ impl AsyncWriteBuffer {
     /// 执行刷盘: 排空缓冲区 → 写入 Parquet → flush_all
     fn do_flush(buffer: &Arc<Mutex<WriteBuffer>>, writer: &Arc<Mutex<TsdbParquetWriter>>) {
         let drained = {
-            let mut guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = buffer.lock().unwrap_or_else(|e| {
+                tracing::warn!("Mutex poisoned in do_flush drain, recovering: {}", e);
+                e.into_inner()
+            });
             guard.drain()
         };
 
@@ -156,7 +167,10 @@ impl AsyncWriteBuffer {
             return;
         }
 
-        let mut writer_guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+        let mut writer_guard = writer.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in do_flush writer, recovering: {}", e);
+            e.into_inner()
+        });
         let mut failed = Vec::new();
         for (date, datapoints) in drained {
             if !datapoints.is_empty() {
@@ -172,14 +186,27 @@ impl AsyncWriteBuffer {
         }
 
         if !failed.is_empty() {
-            let mut guard = buffer.lock().unwrap_or_else(|e| e.into_inner());
+            let total_failed: usize = failed.iter().map(|(_, dps)| dps.len()).sum();
+            if total_failed > MAX_FAILED_DATAPPOINTS_BEFORE_DROP {
+                tracing::error!(
+                    "dropping {} failed datapoints after persistent flush errors",
+                    total_failed
+                );
+                return;
+            }
+            let mut guard = buffer.lock().unwrap_or_else(|e| {
+                tracing::warn!("Mutex poisoned in do_flush reinsert, recovering: {}", e);
+                e.into_inner()
+            });
             guard.reinsert(failed);
         }
     }
 
-    /// 获取缓冲区中的分区数量
     pub fn buffer_count(&self) -> usize {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in buffer_count, recovering: {}", e);
+            e.into_inner()
+        });
         guard.buffer_count()
     }
 
@@ -264,5 +291,123 @@ mod tests {
 
         async_buf.flush().unwrap();
         async_buf.stop().unwrap();
+    }
+
+    #[test]
+    fn test_write_buffer_drain() {
+        let mut buffer = WriteBuffer::new(100);
+        buffer.write(
+            &DataPoint::new("cpu", 1_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.5)),
+        );
+        buffer.write(
+            &DataPoint::new("mem", 1_000_000)
+                .with_tag("host", "s2")
+                .with_field("used", FieldValue::Float(0.8)),
+        );
+
+        assert_eq!(buffer.total_rows(), 2);
+        let drained = buffer.drain();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(buffer.total_rows(), 0);
+        assert_eq!(buffer.buffer_count(), 0);
+    }
+
+    #[test]
+    fn test_write_buffer_drain_empty() {
+        let mut buffer = WriteBuffer::new(100);
+        let drained = buffer.drain();
+        assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn test_write_buffer_reinsert() {
+        let mut buffer = WriteBuffer::new(100);
+        buffer.write(
+            &DataPoint::new("cpu", 1_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.5)),
+        );
+
+        let drained = buffer.drain();
+        assert_eq!(buffer.total_rows(), 0);
+
+        buffer.reinsert(drained);
+        assert_eq!(buffer.total_rows(), 1);
+        assert_eq!(buffer.buffer_count(), 1);
+    }
+
+    #[test]
+    fn test_write_buffer_write_batch() {
+        let mut buffer = WriteBuffer::new(100);
+        let dps = vec![
+            DataPoint::new("cpu", 1_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.5)),
+            DataPoint::new("cpu", 2_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.6)),
+        ];
+
+        let should_flush = buffer.write_batch(&dps);
+        assert!(!should_flush);
+        assert_eq!(buffer.total_rows(), 2);
+    }
+
+    #[test]
+    fn test_write_buffer_batch_triggers_flush() {
+        let mut buffer = WriteBuffer::new(2);
+        let dps = vec![
+            DataPoint::new("cpu", 1_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.5)),
+            DataPoint::new("cpu", 2_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.6)),
+            DataPoint::new("cpu", 3_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.7)),
+        ];
+
+        let should_flush = buffer.write_batch(&dps);
+        assert!(should_flush);
+        assert_eq!(buffer.total_rows(), 3);
+    }
+
+    #[test]
+    fn test_write_buffer_multiple_partitions() {
+        let mut buffer = WriteBuffer::new(100);
+
+        buffer.write(
+            &DataPoint::new(
+                "cpu",
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 25)
+                    .unwrap()
+                    .and_hms_micro_opt(0, 0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_micros(),
+            )
+            .with_tag("host", "s1")
+            .with_field("v", FieldValue::Float(1.0)),
+        );
+        buffer.write(
+            &DataPoint::new(
+                "cpu",
+                chrono::NaiveDate::from_ymd_opt(2026, 4, 26)
+                    .unwrap()
+                    .and_hms_micro_opt(0, 0, 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp_micros(),
+            )
+            .with_tag("host", "s1")
+            .with_field("v", FieldValue::Float(2.0)),
+        );
+
+        assert_eq!(buffer.buffer_count(), 2);
+        let drained = buffer.drain();
+        assert_eq!(drained.len(), 2);
     }
 }

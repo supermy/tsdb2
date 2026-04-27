@@ -87,7 +87,10 @@ impl ConfigManager {
     }
 
     pub fn save_profile(&mut self, name: &str, content: &str) -> Result<ConfigProfile> {
-        let path = self.config_dir.join("configs").join(format!("{}.ini", name));
+        let path = self
+            .config_dir
+            .join("configs")
+            .join(format!("{}.ini", name));
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -103,10 +106,14 @@ impl ConfigManager {
     }
 
     pub fn delete_profile(&mut self, name: &str) -> Result<ConfigProfile> {
-        let profile = self.profiles
+        let profile = self
+            .profiles
             .remove(name)
             .ok_or_else(|| AdminError::Config(format!("profile not found: {}", name)))?;
-        let path = self.config_dir.join("configs").join(format!("{}.ini", name));
+        let path = self
+            .config_dir
+            .join("configs")
+            .join(format!("{}.ini", name));
         if path.exists() {
             std::fs::remove_file(&path)?;
         }
@@ -119,11 +126,7 @@ impl ConfigManager {
         let map_a = Self::parse_ini_to_map(&a.content);
         let map_b = Self::parse_ini_to_map(&b.content);
         let mut diffs = Vec::new();
-        let mut all_keys: Vec<String> = map_a
-            .keys()
-            .chain(map_b.keys())
-            .cloned()
-            .collect();
+        let mut all_keys: Vec<String> = map_a.keys().chain(map_b.keys()).cloned().collect();
         all_keys.sort();
         all_keys.dedup();
         for key in all_keys {

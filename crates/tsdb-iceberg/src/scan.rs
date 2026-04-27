@@ -280,9 +280,10 @@ fn manifest_predicate_check(summaries: &[PartitionFieldSummary], pred: &Predicat
         Predicate::Eq(field_id, val) => {
             let idx = *field_id as usize;
             if idx < summaries.len() {
-                if let (Some(lower), Some(upper)) =
-                    (summaries[idx].lower_bound.as_ref(), summaries[idx].upper_bound.as_ref())
-                {
+                if let (Some(lower), Some(upper)) = (
+                    summaries[idx].lower_bound.as_ref(),
+                    summaries[idx].upper_bound.as_ref(),
+                ) {
                     let lower_val = decode_bound_value(lower);
                     let upper_val = decode_bound_value(upper);
                     if let (Some(lv), Some(uv)) = (lower_val, upper_val) {
@@ -443,17 +444,18 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
     }
 }
 
-fn row_filter(batch: &RecordBatch, pred: &Predicate, schema: &Schema) -> Result<Option<RecordBatch>> {
+fn row_filter(
+    batch: &RecordBatch,
+    pred: &Predicate,
+    schema: &Schema,
+) -> Result<Option<RecordBatch>> {
     let mask = match evaluate_predicate(batch, pred, schema) {
         Some(m) => m,
         None => return Ok(None),
     };
     match filter_record_batch(batch, &mask) {
         Ok(filtered) => Ok(Some(filtered)),
-        Err(e) => Err(IcebergError::Internal(format!(
-            "row filter failed: {}",
-            e
-        ))),
+        Err(e) => Err(IcebergError::Internal(format!("row filter failed: {}", e))),
     }
 }
 

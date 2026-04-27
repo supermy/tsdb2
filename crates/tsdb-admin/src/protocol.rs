@@ -25,10 +25,7 @@ pub enum AdminRequest {
     #[serde(rename = "service.delete")]
     ServiceDelete { name: String },
     #[serde(rename = "service.logs")]
-    ServiceLogs {
-        name: String,
-        lines: Option<usize>,
-    },
+    ServiceLogs { name: String, lines: Option<usize> },
 
     #[serde(rename = "config.list_profiles")]
     ConfigListProfiles,
@@ -41,13 +38,13 @@ pub enum AdminRequest {
     #[serde(rename = "config.apply")]
     ConfigApply { service: String, profile: String },
     #[serde(rename = "config.compare")]
-    ConfigCompare { profile_a: String, profile_b: String },
+    ConfigCompare {
+        profile_a: String,
+        profile_b: String,
+    },
 
     #[serde(rename = "test.sql")]
-    TestSql {
-        service: String,
-        sql: String,
-    },
+    TestSql { service: String, sql: String },
     #[serde(rename = "test.write_bench")]
     TestWriteBench {
         service: String,
@@ -63,11 +60,44 @@ pub enum AdminRequest {
         queries: usize,
         workers: usize,
     },
-    #[serde(rename = "test.iceberg")]
-    TestIceberg {
-        service: String,
-        action: String,
-        params: serde_json::Value,
+    #[serde(rename = "test.generate_business_data")]
+    TestGenerateBusinessData {
+        scenario: String,
+        points_per_series: usize,
+        #[serde(default)]
+        skip_auto_demote: bool,
+    },
+    #[serde(rename = "iceberg.list_tables")]
+    IcebergListTables,
+    #[serde(rename = "iceberg.create_table")]
+    IcebergCreateTable {
+        name: String,
+        schema: serde_json::Value,
+        partition_type: String,
+    },
+    #[serde(rename = "iceberg.drop_table")]
+    IcebergDropTable { name: String },
+    #[serde(rename = "iceberg.table_detail")]
+    IcebergTableDetail { name: String },
+    #[serde(rename = "iceberg.append")]
+    IcebergAppend {
+        table: String,
+        datapoints: Vec<serde_json::Value>,
+    },
+    #[serde(rename = "iceberg.scan")]
+    IcebergScan { table: String, limit: Option<usize> },
+    #[serde(rename = "iceberg.snapshots")]
+    IcebergSnapshots { table: String },
+    #[serde(rename = "iceberg.rollback")]
+    IcebergRollback { table: String, snapshot_id: i64 },
+    #[serde(rename = "iceberg.compact")]
+    IcebergCompact { table: String },
+    #[serde(rename = "iceberg.expire")]
+    IcebergExpire { table: String, keep_days: u64 },
+    #[serde(rename = "iceberg.update_schema")]
+    IcebergUpdateSchema {
+        table: String,
+        changes: Vec<serde_json::Value>,
     },
 
     #[serde(rename = "metrics.health")]
@@ -86,10 +116,7 @@ pub enum AdminRequest {
     #[serde(rename = "collector.status")]
     CollectorStatus,
     #[serde(rename = "collector.configure")]
-    CollectorConfigure {
-        interval_secs: u64,
-        enabled: bool,
-    },
+    CollectorConfigure { interval_secs: u64, enabled: bool },
     #[serde(rename = "collector.start")]
     CollectorStart,
     #[serde(rename = "collector.stop")]
@@ -111,10 +138,7 @@ pub enum AdminRequest {
         limit: Option<usize>,
     },
     #[serde(rename = "rocksdb.kv_get")]
-    RocksdbKvGet {
-        cf: String,
-        key: String,
-    },
+    RocksdbKvGet { cf: String, key: String },
     #[serde(rename = "rocksdb.series_schema")]
     RocksdbSeriesSchema,
 
@@ -134,6 +158,10 @@ pub enum AdminRequest {
     LifecycleStatus,
     #[serde(rename = "lifecycle.archive")]
     LifecycleArchive { older_than_days: u64 },
+    #[serde(rename = "lifecycle.demote_to_warm")]
+    LifecycleDemoteToWarm { cf_names: Vec<String> },
+    #[serde(rename = "lifecycle.demote_to_cold")]
+    LifecycleDemoteToCold { cf_names: Vec<String> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -299,6 +327,10 @@ pub struct ParquetFileInfo {
     pub columns: Vec<ColumnMeta>,
     pub compression: String,
     pub created_by: String,
+    #[serde(default)]
+    pub tier: String,
+    #[serde(default)]
+    pub measurement: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -324,6 +356,7 @@ pub struct SqlResult {
     pub rows: Vec<serde_json::Value>,
     pub total_rows: usize,
     pub elapsed_ms: f64,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -348,6 +381,20 @@ pub struct DataTierInfo {
     pub sst_size: u64,
     pub num_keys: u64,
     pub tier: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default = "default_storage")]
+    pub storage: String,
+    #[serde(default = "default_demote_eligible")]
+    pub demote_eligible: String,
+}
+
+fn default_storage() -> String {
+    "rocksdb".to_string()
+}
+
+fn default_demote_eligible() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -413,4 +460,172 @@ pub struct BenchResult {
     pub rate_per_sec: f64,
     pub avg_latency_us: f64,
     pub p99_latency_us: f64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_admin_response_ok() {
+        let resp = AdminResponse::ok(serde_json::json!({"key": "value"}));
+        assert!(resp.success);
+        assert!(resp.data.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_admin_response_err() {
+        let resp = AdminResponse::err("something failed");
+        assert!(!resp.success);
+        assert!(resp.data.is_none());
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap(), "something failed");
+    }
+
+    #[test]
+    fn test_admin_request_serde_roundtrip() {
+        let req = AdminRequest::ServiceStart {
+            name: "test-svc".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: AdminRequest = serde_json::from_str(&json).unwrap();
+        if let AdminRequest::ServiceStart { name } = decoded {
+            assert_eq!(name, "test-svc");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_admin_request_service_list_serde() {
+        let req = AdminRequest::ServiceList;
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("service.list"));
+        let decoded: AdminRequest = serde_json::from_str(&json).unwrap();
+        matches!(decoded, AdminRequest::ServiceList);
+    }
+
+    #[test]
+    fn test_admin_request_sql_execute_serde() {
+        let req = AdminRequest::SqlExecute {
+            sql: "SELECT 1".to_string(),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: AdminRequest = serde_json::from_str(&json).unwrap();
+        if let AdminRequest::SqlExecute { sql } = decoded {
+            assert_eq!(sql, "SELECT 1");
+        } else {
+            panic!("wrong variant");
+        }
+    }
+
+    #[test]
+    fn test_admin_response_serde_roundtrip() {
+        let resp = AdminResponse::ok(serde_json::json!([1, 2, 3]));
+        let json = serde_json::to_string(&resp).unwrap();
+        let decoded: AdminResponse = serde_json::from_str(&json).unwrap();
+        assert!(decoded.success);
+        assert!(decoded.data.is_some());
+    }
+
+    #[test]
+    fn test_service_status_serde() {
+        let status = ServiceStatus::Running;
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: ServiceStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, ServiceStatus::Running);
+    }
+
+    #[test]
+    fn test_health_status_serde() {
+        let health = HealthStatus {
+            service: "test".to_string(),
+            healthy: true,
+            storage_ok: true,
+            memory_usage_pct: 50.0,
+            disk_usage_pct: 30.0,
+            l0_file_count: 2,
+            compaction_idle: true,
+            measurements_count: 10,
+            total_data_points: 1000,
+            cpu_pct: 25.0,
+            sys_memory_pct: 60.0,
+            sys_disk_pct: 40.0,
+            load_avg_1m: 1.5,
+            uptime_secs: 3600,
+            cpu_temp_c: 55.0,
+            gpu_temp_c: 45.0,
+        };
+        let json = serde_json::to_string(&health).unwrap();
+        let decoded: HealthStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.service, "test");
+        assert!(decoded.healthy);
+        assert_eq!(decoded.total_data_points, 1000);
+    }
+
+    #[test]
+    fn test_lifecycle_status_serde() {
+        let status = LifecycleStatus {
+            hot_cfs: vec![],
+            warm_cfs: vec![],
+            cold_cfs: vec![],
+            archive_files: vec![],
+            parquet_partitions: vec![],
+            total_hot_bytes: 100,
+            total_warm_bytes: 200,
+            total_cold_bytes: 300,
+            total_archive_bytes: 400,
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: LifecycleStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.total_hot_bytes, 100);
+        assert_eq!(decoded.total_cold_bytes, 300);
+    }
+
+    #[test]
+    fn test_sql_result_serde() {
+        let result = SqlResult {
+            sql: "SELECT * FROM cpu".to_string(),
+            columns: vec!["timestamp".to_string(), "value".to_string()],
+            rows: vec![serde_json::json!({"timestamp": 1, "value": 42})],
+            total_rows: 1,
+            elapsed_ms: 5.3,
+            truncated: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let decoded: SqlResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.sql, "SELECT * FROM cpu");
+        assert_eq!(decoded.columns.len(), 2);
+        assert!(!decoded.truncated);
+    }
+
+    #[test]
+    fn test_data_tier_info_storage_field() {
+        let info = DataTierInfo {
+            cf_name: "ts_cpu_20260401".to_string(),
+            measurement: "cpu".to_string(),
+            date: "20260401".to_string(),
+            age_days: 5,
+            sst_size: 1024,
+            num_keys: 100,
+            tier: "warm".to_string(),
+            path: "/tmp/parquet/warm".to_string(),
+            storage: "parquet".to_string(),
+            demote_eligible: "cold".to_string(),
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let decoded: DataTierInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.storage, "parquet");
+        assert_eq!(decoded.tier, "warm");
+        assert_eq!(decoded.demote_eligible, "cold");
+    }
+
+    #[test]
+    fn test_data_tier_info_default_storage() {
+        let json = r#"{"cf_name":"ts_cpu_20260401","measurement":"cpu","date":"20260401","age_days":1,"sst_size":512,"num_keys":50,"tier":"hot","path":"/tmp/rocksdb"}"#;
+        let decoded: DataTierInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(decoded.storage, "rocksdb");
+        assert_eq!(decoded.demote_eligible, "none");
+    }
 }

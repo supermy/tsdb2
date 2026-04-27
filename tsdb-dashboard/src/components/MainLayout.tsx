@@ -11,6 +11,7 @@ import {
   FileTextOutlined,
   CodeOutlined,
   SwapOutlined,
+  TableOutlined,
 } from '@ant-design/icons';
 import { useNavigate, useLocation, Outlet } from 'react-router-dom';
 
@@ -25,6 +26,7 @@ const menuItems = [
   { key: '/data-query', icon: <SearchOutlined />, label: '数据查询' },
   { key: '/rocksdb', icon: <DatabaseOutlined />, label: 'RocksDB' },
   { key: '/parquet', icon: <FileTextOutlined />, label: 'Parquet' },
+  { key: '/iceberg', icon: <TableOutlined />, label: 'Iceberg' },
   { key: '/sql', icon: <CodeOutlined />, label: 'SQL控制台' },
   { key: '/lifecycle', icon: <SwapOutlined />, label: '数据生命周期' },
 ];

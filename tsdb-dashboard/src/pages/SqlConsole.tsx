@@ -17,7 +17,12 @@ const SqlConsole: React.FC = () => {
   const [result, setResult] = useState<SqlResult | null>(null);
   const [tables, setTables] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
-  const [history, setHistory] = useState<string[]>([]);
+  const [history, setHistory] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('tsdb2_sql_history');
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
 
   const fetchTables = useCallback(async () => {
     try {
@@ -35,10 +40,14 @@ const SqlConsole: React.FC = () => {
     try {
       const r = await api.sql.execute(query);
       setResult(r);
-      setHistory(prev => [query, ...prev.filter(h => h !== query)].slice(0, 20));
+      setHistory(prev => {
+        const updated = [query, ...prev.filter(h => h !== query)].slice(0, 20);
+        try { localStorage.setItem('tsdb2_sql_history', JSON.stringify(updated)); } catch { /* ignore */ }
+        return updated;
+      });
     } catch (e: unknown) {
       const errMsg = e instanceof Error ? e.message : String(e);
-      setResult({ sql: query, columns: ['error'], rows: [{ error: errMsg }], total_rows: 0, elapsed_ms: 0 });
+      setResult({ sql: query, columns: ['error'], rows: [{ error: errMsg }], total_rows: 0, elapsed_ms: 0, truncated: false });
     }
     finally { setLoading(false); }
   };
@@ -60,7 +69,7 @@ const SqlConsole: React.FC = () => {
           <Card title="可用表" size="small" style={{ marginBottom: 16 }}>
             {tables.map(t => (
               <div key={t} style={{ marginBottom: 4 }}>
-                <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => setSql(`SELECT * FROM ${t} LIMIT 10`)}>{t}</Tag>
+                <Tag color="blue" style={{ cursor: 'pointer' }} onClick={() => setSql(`SELECT * FROM "${t}" LIMIT 10`)}>{t}</Tag>
               </div>
             ))}
             {tables.length === 0 && <Text type="secondary">无可用表</Text>}
@@ -111,6 +120,7 @@ const SqlConsole: React.FC = () => {
                   <Tag color="green">{result.total_rows} 行</Tag>
                   <Tag color="blue">{result.columns.length} 列</Tag>
                   <Tag color="orange">{result.elapsed_ms.toFixed(1)} ms</Tag>
+                  {result.truncated && <Tag color="red">结果已截断（上限5000行）</Tag>}
                 </Space>
                 <Text style={{ fontSize: 11, color: '#666', maxWidth: 400, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {result.sql}

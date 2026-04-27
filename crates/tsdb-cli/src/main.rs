@@ -75,6 +75,10 @@ enum Commands {
         admin_port: u16,
         #[arg(long, default_value_t = 3000)]
         http_port: u16,
+        #[arg(long)]
+        parquet_dir: Option<String>,
+        #[arg(long)]
+        iceberg_dir: Option<String>,
     },
 }
 
@@ -143,7 +147,11 @@ enum IcebergActions {
     },
 }
 
-fn open_engine(data_dir: &str, engine_type: &str, config_name: &str) -> anyhow::Result<Arc<dyn StorageEngine>> {
+fn open_engine(
+    data_dir: &str,
+    engine_type: &str,
+    config_name: &str,
+) -> anyhow::Result<Arc<dyn StorageEngine>> {
     match engine_type {
         "rocksdb" => {
             let config = load_rocksdb_config(config_name)?;
@@ -182,14 +190,25 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Commands::Status => execute_status(&cli.data_dir, &cli.storage_engine, &cli.config)?,
-        Commands::Query { sql, format } => {
-            execute_query(&cli.data_dir, &cli.storage_engine, &cli.config, &sql, &format)?
-        }
+        Commands::Query { sql, format } => execute_query(
+            &cli.data_dir,
+            &cli.storage_engine,
+            &cli.config,
+            &sql,
+            &format,
+        )?,
         Commands::Bench {
             mode,
             points,
             workers,
-        } => run_bench(&cli.data_dir, &cli.storage_engine, &cli.config, &mode, points, workers)?,
+        } => run_bench(
+            &cli.data_dir,
+            &cli.storage_engine,
+            &cli.config,
+            &mode,
+            points,
+            workers,
+        )?,
         Commands::Compact { cf } => execute_compact(&cli.data_dir, &cli.config, cf.as_deref())?,
         Commands::Import {
             file,
@@ -223,33 +242,93 @@ fn main() -> anyhow::Result<()> {
             flight_port,
             admin_port,
             http_port,
-        } => execute_serve(&cli.data_dir, &cli.storage_engine, &cli.config, &host, flight_port, admin_port, http_port)?,
+            parquet_dir,
+            iceberg_dir,
+        } => execute_serve(ServeConfig {
+            data_dir: cli.data_dir,
+            engine_type: cli.storage_engine,
+            config_name: cli.config,
+            host,
+            flight_port,
+            admin_port,
+            http_port,
+            parquet_dir,
+            iceberg_dir,
+        })?,
     }
 
     Ok(())
 }
 
-fn execute_serve(
-    data_dir: &str,
-    engine_type: &str,
-    config_name: &str,
-    host: &str,
+struct ServeConfig {
+    data_dir: String,
+    engine_type: String,
+    config_name: String,
+    host: String,
     flight_port: u16,
     admin_port: u16,
     http_port: u16,
-) -> anyhow::Result<()> {
-    let engine = open_engine(data_dir, engine_type, config_name)?;
+    parquet_dir: Option<String>,
+    iceberg_dir: Option<String>,
+}
+
+fn execute_serve(cfg: ServeConfig) -> anyhow::Result<()> {
+    let engine = open_engine(&cfg.data_dir, &cfg.engine_type, &cfg.config_name)?;
+
+    let parquet_dir_resolved = cfg
+        .parquet_dir
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("{}_parquet", cfg.data_dir.trim_end_matches('/')));
+
+    let iceberg_dir_path = cfg.iceberg_dir.map(std::path::PathBuf::from).or_else(|| {
+        Some(std::path::PathBuf::from(format!(
+            "{}/iceberg",
+            cfg.data_dir.trim_end_matches('/')
+        )))
+    });
 
     println!("╔══════════════════════════════════════════════╗");
     println!("║       TSDB2 Server Starting                 ║");
     println!("╠══════════════════════════════════════════════╣");
-    println!("║  Flight gRPC:  grpc://{}:{}     ", host, flight_port);
-    println!("║  Admin nng:    tcp://{}:{}       ", host, admin_port);
-    println!("║  Admin pub:    tcp://{}:{}       ", host, admin_port + 1);
-    println!("║  Dashboard:    http://{}:{}     ", host, http_port);
-    println!("║  Config:       {}                          ", config_name);
-    println!("║  Data Dir:     {}                           ", data_dir);
-    println!("║  Engine:       {}                           ", engine_type);
+    println!(
+        "║  Flight gRPC:  grpc://{}:{}     ",
+        cfg.host, cfg.flight_port
+    );
+    println!(
+        "║  Admin nng:    tcp://{}:{}       ",
+        cfg.host, cfg.admin_port
+    );
+    println!(
+        "║  Admin pub:    tcp://{}:{}       ",
+        cfg.host,
+        cfg.admin_port + 1
+    );
+    println!(
+        "║  Dashboard:    http://{}:{}     ",
+        cfg.host, cfg.http_port
+    );
+    println!(
+        "║  Config:       {}                          ",
+        cfg.config_name
+    );
+    println!(
+        "║  Data Dir:     {}                           ",
+        cfg.data_dir
+    );
+    println!(
+        "║  Parquet Dir:  {}                           ",
+        parquet_dir_resolved
+    );
+    if let Some(ref id) = iceberg_dir_path {
+        println!(
+            "║  Iceberg Dir:  {}                           ",
+            id.display()
+        );
+    }
+    println!(
+        "║  Engine:       {}                           ",
+        cfg.engine_type
+    );
     println!("╚══════════════════════════════════════════════╝");
 
     let rt = tokio::runtime::Runtime::new()?;
@@ -257,33 +336,37 @@ fn execute_serve(
         let flight_server = tsdb_flight::TsdbFlightServer::new(
             engine.clone(),
             datafusion::prelude::SessionContext::new(),
-            host.to_string(),
-            flight_port,
+            cfg.host.clone(),
+            cfg.flight_port,
         );
 
         let admin_server = tsdb_admin::AdminServer::new(
             engine.clone(),
-            data_dir,
-            host,
-            admin_port,
+            &cfg.data_dir,
+            &parquet_dir_resolved,
+            &cfg.host,
+            cfg.admin_port,
+            iceberg_dir_path,
         );
 
-        let bound_admin = admin_server.bind()
+        let bound_admin = admin_server
+            .bind()
             .map_err(|e| anyhow::anyhow!("admin bind: {}", e))?;
 
-        let nng_req_url = format!("tcp://{}:{}", host, admin_port);
-        let nng_pub_url = format!("tcp://{}:{}", host, admin_port + 1);
+        let nng_req_url = format!("tcp://{}:{}", cfg.host, cfg.admin_port);
+        let nng_pub_url = format!("tcp://{}:{}", cfg.host, cfg.admin_port + 1);
 
         let gateway_state = tsdb_admin::GatewayState::new(&nng_req_url, &nng_pub_url)
             .map_err(|e| anyhow::anyhow!("gateway init: {}", e))?;
         let app = tsdb_admin::gateway::build_router(gateway_state);
 
-        let http_addr = format!("{}:{}", host, http_port);
-        let http_listener = tokio::net::TcpListener::bind(&http_addr).await
+        let http_addr = format!("{}:{}", cfg.host, cfg.http_port);
+        let http_listener = tokio::net::TcpListener::bind(&http_addr)
+            .await
             .map_err(|e| anyhow::anyhow!("bind http {}: {}", http_addr, e))?;
 
         let service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
-        let flight_addr = format!("{}:{}", host, flight_port).parse().unwrap();
+        let flight_addr = format!("{}:{}", cfg.host, cfg.flight_port).parse().unwrap();
         let flight_server = tonic::transport::Server::builder()
             .add_service(service)
             .serve(flight_addr);
@@ -302,7 +385,10 @@ fn execute_serve(
             }
         });
 
-        println!("\n  Dashboard available at http://{}:{}", host, http_port);
+        println!(
+            "\n  Dashboard available at http://{}:{}",
+            cfg.host, cfg.http_port
+        );
 
         tokio::signal::ctrl_c().await?;
         println!("\nShutting down...");
@@ -599,7 +685,13 @@ fn execute_status(data_dir: &str, engine_type: &str, _config_name: &str) -> anyh
     Ok(())
 }
 
-fn execute_query(data_dir: &str, engine_type: &str, _config_name: &str, sql: &str, format: &str) -> anyhow::Result<()> {
+fn execute_query(
+    data_dir: &str,
+    engine_type: &str,
+    _config_name: &str,
+    sql: &str,
+    format: &str,
+) -> anyhow::Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let engine = open_engine(data_dir, engine_type, _config_name)?;
@@ -814,15 +906,18 @@ fn execute_import(
     Ok(())
 }
 
-fn execute_archive(data_dir: &str, _config_name: &str, action: ArchiveActions) -> anyhow::Result<()> {
+fn execute_archive(
+    data_dir: &str,
+    _config_name: &str,
+    action: ArchiveActions,
+) -> anyhow::Result<()> {
     match action {
         ArchiveActions::Create {
             older_than,
             output_dir,
         } => {
             let days = parse_days(&older_than)?;
-            let db =
-                tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
+            let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
 
             let archive_path = Path::new(&output_dir);
             let (archived_cfs, total_points) =
@@ -846,8 +941,7 @@ fn execute_archive(data_dir: &str, _config_name: &str, action: ArchiveActions) -
                 anyhow::bail!("Archive file not found: {}", file);
             }
 
-            let db =
-                tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
+            let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, load_rocksdb_config(_config_name)?)?;
 
             let f = std::fs::File::open(&file)?;
             let reader = std::io::BufReader::new(f);

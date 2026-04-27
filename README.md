@@ -11,16 +11,16 @@
 └─────────────────────┬───────────────────────────────────────┘
                       │ HTTP REST + WebSocket
 ┌─────────────────────▼───────────────────────────────────────┐
-│  axum HTTP Gateway (:8902)                                   │
+│  axum HTTP Gateway (:3000)                                   │
 │  /api/services  /api/configs  /api/test  /api/metrics       │
 │  /api/rocksdb   /api/parquet  /api/sql   /api/lifecycle     │
-│  /api/collector /api/ws (WebSocket → NNG pub/sub 实时推送)  │
+│  /api/collector /api/iceberg  /api/ws (WebSocket 实时推送)  │
 └─────────────────────┬───────────────────────────────────────┘
                       │ NNG req/rep
 ┌─────────────────────▼───────────────────────────────────────┐
 │  NNG Admin Server (:8080 rep / :8081 pub)                   │
 │  ServiceManager │ ConfigManager │ MetricsCollector          │
-│  ParquetApi     │ SqlApi        │ LifecycleApi              │
+│  ParquetApi     │ SqlApi        │ LifecycleApi │ IcebergApi │
 └─────────────────────┬───────────────────────────────────────┘
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
@@ -33,8 +33,9 @@
 
 - **双引擎存储**: RocksDB 热数据 + Parquet/Iceberg 冷数据归档
 - **Flight SQL**: Arrow Flight gRPC 协议，支持 SQL 查询和流式写入
-- **Web SQL 控制台**: 浏览器内直接执行 SQL，支持聚合、分组、SHOW TABLES
-- **数据生命周期**: 热数据(≤3天) → 温数据(4-14天) → 冷数据(>14天) → Parquet 归档
+- **Web SQL 控制台**: 浏览器内直接执行 SQL，自动合并 RocksDB + Parquet 数据
+- **数据生命周期**: 热数据(RocksDB) → 温数据(Parquet SNAPPY) → 冷数据(Parquet ZSTD)
+- **Iceberg 表管理**: 创建/扫描/快照/回滚/压缩/过期清理
 - **Parquet 数据查看**: 文件列表、元数据、数据预览
 - **实时监控**: CPU/内存/磁盘/网络/温度采集，WebSocket 实时推送
 - **RocksDB 管理**: CF 统计、KV 扫描、Schema 查看、手动压缩
@@ -44,46 +45,78 @@
 
 ## 快速开始
 
-### 构建
+### 前置要求
+
+- Rust 1.85.0+
+- Node.js 20+ (前端构建)
+- RocksDB 开发库 (Linux: `librocksdb-dev`)
+
+### 使用 Makefile（推荐）
 
 ```bash
-# 完整构建（后端 + 前端）
-./scripts/build.sh
+# 查看所有命令
+make help
 
-# 或手动构建
+# 完整构建
+make build
+
+# 开发模式（前后端热更新）
+make dev
+
+# 生产启动
+make start
+
+# 运行测试
+make test
+
+# 代码质量检查
+make check
+
+# Docker 构建
+make docker-build
+```
+
+### 手动构建
+
+```bash
+# 后端
 cargo build --release -p tsdb-cli
+
+# 前端
 cd tsdb-dashboard && npm install && npm run build
-cp -r tsdb-dashboard/dist/* target/release/dashboard/
+cp -r tsdb-dashboard/dist target/release/dashboard/
 ```
 
 ### 启动
 
 ```bash
 # 生产模式
-./scripts/start.sh
+make start
 
-# 开发模式（前后端热更新）
-./scripts/dev.sh
+# 开发模式
+make dev
 
 # 手动启动
-tsdb-cli serve --data-dir ./data --storage-engine rocksdb \
-    --config balanced --host 0.0.0.0 \
-    --flight-port 50051 --admin-port 8080 --http-port 8902
+tsdb-cli serve --data-dir ./data --parquet-dir ./data_parquet \
+    --storage-engine rocksdb --config default \
+    --host 0.0.0.0 --flight-port 50051 \
+    --admin-port 8080 --http-port 3000
 ```
 
-启动后访问 http://localhost:8902 打开 Dashboard。
+启动后访问 http://localhost:3000 打开 Dashboard。
 
 ### 环境变量
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `TSDB_DATA_DIR` | `./data` | 数据存储目录 |
+| `TSDB_DATA_DIR` | `./data` | RocksDB 数据目录 |
+| `TSDB_PARQUET_DIR` | `./data_parquet` | Parquet 数据目录 |
 | `TSDB_HOST` | `0.0.0.0` | 监听地址 |
 | `TSDB_FLIGHT_PORT` | `50051` | Flight gRPC 端口 |
 | `TSDB_ADMIN_PORT` | `8080` | NNG Admin 端口 |
-| `TSDB_HTTP_PORT` | `8902` | HTTP Dashboard 端口 |
+| `TSDB_HTTP_PORT` | `3000` | HTTP Dashboard 端口 |
 | `TSDB_ENGINE` | `rocksdb` | 存储引擎 |
-| `TSDB_CONFIG` | `balanced` | 配置名称 |
+| `TSDB_CONFIG` | `default` | 配置名称 |
 
 ## CLI 命令
 
@@ -141,6 +174,7 @@ tsdb-cli doctor
 | POST | `/api/test/sql` | 执行 SQL 查询 |
 | POST | `/api/test/write-bench` | 写入基准测试 |
 | POST | `/api/test/read-bench` | 读取基准测试 |
+| POST | `/api/test/generate-business-data` | 生成多业务测试数据 |
 
 ### 监控指标
 
@@ -180,7 +214,7 @@ tsdb-cli doctor
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/api/sql/execute` | 执行 SQL 语句 |
+| POST | `/api/sql/execute` | 执行 SQL 语句（自动合并 RocksDB + Parquet） |
 | GET | `/api/sql/tables` | 列出可用表 |
 
 ### 数据生命周期
@@ -189,30 +223,57 @@ tsdb-cli doctor
 |------|------|------|
 | GET | `/api/lifecycle/status` | 数据分层状态 |
 | POST | `/api/lifecycle/archive` | 执行数据归档 |
+| POST | `/api/lifecycle/demote-to-warm` | 手动降级为温数据 |
+| POST | `/api/lifecycle/demote-to-cold` | 手动降级为冷数据 |
+
+### Iceberg 表管理
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/iceberg/tables` | 列出所有表 |
+| POST | `/api/iceberg/tables` | 创建表 |
+| GET | `/api/iceberg/tables/:name` | 表详情 |
+| DELETE | `/api/iceberg/tables/:name` | 删除表 |
+| POST | `/api/iceberg/tables/:name/append` | 追加数据 |
+| GET | `/api/iceberg/tables/:name/scan` | 扫描数据 |
+| GET | `/api/iceberg/tables/:name/snapshots` | 快照列表 |
+| POST | `/api/iceberg/tables/:name/rollback` | 回滚快照 |
+| POST | `/api/iceberg/tables/:name/compact` | 压缩表 |
+| POST | `/api/iceberg/tables/:name/expire` | 过期清理 |
+| POST | `/api/iceberg/tables/:name/schema` | 更新 Schema |
 
 ## 数据生命周期
 
-TSDB2 实现了自动化的数据分层管理：
+TSDB2 实现了基于存储引擎的数据分层策略：
 
 ```
-🔥 热数据 (≤3天)          🌤️ 温数据 (4-14天)         ❄️ 冷数据 (>14天)
-RocksDB 内存 + SST        RocksDB SST only           归档 → Parquet
-SNAPPY 压缩               自动降级压缩                ZSTD 压缩
-快速读写                   读取为主                    仅读取
-     │                         │                          │
-     └───────── 自动过渡 ───────┴─────── 手动/自动归档 ────┘
+┌──────────────────────────────────────────────────┐
+│ 热数据 (RocksDB)                                  │
+│   所有在 RocksDB 中的 CF                          │
+│   demote_eligible:                                │
+│     none  → age≤3天, 不可降级                     │
+│     warm  → age 4-14天, 可降级为温数据             │
+│     cold  → age>14天, 可降级为冷数据               │
+└─────────────┬───────────────────┬────────────────┘
+              │ demote_to_warm    │ demote_to_cold
+              │ (SNAPPY 压缩)     │ (ZSTD 压缩)
+              ▼                   ▼
+┌──────────────────┐  ┌──────────────────┐
+│ 温数据 (Parquet)  │  │ 冷数据 (Parquet)  │
+│ SNAPPY 压缩      │  │ ZSTD 压缩        │
+│ 可继续降级为冷数据 │  │ 长期存储         │
+└──────────────────┘  └──────────────────┘
 ```
 
-- **热数据**: 最近 3 天的数据，存储在 RocksDB 内存和 SST 文件中，SNAPPY 压缩
-- **温数据**: 4-14 天的数据，仅保留 SST 文件，自动降级压缩
-- **冷数据**: 超过 14 天的数据，归档为 Parquet 文件，ZSTD 高压缩比
-- **归档操作**: 通过 API 或 CLI 将冷数据从 RocksDB 导出为 Parquet 文件
+**核心原则**：RocksDB 中的所有 CF 都是热数据，不论其年龄。只有已降级到 Parquet 的数据才被分类为温/冷数据。
+
+详细文档见 [docs/data-lifecycle.md](docs/data-lifecycle.md)。
 
 ## Dashboard 页面
 
 | 页面 | 路径 | 功能 |
 |------|------|------|
-| 仪表盘 | `/dashboard` | 服务概览、实时指标 |
+| 仪表盘 | `/dashboard` | 服务概览、实时指标、多业务数据生成 |
 | 服务管理 | `/services` | 创建/启停/重启服务 |
 | 配置管理 | `/configs` | 配置文件 CRUD、对比 |
 | 功能测试 | `/testing` | SQL 测试、读写基准 |
@@ -221,7 +282,49 @@ SNAPPY 压缩               自动降级压缩                ZSTD 压缩
 | RocksDB | `/rocksdb` | CF 统计、KV 浏览、Schema |
 | Parquet | `/parquet` | 文件列表、元数据、数据预览 |
 | SQL 控制台 | `/sql` | SQL 编辑器、结果表格、历史 |
-| 数据生命周期 | `/lifecycle` | 热温冷分布、归档操作 |
+| 数据生命周期 | `/lifecycle` | 热温冷分布、手动降级操作 |
+| Iceberg | `/iceberg` | 表管理、快照、Schema |
+
+## 项目结构
+
+```
+tsdb2/
+├── crates/
+│   ├── tsdb-arrow/         # Arrow schema + StorageEngine trait + DataPoint 转换
+│   ├── tsdb-rocksdb/       # RocksDB 存储引擎 + 数据归档
+│   ├── tsdb-storage-arrow/ # Arrow 内存存储引擎 (WAL + Parquet)
+│   ├── tsdb-iceberg/       # Iceberg 表格式集成
+│   ├── tsdb-datafusion/    # DataFusion SQL 查询引擎
+│   ├── tsdb-flight/        # Arrow Flight SQL 服务
+│   ├── tsdb-admin/         # NNG Admin + axum HTTP Gateway
+│   ├── tsdb-cli/           # 命令行工具
+│   ├── tsdb-bench/         # 性能基准测试
+│   ├── tsdb-test-utils/    # 测试工具
+│   ├── tsdb-integration-tests/  # 集成/业务测试
+│   ├── tsdb-stress/        # 压力测试
+│   └── tsdb-stress-rocksdb/ # RocksDB 压力测试
+├── tsdb-dashboard/         # React + Vite + Ant Design 前端
+├── configs/                # 配置文件 (INI 格式)
+├── scripts/                # 运维脚本
+├── docs/                   # 文档
+├── Makefile                # 构建与开发命令
+└── Dockerfile              # Docker 镜像构建
+```
+
+## Makefile 命令
+
+| 命令 | 说明 |
+|------|------|
+| `make build` | 完整构建 (release) |
+| `make dev` | 开发模式 (热更新) |
+| `make start` | 生产启动 |
+| `make stop` | 停止服务 |
+| `make test` | 运行测试 + lint |
+| `make check` | 完整质量检查 |
+| `make lint` | Clippy + 格式检查 |
+| `make docker-build` | 构建 Docker 镜像 |
+| `make bench` | 运行性能基准 |
+| `make help` | 查看所有命令 |
 
 ## 配置文件
 
@@ -238,38 +341,31 @@ SNAPPY 压缩               自动降级压缩                ZSTD 压缩
 | `high_performance.ini` | 高性能配置 |
 | `low_memory.ini` | 低内存配置 |
 
-## 项目结构
-
-```
-tsdb2/
-├── crates/
-│   ├── tsdb-arrow/         # Arrow schema + StorageEngine trait + DataPoint 转换
-│   ├── tsdb-rocksdb/       # RocksDB 存储引擎 + 数据归档
-│   ├── tsdb-storage-arrow/ # Arrow 内存存储引擎
-│   ├── tsdb-iceberg/       # Iceberg 表格式集成
-│   ├── tsdb-datafusion/    # DataFusion SQL 查询引擎
-│   ├── tsdb-flight/        # Arrow Flight SQL 服务
-│   ├── tsdb-admin/         # NNG Admin + axum HTTP Gateway
-│   ├── tsdb-cli/           # 命令行工具
-│   ├── tsdb-bench/         # 性能基准测试
-│   ├── tsdb-test-utils/    # 测试工具
-│   └── tsdb-integration-tests/  # 集成/业务测试
-├── tsdb-dashboard/         # React + Vite + Ant Design 前端
-├── configs/                # 配置文件
-├── scripts/                # 运维脚本
-└── docs/                   # 文档
-```
-
 ## 测试
 
 ```bash
-./scripts/check.sh
+# 使用 Makefile
+make test
 
-# 或手动
+# 完整质量检查
+make check
+
+# 手动
 cargo clippy --workspace -- -D warnings
-cargo test --workspace --exclude tsdb-stress
+cargo test --workspace --exclude tsdb-stress-rocksdb
 cd tsdb-dashboard && npm run build
 ```
+
+## 文档
+
+| 文档 | 说明 |
+|------|------|
+| [architecture.md](docs/architecture.md) | 技术架构（类图、时序图、数据模型） |
+| [data-lifecycle.md](docs/data-lifecycle.md) | 数据生命周期管理 |
+| [data-structures.md](docs/data-structures.md) | 数据结构设计 |
+| [key-technologies.md](docs/key-technologies.md) | 关键技术选型 |
+| [user-guide.md](docs/user-guide.md) | 使用手册 |
+| [test-report.md](docs/test-report.md) | 测试报告 |
 
 ## License
 

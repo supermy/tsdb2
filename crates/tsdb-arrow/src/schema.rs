@@ -413,7 +413,11 @@ impl<'de> serde::Deserialize<'de> for FieldValue {
             }
 
             fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<FieldValue, E> {
-                Ok(FieldValue::Integer(v as i64))
+                if v > i64::MAX as u64 {
+                    Err(de::Error::custom("u64 value overflows i64 range"))
+                } else {
+                    Ok(FieldValue::Integer(v as i64))
+                }
             }
 
             fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<FieldValue, E> {
@@ -885,5 +889,77 @@ mod tests {
             .with_field("usage", FieldValue::Float(0.5))
             .with_field("count", FieldValue::Integer(42));
         assert!(dp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_field_value_u64_overflow_rejected() {
+        let original = FieldValue::Integer(i64::MAX);
+        let json = serde_json::to_string(&original).unwrap();
+        let overflow_json = json.replace(&i64::MAX.to_string(), &u64::MAX.to_string());
+        let result: Result<FieldValue, _> = serde_json::from_str(&overflow_json);
+        assert!(result.is_err(), "u64 overflow should be rejected");
+    }
+
+    #[test]
+    fn test_field_value_large_i64_roundtrip() {
+        let original = FieldValue::Integer(i64::MAX);
+        let json = serde_json::to_string(&original).unwrap();
+        let result: Result<FieldValue, _> = serde_json::from_str(&json);
+        assert!(result.is_ok());
+        if let FieldValue::Integer(v) = result.unwrap() {
+            assert_eq!(v, i64::MAX);
+        } else {
+            panic!("expected Integer");
+        }
+    }
+
+    #[test]
+    fn test_field_value_negative_i64_roundtrip() {
+        let original = FieldValue::Integer(i64::MIN);
+        let json = serde_json::to_string(&original).unwrap();
+        let result: Result<FieldValue, _> = serde_json::from_str(&json);
+        assert!(result.is_ok());
+        if let FieldValue::Integer(v) = result.unwrap() {
+            assert_eq!(v, i64::MIN);
+        } else {
+            panic!("expected Integer");
+        }
+    }
+
+    #[test]
+    fn test_datapoint_with_many_tags() {
+        let mut dp = DataPoint::new("cpu", 1000).with_field("usage", FieldValue::Float(0.5));
+        for i in 0..20 {
+            dp = dp.with_tag(format!("tag_{}", i), format!("val_{}", i));
+        }
+        assert_eq!(dp.tags.len(), 20);
+        assert!(dp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_datapoint_with_many_fields() {
+        let mut dp = DataPoint::new("cpu", 1000).with_tag("host", "s1");
+        for i in 0..20 {
+            dp = dp.with_field(format!("field_{}", i), FieldValue::Float(i as f64));
+        }
+        assert_eq!(dp.fields.len(), 20);
+        assert!(dp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_series_key_deterministic() {
+        let dp1 = DataPoint::new("cpu", 1000)
+            .with_tag("a", "1")
+            .with_tag("b", "2")
+            .with_field("v", FieldValue::Float(1.0));
+
+        let dp2 = DataPoint::new("cpu", 1000)
+            .with_tag("b", "2")
+            .with_tag("a", "1")
+            .with_field("v", FieldValue::Float(1.0));
+
+        let key1 = dp1.series_key();
+        let key2 = dp2.series_key();
+        assert_eq!(key1, key2, "series_key should be order-independent");
     }
 }

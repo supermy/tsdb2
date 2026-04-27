@@ -71,7 +71,7 @@ impl TtlManager {
         end_micros: i64,
     ) -> Result<()> {
         let start_key = TsdbKey::new(0, start_micros).encode();
-        let end_key = TsdbKey::new(u64::MAX, end_micros).encode();
+        let end_key = TsdbKey::new(0, end_micros + 1).encode();
         db.delete_range_cf(cf, &start_key, &end_key)?;
         Ok(())
     }

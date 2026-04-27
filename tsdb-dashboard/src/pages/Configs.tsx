@@ -22,7 +22,7 @@ const Configs: React.FC = () => {
     try {
       const list = await api.configs.list();
       setProfiles(list);
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
     finally { setLoading(false); }
   };
 
@@ -36,7 +36,7 @@ const Configs: React.FC = () => {
       setSaveOpen(false);
       form.resetFields();
       fetchProfiles();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleEdit = (profile: ConfigProfile) => {
@@ -52,7 +52,7 @@ const Configs: React.FC = () => {
       message.success('配置已更新');
       setEditOpen(false);
       fetchProfiles();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleDelete = async (name: string) => {
@@ -60,7 +60,7 @@ const Configs: React.FC = () => {
       await api.configs.delete(name);
       message.success('配置已删除');
       fetchProfiles();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleCompare = async () => {
@@ -68,7 +68,7 @@ const Configs: React.FC = () => {
       const values = await compareForm.validateFields();
       const result = await api.configs.compare(values.profile_a, values.profile_b);
       setDiffs(result);
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const columns = [
@@ -77,7 +77,7 @@ const Configs: React.FC = () => {
     { title: '内容预览', dataIndex: 'content', key: 'content', render: (c: string) => (
       <Text ellipsis style={{ maxWidth: 300 }}>{c}</Text>
     )},
-    { title: '操作', key: 'actions', render: (_: any, record: ConfigProfile) => (
+    { title: '操作', key: 'actions', render: (_: unknown, record: ConfigProfile) => (
       <Space>
         <Button size="small" onClick={() => handleEdit(record)}>编辑</Button>
         <Popconfirm title={`确定删除 ${record.name}?`} onConfirm={() => handleDelete(record.name)}>

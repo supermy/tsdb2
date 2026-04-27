@@ -54,7 +54,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
         let ctx = SessionContext::new();
-        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50051);
+        let server = TsdbFlightServer::new(
+            Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>,
+            ctx,
+            "127.0.0.1",
+            50051,
+        );
         assert!(std::mem::size_of_val(&server) > 0);
     }
 
@@ -78,7 +83,12 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let db = TsdbRocksDb::open(dir.path(), RocksDbConfig::default()).unwrap();
         let ctx = SessionContext::new();
-        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50053);
+        let server = TsdbFlightServer::new(
+            Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>,
+            ctx,
+            "127.0.0.1",
+            50053,
+        );
 
         let result = server
             .list_actions(Request::new(arrow_flight::Empty {}))
@@ -109,7 +119,12 @@ mod tests {
         let provider = TsdbTableProvider::new("cpu", schema, dir.path());
         ctx.register_table("cpu", Arc::new(provider)).unwrap();
 
-        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50054);
+        let server = TsdbFlightServer::new(
+            Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>,
+            ctx,
+            "127.0.0.1",
+            50054,
+        );
 
         let ticket = arrow_flight::Ticket::new("SELECT * FROM cpu LIMIT 10");
         let result = server.do_get(Request::new(ticket)).await;
@@ -136,7 +151,12 @@ mod tests {
         let provider = TsdbTableProvider::new("cpu", schema, dir.path());
         ctx.register_table("cpu", Arc::new(provider)).unwrap();
 
-        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50055);
+        let server = TsdbFlightServer::new(
+            Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>,
+            ctx,
+            "127.0.0.1",
+            50055,
+        );
 
         let descriptor =
             arrow_flight::FlightDescriptor::new_path(vec!["SELECT * FROM cpu".to_string()]);
@@ -163,7 +183,12 @@ mod tests {
         let provider = TsdbTableProvider::new("cpu", schema, dir.path());
         ctx.register_table("cpu", Arc::new(provider)).unwrap();
 
-        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50056);
+        let server = TsdbFlightServer::new(
+            Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>,
+            ctx,
+            "127.0.0.1",
+            50056,
+        );
 
         let descriptor =
             arrow_flight::FlightDescriptor::new_path(vec!["SELECT * FROM cpu".to_string()]);
@@ -189,7 +214,12 @@ mod tests {
         db.write_batch(&dps).unwrap();
 
         let ctx = SessionContext::new();
-        let server = TsdbFlightServer::new(Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>, ctx, "127.0.0.1", 50057);
+        let server = TsdbFlightServer::new(
+            Arc::new(db) as Arc<dyn tsdb_arrow::engine::StorageEngine>,
+            ctx,
+            "127.0.0.1",
+            50057,
+        );
 
         let action = arrow_flight::Action {
             r#type: "list_measurements".to_string(),

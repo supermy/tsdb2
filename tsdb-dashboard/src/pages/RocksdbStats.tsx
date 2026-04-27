@@ -1,15 +1,9 @@
-import React, { useEffect, useState, useCallback } from 'react';
-import { Card, Row, Col, Statistic, Typography, Table, Tag, Button, Space, Modal, Spin, Progress, Select, InputNumber, Input, Tabs, Collapse } from 'antd';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { Card, Row, Col, Statistic, Typography, Table, Tag, Button, Space, Modal, Spin, Progress, Select, InputNumber, Input, Tabs, Collapse, message } from 'antd';
 import { api, type RocksdbOverview, type CfDetail, type KvEntry, type KvScanResult, type SeriesSchema, type MeasurementSchema } from '../api';
+import { fmtBytes } from '../utils';
 
 const { Title, Text } = Typography;
-
-const fmtBytes = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-};
 
 const truncateHex = (hex: string, maxLen: number = 40): string => {
   if (hex.length <= maxLen) return hex;
@@ -40,6 +34,8 @@ const RocksdbStats: React.FC = () => {
   const [kvGetResult, setKvGetResult] = useState<KvEntry | null>(null);
   const [kvGetLoading, setKvGetLoading] = useState(false);
 
+  const kvCfInitialized = useRef(false);
+
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
@@ -49,24 +45,25 @@ const RocksdbStats: React.FC = () => {
       ]);
       setOverview(ov);
       setCfList(cfs);
-      if (!kvCf && cfs.length > 0) {
+      if (!kvCfInitialized.current && cfs.length > 0) {
         setKvCf(cfs[0]);
+        kvCfInitialized.current = true;
       }
 
       const details = await Promise.all(
         cfs.slice(0, 50).map(cf => api.rocksdb.cfDetail(cf).catch(() => null))
       );
       setCfDetails(details.filter((d): d is CfDetail => d !== null));
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); message.error('加载数据失败'); }
     finally { setLoading(false); }
-  }, [kvCf]);
+  }, []);
 
   const fetchSchema = useCallback(async () => {
     setSchemaLoading(true);
     try {
       const s = await api.rocksdb.seriesSchema();
       setSchema(s);
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); message.error('加载Schema失败'); }
     finally { setSchemaLoading(false); }
   }, []);
 
@@ -76,8 +73,9 @@ const RocksdbStats: React.FC = () => {
     setCompacting(true);
     try {
       await api.rocksdb.compact(cf);
+      message.success(cf ? `CF ${cf} 压缩完成` : '全部压缩完成');
       await fetchData();
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); message.error('压缩失败'); }
     finally { setCompacting(false); }
   };
 
@@ -92,7 +90,7 @@ const RocksdbStats: React.FC = () => {
     try {
       const result = await api.rocksdb.kvScan(kvCf, kvPrefix || undefined, undefined, kvLimit);
       setKvResult(result);
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); message.error('扫描失败'); setKvResult(null); }
     finally { setKvLoading(false); }
   };
 
@@ -102,7 +100,7 @@ const RocksdbStats: React.FC = () => {
     try {
       const result = await api.rocksdb.kvScan(cf, kvPrefix || undefined, undefined, kvLimit);
       setKvResult(result);
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); message.error('扫描失败'); setKvResult(null); }
     finally { setKvLoading(false); }
   };
 
@@ -111,9 +109,13 @@ const RocksdbStats: React.FC = () => {
     const lastKey = kvResult.entries[kvResult.entries.length - 1].key_hex;
     setKvLoading(true);
     try {
-      const result = await api.rocksdb.kvScan(kvCf, kvPrefix || undefined, lastKey, kvLimit);
+      const result = await api.rocksdb.kvScan(kvCf, kvPrefix || undefined, lastKey, kvLimit + 1);
+      if (result.entries.length > 1 && result.entries[0].key_hex === lastKey) {
+        result.entries = result.entries.slice(1);
+        result.total_scanned = Math.max(0, result.total_scanned - 1);
+      }
       setKvResult(result);
-    } catch (e) { console.error(e); }
+    } catch (e) { console.error(e); message.error('加载下一页失败'); }
     finally { setKvLoading(false); }
   };
 

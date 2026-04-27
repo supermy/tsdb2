@@ -2,15 +2,9 @@ import React, { useEffect, useState, useCallback } from 'react';
 import { Card, Row, Col, Select, Button, Typography, Table, Tag, InputNumber, Space } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { api, useWebSocket, type MetricsSnapshot, type CollectorStatus } from '../api';
+import { fmtBytes } from '../utils';
 
 const { Title, Text } = Typography;
-
-const fmtBytes = (bytes: number): string => {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
-};
 
 const METRIC_OPTIONS = [
   { value: 'cpu_pct', label: 'CPU 使用率 (%)' },
@@ -43,14 +37,14 @@ const DataQuery: React.FC = () => {
     } catch (e) { console.error(e); }
   }, []);
 
-  const fetchTimeseries = useCallback(async () => {
+  const fetchTimeseries = useCallback(async (secs?: number) => {
     setLoading(true);
     try {
-      const ts = await api.metrics.timeseries('default', 'all', rangeSecs);
+      const ts = await api.metrics.timeseries('default', 'all', secs ?? rangeSecs);
       setTimeseries(ts);
     } catch (e) { console.error(e); }
     finally { setLoading(false); }
-  }, [rangeSecs]);
+  }, []);
 
   useEffect(() => { fetchCollectorStatus(); }, [fetchCollectorStatus]);
   useEffect(() => { fetchTimeseries(); }, [fetchTimeseries]);
@@ -161,7 +155,7 @@ const DataQuery: React.FC = () => {
                 min={60} max={3600} value={rangeSecs} onChange={v => setRangeSecs(v || 300)}
                 addonAfter="秒" style={{ width: 130 }}
               />
-              <Button onClick={fetchTimeseries} loading={loading}>刷新</Button>
+              <Button onClick={() => fetchTimeseries()} loading={loading}>刷新</Button>
             </Space>
           }>
             <ResponsiveContainer width="100%" height={300}>

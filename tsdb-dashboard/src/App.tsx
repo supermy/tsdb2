@@ -10,6 +10,7 @@ import Monitoring from './pages/Monitoring';
 import DataQuery from './pages/DataQuery';
 import RocksdbStats from './pages/RocksdbStats';
 import ParquetViewer from './pages/ParquetViewer';
+import IcebergManager from './pages/IcebergManager';
 import SqlConsole from './pages/SqlConsole';
 import DataLifecycle from './pages/DataLifecycle';
 
@@ -27,8 +28,15 @@ const App: React.FC = () => (
           <Route path="data-query" element={<DataQuery />} />
           <Route path="rocksdb" element={<RocksdbStats />} />
           <Route path="parquet" element={<ParquetViewer />} />
+          <Route path="iceberg" element={<IcebergManager />} />
           <Route path="sql" element={<SqlConsole />} />
           <Route path="lifecycle" element={<DataLifecycle />} />
+          <Route path="*" element={
+            <div style={{ textAlign: 'center', padding: 80, color: '#999' }}>
+              <h1 style={{ color: '#fff', fontSize: 48 }}>404</h1>
+              <p>页面未找到</p>
+            </div>
+          } />
         </Route>
       </Routes>
     </BrowserRouter>

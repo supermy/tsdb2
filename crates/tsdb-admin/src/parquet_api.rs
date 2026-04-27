@@ -1,48 +1,51 @@
 use crate::protocol::*;
-use std::path::Path;
+use crate::utils::{parse_partition_dir, validate_path_within_dir};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tsdb_arrow::engine::StorageEngine;
 
 pub struct ParquetApi {
-    engine: Arc<dyn StorageEngine>,
+    parquet_dir: PathBuf,
 }
 
 impl ParquetApi {
-    pub fn new(engine: Arc<dyn StorageEngine>) -> Self {
-        Self { engine }
+    pub fn new(_engine: Arc<dyn StorageEngine>, parquet_dir: PathBuf) -> Self {
+        Self { parquet_dir }
     }
 
     pub fn list_parquet_files(&self) -> Vec<ParquetFileInfo> {
-        let any_ref = self.engine.as_any();
-        let Some(rocksdb_engine) = any_ref.downcast_ref::<tsdb_rocksdb::TsdbRocksDb>() else {
-            return vec![];
-        };
-        let base_dir = rocksdb_engine.base_dir();
-        let archive_dir = base_dir.join("archive");
-
         let mut files = Vec::new();
 
-        if let Ok(entries) = std::fs::read_dir(&archive_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                    if let Some(info) = self.read_parquet_meta(&path) {
-                        files.push(info);
-                    }
-                }
-            }
-        }
+        let warm_dir = self.parquet_dir.join("warm");
+        Self::scan_parquet_dir(&warm_dir, "warm", &mut files);
 
-        let data_dir = base_dir.join("parquet_data");
-        if let Ok(entries) = std::fs::read_dir(&data_dir) {
-            for entry in entries.flatten() {
-                let partition_dir = entry.path();
-                if partition_dir.is_dir() {
+        let cold_dir = self.parquet_dir.join("cold");
+        Self::scan_parquet_dir(&cold_dir, "cold", &mut files);
+
+        let archive_dir = self.parquet_dir.join("archive");
+        Self::scan_parquet_dir(&archive_dir, "archive", &mut files);
+
+        if self.parquet_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&self.parquet_dir) {
+                for entry in entries.flatten() {
+                    let partition_dir = entry.path();
+                    if !partition_dir.is_dir() {
+                        continue;
+                    }
+                    let dir_name = partition_dir
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    if dir_name == "warm" || dir_name == "cold" || dir_name == "archive" {
+                        continue;
+                    }
                     if let Ok(sub_entries) = std::fs::read_dir(&partition_dir) {
                         for sub_entry in sub_entries.flatten() {
-                            let path = sub_entry.path();
-                            if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                                if let Some(info) = self.read_parquet_meta(&path) {
+                            let p = sub_entry.path();
+                            if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                                if let Some(mut info) = Self::read_parquet_meta_internal(&p) {
+                                    info.tier = "unknown".to_string();
                                     files.push(info);
                                 }
                             }
@@ -57,14 +60,21 @@ impl ParquetApi {
     }
 
     pub fn file_detail(&self, path: &str) -> Result<ParquetFileInfo, String> {
+        validate_path_within_dir(path, &self.parquet_dir)?;
         let path = Path::new(path);
         if !path.exists() {
             return Err(format!("File not found: {}", path.display()));
         }
-        self.read_parquet_meta(path).ok_or_else(|| "Failed to read parquet metadata".to_string())
+        let mut info = self
+            .read_parquet_meta(path)
+            .ok_or_else(|| "Failed to read parquet metadata".to_string())?;
+        info.tier = Self::detect_tier_from_path(path);
+        info.measurement = Self::extract_measurement_from_path(path);
+        Ok(info)
     }
 
     pub fn preview(&self, path: &str, limit: usize) -> Result<ParquetPreview, String> {
+        validate_path_within_dir(path, &self.parquet_dir)?;
         let path = Path::new(path);
         if !path.exists() {
             return Err(format!("File not found: {}", path.display()));
@@ -77,7 +87,9 @@ impl ParquetApi {
         let schema = builder.schema();
         let columns: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
 
-        let reader = builder.build().map_err(|e| format!("build reader: {}", e))?;
+        let reader = builder
+            .build()
+            .map_err(|e| format!("build reader: {}", e))?;
 
         let mut rows = Vec::new();
         let mut total_rows = 0usize;
@@ -108,9 +120,109 @@ impl ParquetApi {
         })
     }
 
+    pub fn parquet_paths_for_measurement(&self, measurement: &str) -> Vec<String> {
+        let mut paths = Vec::new();
+
+        for tier in &["warm", "cold"] {
+            let tier_dir = self.parquet_dir.join(tier);
+            if let Ok(entries) = std::fs::read_dir(&tier_dir) {
+                for entry in entries.flatten() {
+                    let partition_dir = entry.path();
+                    if !partition_dir.is_dir() {
+                        continue;
+                    }
+                    let dir_name = partition_dir
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let (m, _) = parse_partition_dir(&dir_name);
+                    if m == measurement {
+                        if let Ok(sub_entries) = std::fs::read_dir(&partition_dir) {
+                            for sub_entry in sub_entries.flatten() {
+                                let p = sub_entry.path();
+                                if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                                    paths.push(p.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        paths
+    }
+
+    fn scan_parquet_dir(dir: &std::path::Path, tier: &str, files: &mut Vec<ParquetFileInfo>) {
+        if !dir.is_dir() {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                        for sub_entry in sub_entries.flatten() {
+                            let p = sub_entry.path();
+                            if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                                if let Some(mut info) = Self::read_parquet_meta_internal(&p) {
+                                    info.tier = tier.to_string();
+                                    info.measurement = Self::extract_measurement_from_path(&p);
+                                    files.push(info);
+                                }
+                            }
+                        }
+                    }
+                } else if path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                    if let Some(mut info) = Self::read_parquet_meta_internal(&path) {
+                        info.tier = tier.to_string();
+                        info.measurement = Self::extract_measurement_from_path(&path);
+                        files.push(info);
+                    }
+                }
+            }
+        }
+    }
+
+    fn detect_tier_from_path(path: &Path) -> String {
+        let path_str = path.to_string_lossy();
+        if path_str.contains("parquet_data/warm/") {
+            return "warm".to_string();
+        }
+        if path_str.contains("parquet_data/cold/") {
+            return "cold".to_string();
+        }
+        if path_str.contains("/archive/") {
+            return "archive".to_string();
+        }
+        "unknown".to_string()
+    }
+
+    fn extract_measurement_from_path(path: &Path) -> String {
+        for ancestor in path.ancestors() {
+            let name = ancestor
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            if name.starts_with("ts_") {
+                let (m, _) = parse_partition_dir(&name);
+                return m;
+            }
+        }
+        String::new()
+    }
+
     fn read_parquet_meta(&self, path: &Path) -> Option<ParquetFileInfo> {
+        Self::read_parquet_meta_internal(path)
+    }
+
+    fn read_parquet_meta_internal(path: &Path) -> Option<ParquetFileInfo> {
         let metadata = std::fs::metadata(path).ok()?;
-        let modified = metadata.modified().ok()
+        let modified = metadata
+            .modified()
+            .ok()
             .map(|t| {
                 let datetime: chrono::DateTime<chrono::Utc> = t.into();
                 datetime.format("%Y-%m-%d %H:%M:%S").to_string()
@@ -118,7 +230,8 @@ impl ParquetApi {
             .unwrap_or_default();
 
         let file = std::fs::File::open(path).ok()?;
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
         let parquet_meta = builder.metadata();
         let file_meta = parquet_meta.file_metadata();
 
@@ -166,10 +279,16 @@ impl ParquetApi {
             columns,
             compression,
             created_by,
+            tier: String::new(),
+            measurement: String::new(),
         })
     }
 
-    fn arrow_value_to_json(batch: &arrow::array::RecordBatch, col_idx: usize, row_idx: usize) -> serde_json::Value {
+    fn arrow_value_to_json(
+        batch: &arrow::array::RecordBatch,
+        col_idx: usize,
+        row_idx: usize,
+    ) -> serde_json::Value {
         let col = batch.column(col_idx);
         if row_idx >= col.len() || col.is_null(row_idx) {
             return serde_json::Value::Null;
@@ -195,14 +314,20 @@ impl ParquetApi {
         if let Some(arr) = col.as_any().downcast_ref::<arrow::array::BooleanArray>() {
             return serde_json::json!(arr.value(row_idx));
         }
-        if let Some(arr) = col.as_any().downcast_ref::<arrow::array::TimestampMicrosecondArray>() {
+        if let Some(arr) = col
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+        {
             let ts = arr.value(row_idx);
             let secs = ts / 1_000_000;
             return serde_json::json!(chrono::DateTime::from_timestamp(secs, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
                 .unwrap_or_else(|| ts.to_string()));
         }
-        if let Some(arr) = col.as_any().downcast_ref::<arrow::array::TimestampSecondArray>() {
+        if let Some(arr) = col
+            .as_any()
+            .downcast_ref::<arrow::array::TimestampSecondArray>()
+        {
             let ts = arr.value(row_idx);
             return serde_json::json!(chrono::DateTime::from_timestamp(ts, 0)
                 .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())

@@ -14,33 +14,33 @@ const Testing: React.FC = () => {
   const [writeLoading, setWriteLoading] = useState(false);
   const [readLoading, setReadLoading] = useState(false);
 
-  const onSql = async (values: any) => {
+  const onSql = async (values: Record<string, unknown>) => {
     setSqlLoading(true);
     try {
-      const result = await api.test.sql(values.service, values.sql);
+      const result = await api.test.sql(String(values.service), String(values.sql));
       setSqlResult(result);
       message.success('SQL 执行完成');
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
     finally { setSqlLoading(false); }
   };
 
-  const onWriteBench = async (values: any) => {
+  const onWriteBench = async (values: Record<string, unknown>) => {
     setWriteLoading(true);
     try {
-      const result = await api.test.writeBench(values.service, values.measurement, values.total_points, values.workers, values.batch_size);
+      const result = await api.test.writeBench(String(values.service), String(values.measurement), Number(values.total_points), Number(values.workers), Number(values.batch_size));
       setWriteResult(result);
       message.success('写入基准测试完成');
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
     finally { setWriteLoading(false); }
   };
 
-  const onReadBench = async (values: any) => {
+  const onReadBench = async (values: Record<string, unknown>) => {
     setReadLoading(true);
     try {
-      const result = await api.test.readBench(values.service, values.measurement, values.queries, values.workers);
+      const result = await api.test.readBench(String(values.service), String(values.measurement), Number(values.queries), Number(values.workers));
       setReadResult(result);
       message.success('读取基准测试完成');
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
     finally { setReadLoading(false); }
   };
 

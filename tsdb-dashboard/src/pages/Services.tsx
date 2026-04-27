@@ -19,8 +19,8 @@ const Services: React.FC = () => {
     try {
       const list = await api.services.list();
       setServices(list);
-    } catch (e: any) {
-      message.error(e.message);
+    } catch (e: unknown) {
+      message.error(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
@@ -33,7 +33,7 @@ const Services: React.FC = () => {
       await api.services.start(name);
       message.success(`${name} 已启动`);
       fetchServices();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleStop = async (name: string) => {
@@ -41,7 +41,7 @@ const Services: React.FC = () => {
       await api.services.stop(name);
       message.success(`${name} 已停止`);
       fetchServices();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleRestart = async (name: string) => {
@@ -49,7 +49,7 @@ const Services: React.FC = () => {
       await api.services.restart(name);
       message.success(`${name} 已重启`);
       fetchServices();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleDelete = async (name: string) => {
@@ -57,7 +57,7 @@ const Services: React.FC = () => {
       await api.services.delete(name);
       message.success(`${name} 已删除`);
       fetchServices();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleCreate = async () => {
@@ -68,7 +68,7 @@ const Services: React.FC = () => {
       setCreateOpen(false);
       form.resetFields();
       fetchServices();
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const handleLogs = async (name: string) => {
@@ -77,7 +77,7 @@ const Services: React.FC = () => {
       setLogs(data);
       setLogsName(name);
       setLogsOpen(true);
-    } catch (e: any) { message.error(e.message); }
+    } catch (e: unknown) { message.error(e instanceof Error ? e.message : String(e)); }
   };
 
   const formatUptime = (secs: number | null) => {
@@ -98,7 +98,7 @@ const Services: React.FC = () => {
     { title: '配置', dataIndex: 'config', key: 'config' },
     { title: 'PID', dataIndex: 'pid', key: 'pid', render: (p: number | null) => p ?? '-' },
     { title: '运行时间', dataIndex: 'uptime_secs', key: 'uptime', render: formatUptime },
-    { title: '操作', key: 'actions', render: (_: any, record: ServiceInfo) => (
+    { title: '操作', key: 'actions', render: (_: unknown, record: ServiceInfo) => (
       <Space>
         {record.status !== 'Running' && (
           <Button type="primary" size="small" icon={<PlayCircleOutlined />} onClick={() => handleStart(record.name)}>启动</Button>

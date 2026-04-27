@@ -58,9 +58,33 @@ impl ArrowStorageEngine {
         let compactor =
             ParquetCompactor::new(partition_manager.clone(), CompactionConfig::default());
 
+        let mut wal_replay_count = 0usize;
+        let mut wal_replay_datapoints: Vec<DataPoint> = Vec::new();
         let wal = if config.wal_enabled {
             let wal_dir = path.join("wal");
+            let _ = std::fs::create_dir_all(&wal_dir);
             let wal_path = wal_dir.join("wal-000001.log");
+
+            if wal_path.exists() {
+                match TsdbWAL::recover(&wal_path) {
+                    Ok(entries) => {
+                        tracing::info!("WAL recovery: found {} entries", entries.len());
+                        for entry in &entries {
+                            if entry.entry_type == WALEntryType::Insert {
+                                if let Ok(dp) = serde_json::from_slice::<DataPoint>(&entry.payload)
+                                {
+                                    wal_replay_datapoints.push(dp);
+                                }
+                            }
+                        }
+                        wal_replay_count = entries.len();
+                    }
+                    Err(e) => {
+                        tracing::warn!("WAL recovery failed: {}", e);
+                    }
+                }
+            }
+
             Some(TsdbWAL::create(&wal_path)?)
         } else {
             None
@@ -78,6 +102,31 @@ impl ArrowStorageEngine {
 
         let query_engine = DataFusionQueryEngine::new(&path);
 
+        if !wal_replay_datapoints.is_empty() {
+            tracing::info!(
+                "WAL replay: re-writing {} datapoints to storage",
+                wal_replay_datapoints.len()
+            );
+            for chunk in wal_replay_datapoints.chunks(1000) {
+                if let Err(e) = async_writer.write_batch(chunk) {
+                    tracing::warn!("WAL replay write_batch failed: {}", e);
+                    break;
+                }
+            }
+            if let Err(e) = async_writer.flush() {
+                tracing::warn!("WAL replay flush failed: {}", e);
+            }
+            tracing::info!(
+                "WAL recovery complete, {} entries replayed",
+                wal_replay_count
+            );
+        } else if wal_replay_count > 0 {
+            tracing::info!(
+                "WAL recovery complete, {} entries found (0 valid datapoints to replay)",
+                wal_replay_count
+            );
+        }
+
         Ok(Self {
             partition_manager,
             reader,
@@ -93,6 +142,13 @@ impl ArrowStorageEngine {
 
     /// 写入单个数据点 (先写 WAL, 再写缓冲区)
     pub fn write(&self, dp: &DataPoint) -> Result<()> {
+        if let Err(e) = dp.validate() {
+            tracing::warn!("invalid datapoint rejected: {}", e);
+            return Err(TsdbStorageArrowError::Storage(format!(
+                "invalid datapoint: {}",
+                e
+            )));
+        }
         if let Some(ref wal) = self.wal {
             let payload = serde_json::to_vec(dp)
                 .map_err(|e| TsdbStorageArrowError::Storage(format!("serialize error: {}", e)))?;
@@ -101,12 +157,24 @@ impl ArrowStorageEngine {
         self.async_writer.write(dp)?;
         self.known_measurements
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|e| {
+                tracing::warn!("Mutex poisoned in write, recovering: {}", e);
+                e.into_inner()
+            })
             .insert(dp.measurement.clone());
         Ok(())
     }
 
     pub fn write_batch(&self, datapoints: &[DataPoint]) -> Result<()> {
+        for dp in datapoints {
+            if let Err(e) = dp.validate() {
+                tracing::warn!("invalid datapoint in batch rejected: {}", e);
+                return Err(TsdbStorageArrowError::Storage(format!(
+                    "invalid datapoint in batch: {}",
+                    e
+                )));
+            }
+        }
         if let Some(ref wal) = self.wal {
             for dp in datapoints {
                 let payload = serde_json::to_vec(dp).map_err(|e| {
@@ -116,7 +184,10 @@ impl ArrowStorageEngine {
             }
         }
         self.async_writer.write_batch(datapoints)?;
-        let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| e.into_inner());
+        let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in write_batch, recovering: {}", e);
+            e.into_inner()
+        });
         for dp in datapoints {
             measurements.insert(dp.measurement.clone());
         }
@@ -204,6 +275,9 @@ impl ArrowStorageEngine {
 
 impl Drop for ArrowStorageEngine {
     fn drop(&mut self) {
+        if let Err(e) = self.async_writer.stop() {
+            tracing::warn!("failed to stop async writer during drop: {}", e);
+        }
         let _ = self.flush();
     }
 }
@@ -241,7 +315,10 @@ impl tsdb_arrow::StorageEngine for ArrowStorageEngine {
     }
 
     fn list_measurements(&self) -> Vec<String> {
-        let measurements = self.known_measurements.lock().unwrap_or_else(|e| e.into_inner());
+        let measurements = self.known_measurements.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in list_measurements, recovering: {}", e);
+            e.into_inner()
+        });
         let mut list: Vec<String> = measurements.iter().cloned().collect();
         list.sort();
         list
@@ -279,7 +356,9 @@ impl tsdb_arrow::StorageEngine for ArrowStorageEngine {
                     .filter(|dps| !dps.is_empty())?
             }
         };
-        Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(&datapoints))
+        Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(
+            &datapoints,
+        ))
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

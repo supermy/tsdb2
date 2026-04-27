@@ -5,9 +5,9 @@ mod tests {
     use tsdb_arrow::engine::StorageEngine;
     use tsdb_arrow::schema::{DataPoint, FieldValue, Tags};
     use tsdb_rocksdb::RocksDbConfig;
+    use tsdb_rocksdb::TsdbRocksDb;
     use tsdb_storage_arrow::config::ArrowStorageConfig;
     use tsdb_storage_arrow::engine::ArrowStorageEngine;
-    use tsdb_rocksdb::TsdbRocksDb;
 
     fn ts_today() -> i64 {
         chrono::Utc::now()
@@ -65,8 +65,12 @@ mod tests {
         let base_ts = ts_today();
         let end_ts = base_ts + 100 * 1_000_000;
 
-        let rocks_result = rocks.read_range("cpu", &Tags::new(), base_ts, end_ts).unwrap();
-        let arrow_result = arrow.read_range("cpu", &Tags::new(), base_ts, end_ts).unwrap();
+        let rocks_result = rocks
+            .read_range("cpu", &Tags::new(), base_ts, end_ts)
+            .unwrap();
+        let arrow_result = arrow
+            .read_range("cpu", &Tags::new(), base_ts, end_ts)
+            .unwrap();
 
         assert!(!rocks_result.is_empty(), "RocksDB should return data");
         assert!(!arrow_result.is_empty(), "Arrow should return data");
@@ -75,7 +79,11 @@ mod tests {
         let mut arrow_ts: Vec<i64> = arrow_result.iter().map(|dp| dp.timestamp).collect();
         rocks_ts.sort();
         arrow_ts.sort();
-        assert_eq!(rocks_ts.len(), arrow_ts.len(), "both engines should return same count");
+        assert_eq!(
+            rocks_ts.len(),
+            arrow_ts.len(),
+            "both engines should return same count"
+        );
     }
 
     #[test]
@@ -95,7 +103,10 @@ mod tests {
 
         let mut tags = Tags::new();
         tags.insert("host".to_string(), dps[5].tags.get("host").unwrap().clone());
-        tags.insert("region".to_string(), dps[5].tags.get("region").unwrap().clone());
+        tags.insert(
+            "region".to_string(),
+            dps[5].tags.get("region").unwrap().clone(),
+        );
 
         let rocks_point = rocks.get_point("cpu", &tags, target_ts).unwrap();
         let arrow_point = arrow.get_point("cpu", &tags, target_ts).unwrap();
@@ -190,8 +201,12 @@ mod tests {
         let base_ts = ts_today();
         let end_ts = base_ts + 10 * 1_000_000;
 
-        let rocks_result = rocks.read_range("cpu", &Tags::new(), base_ts, end_ts).unwrap();
-        let arrow_result = arrow.read_range("cpu", &Tags::new(), base_ts, end_ts).unwrap();
+        let rocks_result = rocks
+            .read_range("cpu", &Tags::new(), base_ts, end_ts)
+            .unwrap();
+        let arrow_result = arrow
+            .read_range("cpu", &Tags::new(), base_ts, end_ts)
+            .unwrap();
 
         assert!(!rocks_result.is_empty());
         assert!(!arrow_result.is_empty());
@@ -213,11 +228,21 @@ mod tests {
         let base_ts = ts_today();
         let end_ts = base_ts + 50 * 1_000_000;
 
-        let rocks_batches = rocks.read_range_arrow("cpu", base_ts, end_ts, None).unwrap();
-        let arrow_batches = arrow.read_range_arrow("cpu", base_ts, end_ts, None).unwrap();
+        let rocks_batches = rocks
+            .read_range_arrow("cpu", base_ts, end_ts, None)
+            .unwrap();
+        let arrow_batches = arrow
+            .read_range_arrow("cpu", base_ts, end_ts, None)
+            .unwrap();
 
-        assert!(!rocks_batches.is_empty(), "RocksDB should return Arrow batches");
-        assert!(!arrow_batches.is_empty(), "Arrow should return Arrow batches");
+        assert!(
+            !rocks_batches.is_empty(),
+            "RocksDB should return Arrow batches"
+        );
+        assert!(
+            !arrow_batches.is_empty(),
+            "Arrow should return Arrow batches"
+        );
 
         let rocks_rows: usize = rocks_batches.iter().map(|b| b.num_rows()).sum();
         let arrow_rows: usize = arrow_batches.iter().map(|b| b.num_rows()).sum();
@@ -246,11 +271,21 @@ mod tests {
         let base_ts = ts_today();
         let end_ts = base_ts + 50 * 1_000_000;
 
-        let rocks_filtered = rocks.read_range("cpu", &filter_tags, base_ts, end_ts).unwrap();
-        let arrow_filtered = arrow.read_range("cpu", &filter_tags, base_ts, end_ts).unwrap();
+        let rocks_filtered = rocks
+            .read_range("cpu", &filter_tags, base_ts, end_ts)
+            .unwrap();
+        let arrow_filtered = arrow
+            .read_range("cpu", &filter_tags, base_ts, end_ts)
+            .unwrap();
 
-        assert!(!rocks_filtered.is_empty(), "RocksDB should return filtered data");
-        assert!(!arrow_filtered.is_empty(), "Arrow should return filtered data");
+        assert!(
+            !rocks_filtered.is_empty(),
+            "RocksDB should return filtered data"
+        );
+        assert!(
+            !arrow_filtered.is_empty(),
+            "Arrow should return filtered data"
+        );
 
         for dp in &rocks_filtered {
             assert_eq!(dp.tags.get("host").unwrap(), "host_000");
