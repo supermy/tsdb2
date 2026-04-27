@@ -29,7 +29,7 @@ tsdb-datafusion = { path = "crates/tsdb-datafusion" }
 tsdb-storage-arrow = { path = "crates/tsdb-storage-arrow" }
 tsdb-test-utils = { path = "crates/tsdb-test-utils" }
 
-arrow = "54"
+arrow = "58"
 arrow-ipc = "54"
 parquet = "54"
 datafusion = "46"
