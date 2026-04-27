@@ -32,7 +32,7 @@ tsdb-test-utils = { path = "crates/tsdb-test-utils" }
 arrow = "54"
 arrow-ipc = "54"
 parquet = "54"
-datafusion = "46"
+datafusion = "53"
 arrow-flight = "54"
 tonic = "0.12"
 prost = "0.13"
