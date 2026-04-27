@@ -68,10 +68,12 @@ pub fn extract_stats_from_metadata(
     date: &str,
     tier: &str,
 ) -> FileStats {
-    let mut ts_min = i64::MAX;
-    let mut ts_max = i64::MIN;
-    let mut th_min = u64::MAX;
-    let mut th_max = u64::MIN;
+    let mut found_ts = false;
+    let mut found_th = false;
+    let mut ts_min = 0i64;
+    let mut ts_max = 0i64;
+    let mut th_min = 0u64;
+    let mut th_max = 0u64;
     let mut total_rows = 0u64;
     let mut tag_values: HashMap<String, ValueStats> = HashMap::new();
 
@@ -90,24 +92,30 @@ pub fn extract_stats_from_metadata(
                     "timestamp" => {
                         if let Some(min_bs) = min_opt {
                             if min_bs.len() == 8 {
-                                ts_min = ts_min.min(i64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8])));
+                                let v = i64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8]));
+                                ts_min = if found_ts { ts_min.min(v) } else { v };
+                                found_ts = true;
                             }
                         }
                         if let Some(max_bs) = max_opt {
                             if max_bs.len() == 8 {
-                                ts_max = ts_max.max(i64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8])));
+                                let v = i64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8]));
+                                ts_max = if found_ts { ts_max.max(v) } else { v };
                             }
                         }
                     }
                     "tags_hash" => {
                         if let Some(min_bs) = min_opt {
                             if min_bs.len() == 8 {
-                                th_min = th_min.min(u64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8])));
+                                let v = u64::from_le_bytes(min_bs.try_into().unwrap_or([0; 8]));
+                                th_min = if found_th { th_min.min(v) } else { v };
+                                found_th = true;
                             }
                         }
                         if let Some(max_bs) = max_opt {
                             if max_bs.len() == 8 {
-                                th_max = th_max.max(u64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8])));
+                                let v = u64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8]));
+                                th_max = if found_th { th_max.max(v) } else { v };
                             }
                         }
                     }
@@ -146,14 +154,6 @@ pub fn extract_stats_from_metadata(
         }
     }
 
-    if ts_min == i64::MAX { ts_min = 0; }
-    if ts_max == i64::MIN { ts_max = 0; }
-    if th_min == u64::MAX { th_min = 0; }
-    if th_max == u64::MIN { th_max = 0; }
-
-    let has_ts_stats = ts_min != 0 || ts_max != 0;
-    let has_th_stats = th_min != 0 || th_max != 0;
-
     let file_size = std::fs::metadata(file_path).map(|m| m.len()).unwrap_or(0);
 
     FileStats {
@@ -163,10 +163,10 @@ pub fn extract_stats_from_metadata(
         tier: tier.to_string(),
         row_count: total_rows,
         size_bytes: file_size,
-        timestamp_min: if has_ts_stats { Some(ts_min) } else { None },
-        timestamp_max: if has_ts_stats { Some(ts_max) } else { None },
-        tags_hash_min: if has_th_stats { Some(th_min) } else { None },
-        tags_hash_max: if has_th_stats { Some(th_max) } else { None },
+        timestamp_min: if found_ts { Some(ts_min) } else { None },
+        timestamp_max: if found_ts { Some(ts_max) } else { None },
+        tags_hash_min: if found_th { Some(th_min) } else { None },
+        tags_hash_max: if found_th { Some(th_max) } else { None },
         tag_values,
     }
 }

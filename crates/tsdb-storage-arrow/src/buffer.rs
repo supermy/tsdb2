@@ -153,10 +153,12 @@ impl AsyncWriteBuffer {
     /// 这保证了 flush 返回时所有数据已持久化。
     pub fn flush(&self) -> Result<usize> {
         Self::do_flush(&self.inner, &self.writer);
-        let _writer_guard = self.writer.lock().unwrap_or_else(|e| {
-            tracing::warn!("Mutex poisoned in flush wait, recovering: {}", e);
-            e.into_inner()
-        });
+        {
+            let _writer_guard = self.writer.lock().unwrap_or_else(|e| {
+                tracing::warn!("Mutex poisoned in flush wait, recovering: {}", e);
+                e.into_inner()
+            });
+        }
         Ok(0)
     }
 

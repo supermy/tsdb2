@@ -216,6 +216,71 @@ impl TsdbParquetWriter {
             self.schema = Some(builder.build());
         }
 
+        let schema = self.schema.clone().unwrap();
+        let needs_update = {
+            let schema_fields: std::collections::HashSet<&str> =
+                schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+            let missing_tags: Vec<String> = dp
+                .tags
+                .keys()
+                .filter(|k| !schema_fields.contains(&format!("tag_{}", k).as_str()))
+                .cloned()
+                .collect();
+            let missing_fields: Vec<(String, FieldValue)> = dp
+                .fields
+                .iter()
+                .filter(|(k, _)| !schema_fields.contains(k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+
+            (!missing_tags.is_empty() || !missing_fields.is_empty())
+                .then_some((missing_tags, missing_fields))
+        };
+
+        if let Some((missing_tags, missing_fields)) = needs_update {
+            let num_new_tags = missing_tags.len();
+            let num_new_fields = missing_fields.len();
+
+            let mut builder = tsdb_arrow::schema::TsdbSchemaBuilder::new(&dp.measurement).compact();
+
+            for field in schema.fields() {
+                let name = field.name();
+                if let Some(tag_key) = name.strip_prefix("tag_") {
+                    builder = builder.with_tag_key(tag_key);
+                } else if name == "tags_hash" || name == "timestamp" {
+                } else if let Some(_fv) = dp.fields.get(name) {
+                    match _fv {
+                        FieldValue::Float(_) => builder = builder.with_float_field(name),
+                        FieldValue::Integer(_) => builder = builder.with_int_field(name),
+                        FieldValue::String(_) => builder = builder.with_string_field(name),
+                        FieldValue::Boolean(_) => builder = builder.with_bool_field(name),
+                    }
+                } else {
+                    builder = builder.with_float_field(name);
+                }
+            }
+
+            for tag_key in &missing_tags {
+                builder = builder.with_tag_key(tag_key);
+            }
+            for (field_name, field_value) in &missing_fields {
+                match field_value {
+                    FieldValue::Float(_) => builder = builder.with_float_field(field_name),
+                    FieldValue::Integer(_) => builder = builder.with_int_field(field_name),
+                    FieldValue::String(_) => builder = builder.with_string_field(field_name),
+                    FieldValue::Boolean(_) => builder = builder.with_bool_field(field_name),
+                }
+            }
+
+            tracing::info!(
+                "schema evolved: added {} tags, {} fields",
+                num_new_tags,
+                num_new_fields
+            );
+            self.schema = Some(builder.build());
+        }
+
         Ok(self.schema.clone().unwrap())
     }
 

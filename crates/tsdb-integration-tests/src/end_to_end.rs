@@ -52,13 +52,15 @@ mod tests {
         let dps = make_devops_datapoints(10, 1);
         assert!(!dps.is_empty());
 
+        let first_ts = dps[0].timestamp;
+        let last_ts = dps.last().unwrap().timestamp;
+
         engine.write_batch(&dps).unwrap();
         engine.flush().unwrap();
 
         let tags = Tags::new();
-        let base_ts = chrono::Utc::now().timestamp_micros();
         let result = engine
-            .read_range("cpu", &tags, base_ts, base_ts + 3_600_000_000)
+            .read_range("cpu", &tags, first_ts, last_ts + 1)
             .unwrap();
 
         assert!(!result.is_empty());

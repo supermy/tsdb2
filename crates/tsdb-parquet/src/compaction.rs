@@ -131,10 +131,20 @@ impl ParquetCompactor {
 
         self.write_compacted(&deduped, &tmp_path, &final_path, CompactionLevel::L1)?;
 
+        let mut delete_errors = Vec::new();
         for path in &l0_files {
             if let Err(e) = std::fs::remove_file(path) {
                 tracing::warn!("failed to remove L0 file {:?}: {}", path, e);
+                delete_errors.push((path.clone(), e.to_string()));
             }
+        }
+        if !delete_errors.is_empty() {
+            tracing::warn!(
+                "compaction L0->L1 completed but {} old files could not be removed; \
+                 new compacted file: {:?}",
+                delete_errors.len(),
+                final_path
+            );
         }
 
         Ok(())
@@ -173,10 +183,20 @@ impl ParquetCompactor {
 
         self.write_compacted(&deduped, &tmp_path, &final_path, CompactionLevel::L2)?;
 
+        let mut delete_errors = Vec::new();
         for path in &l1_files {
             if let Err(e) = std::fs::remove_file(path) {
                 tracing::warn!("failed to remove L1 file {:?}: {}", path, e);
+                delete_errors.push((path.clone(), e.to_string()));
             }
+        }
+        if !delete_errors.is_empty() {
+            tracing::warn!(
+                "compaction L1->L2 completed but {} old files could not be removed; \
+                 new compacted file: {:?}",
+                delete_errors.len(),
+                final_path
+            );
         }
 
         Ok(())

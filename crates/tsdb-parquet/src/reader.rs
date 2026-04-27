@@ -240,8 +240,8 @@ impl TsdbParquetReader {
     pub fn read_all_datapoints(&self, measurement: &str) -> Result<Vec<DataPoint>> {
         self.partition_manager.refresh()?;
 
-        let start = chrono::NaiveDate::MIN;
-        let end = chrono::NaiveDate::MAX;
+        let start = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap_or(chrono::NaiveDate::MIN);
+        let end = chrono::Utc::now().date_naive() + chrono::Duration::days(1);
         let partitions = self.partition_manager.get_partitions_in_range(start, end);
 
         let mut all_points = Vec::new();
