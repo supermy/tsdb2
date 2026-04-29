@@ -53,6 +53,6 @@ tsdb-rocksdb = { path = "crates/tsdb-rocksdb" }
 tsdb-iceberg = { path = "crates/tsdb-iceberg" }
 tsdb-admin = { path = "crates/tsdb-admin" }
 tsdb-flight = { path = "crates/tsdb-flight" }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 tower = "0.5"
