@@ -43,7 +43,6 @@ const DataLifecycle: React.FC = () => {
   const [demoting, setDemoting] = useState(false);
 
   const isArrowEngine = status?.engine_type === 'arrow';
-  const primaryTier = isArrowEngine ? 'active' : 'hot';
   const primaryTierLabel = isArrowEngine ? '⚡ 活跃数据' : '🔥 热数据';
   const primaryEngineName = isArrowEngine ? 'Arrow/Parquet' : 'RocksDB';
   const primaryStorageDesc = isArrowEngine ? 'Parquet 列式存储' : 'RocksDB LSM-Tree';

@@ -318,8 +318,8 @@ impl ParquetApi {
                 }
             }
         }
-        if found_tier.is_some() {
-            return found_tier.unwrap();
+        if let Some(tier) = found_tier {
+            return tier;
         }
         for ancestor in path.ancestors() {
             if let Some(name) = ancestor.file_name() {
@@ -505,7 +505,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_real_parquet(dir: &std::path::Path, name: &str) -> PathBuf {
-        use arrow::array::{Int64Array, StringArray, Float64Array, TimestampMicrosecondArray};
+        use arrow::array::{StringArray, Float64Array, TimestampMicrosecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;

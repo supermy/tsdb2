@@ -2,7 +2,7 @@ FROM rust:1.85.0 AS builder
 WORKDIR /app
 
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p crates/tsdb-cli/src && echo "fn main() {}" > crates/tsdb-cli/src/main.rs
+RUN mkdir -p crates/tsdb-cli/src && echo "fn main() {}" > crates/tsdb-cli/src/main.rs && echo "fn main() {}" > crates/tsdb-cli/src/server_main.rs
 RUN mkdir -p crates/tsdb-rocksdb/src && echo "" > crates/tsdb-rocksdb/src/lib.rs
 RUN mkdir -p crates/tsdb-arrow/src && echo "" > crates/tsdb-arrow/src/lib.rs
 RUN mkdir -p crates/tsdb-parquet/src && echo "" > crates/tsdb-parquet/src/lib.rs
@@ -32,10 +32,10 @@ COPY crates/tsdb-stress-rocksdb/Cargo.toml crates/tsdb-stress-rocksdb/
 COPY crates/tsdb-test-utils/Cargo.toml crates/tsdb-test-utils/
 COPY crates/tsdb-bench/Cargo.toml crates/tsdb-bench/
 
-RUN cargo build --release -p tsdb-cli 2>/dev/null || true
+RUN cargo build --release -p tsdb-cli --bin tsdb-cli --bin tsdb-server 2>/dev/null || true
 
 COPY . .
-RUN cargo build --release -p tsdb-cli
+RUN cargo build --release -p tsdb-cli --bin tsdb-cli --bin tsdb-server
 
 FROM node:20-slim AS frontend
 WORKDIR /app/tsdb-dashboard
@@ -48,9 +48,13 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update && apt-get install -y ca-certificates libgcc-s1 tzdata curl && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -s /bin/bash tsdb
 COPY --from=builder /app/target/release/tsdb-cli /usr/local/bin/tsdb-cli
-COPY --from=frontend /app/tsdb-dashboard/dist /usr/local/bin/dashboard
+COPY --from=builder /app/target/release/tsdb-server /usr/local/bin/tsdb-server
+COPY --from=frontend /app/tsdb-dashboard/dist /usr/local/share/tsdb2/dashboard
+COPY configs/ /usr/local/share/tsdb2/configs/
+RUN mkdir -p /data /data_parquet /logs && chown -R tsdb:tsdb /data /data_parquet /logs
 USER tsdb
 EXPOSE 50051 8080 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:8080/api/health || exit 1
-ENTRYPOINT ["tsdb-cli"]
+  CMD curl -f http://localhost:3000/api/services || exit 1
+ENTRYPOINT ["tsdb-server"]
+CMD ["--data-dir", "/data", "--parquet-dir", "/data_parquet", "--log-dir", "/logs", "--host", "0.0.0.0"]

@@ -7,6 +7,10 @@ edition.workspace = true
 name = "tsdb-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "tsdb-server"
+path = "src/server_main.rs"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 assert_cmd = "2"
@@ -26,11 +30,13 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 toml = "0.8"
 tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["registry", "fmt", "env-filter"] }
+tracing-appender = "0.2"
 chrono = { workspace = true }
 tokio = { workspace = true }
 anyhow = "1"
 csv = "1"
+libc = "0.2"
 datafusion = { workspace = true }
 arrow = { workspace = true }
 arrow-flight = { workspace = true }

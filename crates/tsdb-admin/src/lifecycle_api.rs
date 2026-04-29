@@ -23,7 +23,6 @@ impl LifecycleApi {
     pub fn new_for_test(parquet_dir: PathBuf, data_dir: PathBuf) -> Self {
         use tsdb_arrow::engine::EngineResult;
         use tsdb_arrow::schema::{DataPoint, Tags};
-        use arrow::datatypes::SchemaRef;
 
         struct MockEngine;
 
@@ -728,7 +727,7 @@ impl LifecycleApi {
                         continue;
                     }
                     let file_name = src.file_name().unwrap_or_default();
-                    let dst = warm_measurement_dir.join(&file_name);
+                    let dst = warm_measurement_dir.join(file_name);
                     if Self::safe_move_file(&src, &dst).is_ok() {
                         moved += 1;
                     }
@@ -1150,10 +1149,8 @@ impl LifecycleApi {
                                 }
                             }
                             let _ = std::fs::remove_dir(&src_dir);
-                        } else if src.extension().and_then(|e| e.to_str()) == Some("parquet") {
-                            if Self::safe_move_file(&src, &dst).is_ok() {
-                                moved += 1;
-                            }
+                        } else if src.extension().and_then(|e| e.to_str()) == Some("parquet") && Self::safe_move_file(&src, &dst).is_ok() {
+                            moved += 1;
                         }
                     }
                 }

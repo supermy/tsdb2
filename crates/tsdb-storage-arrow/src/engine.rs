@@ -171,7 +171,7 @@ impl ArrowStorageEngine {
             );
         }
 
-        if engine.wal.as_ref().map_or(false, |_w| wal_replay_count > 0) {
+        if engine.wal.as_ref().is_some_and(|_w| wal_replay_count > 0) {
             if let Some(ref w) = engine.wal {
                 if let Err(e) = w.truncate() {
                     tracing::warn!("WAL truncate after recovery failed: {}", e);

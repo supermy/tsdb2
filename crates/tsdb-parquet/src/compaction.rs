@@ -364,10 +364,8 @@ impl ParquetCompactor {
 
         let mut removed = Vec::new();
         for partition in partitions {
-            if partition.date < cutoff {
-                if self.partition_manager.remove_partition(partition.date).is_ok() {
-                    removed.push(partition.date);
-                }
+            if partition.date < cutoff && self.partition_manager.remove_partition(partition.date).is_ok() {
+                removed.push(partition.date);
             }
         }
 
