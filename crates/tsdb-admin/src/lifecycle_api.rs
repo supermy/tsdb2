@@ -303,11 +303,12 @@ impl LifecycleApi {
     }
 
     fn status_arrow_from_fs(&self) -> LifecycleStatus {
+        let arrow_base = &self.data_dir;
         let mut active_cfs = Vec::new();
         let mut total_active = 0u64;
         let today = chrono::Local::now().date_naive();
 
-        if let Ok(entries) = std::fs::read_dir(&self.data_dir) {
+        if let Ok(entries) = std::fs::read_dir(arrow_base) {
             for entry in entries.flatten() {
                 let partition_dir = entry.path();
                 if !partition_dir.is_dir() {
@@ -395,7 +396,7 @@ impl LifecycleApi {
 
         let mut warm_cfs = Vec::new();
         let mut total_warm = 0u64;
-        let warm_dir = self.parquet_dir.join("warm");
+        let warm_dir = arrow_base.join("warm");
         if let Ok(entries) = std::fs::read_dir(&warm_dir) {
             for entry in entries.flatten() {
                 let partition_dir = entry.path();
@@ -452,7 +453,7 @@ impl LifecycleApi {
 
         let mut cold_cfs = Vec::new();
         let mut total_cold = 0u64;
-        let cold_dir = self.parquet_dir.join("cold");
+        let cold_dir = arrow_base.join("cold");
         if let Ok(entries) = std::fs::read_dir(&cold_dir) {
             for entry in entries.flatten() {
                 let partition_dir = entry.path();
@@ -507,7 +508,7 @@ impl LifecycleApi {
             }
         }
 
-        let archive_dir = self.parquet_dir.join("archive");
+        let archive_dir = arrow_base.join("archive");
         let mut archive_files = Vec::new();
         let mut total_archive = 0u64;
         if archive_dir.is_dir() {
@@ -516,7 +517,7 @@ impl LifecycleApi {
 
         let mut parquet_partitions = Vec::new();
         for tier in &["warm", "cold", "archive"] {
-            let tier_dir = self.parquet_dir.join(tier);
+            let tier_dir = arrow_base.join(tier);
             if let Ok(entries) = std::fs::read_dir(&tier_dir) {
                 for entry in entries.flatten() {
                     let partition_dir = entry.path();
@@ -669,7 +670,7 @@ impl LifecycleApi {
     }
 
     fn demote_to_warm_arrow(&self, cf_names: &[String]) -> Result<Vec<String>, String> {
-        let warm_dir = self.parquet_dir.join("warm");
+        let warm_dir = self.data_dir.join("warm");
         std::fs::create_dir_all(&warm_dir).map_err(|e| format!("create warm dir: {}", e))?;
 
         let mut demoted = Vec::new();
@@ -884,8 +885,8 @@ impl LifecycleApi {
     }
 
     fn demote_to_cold_arrow(&self, cf_names: &[String]) -> Result<Vec<String>, String> {
-        let warm_dir = self.parquet_dir.join("warm");
-        let cold_dir = self.parquet_dir.join("cold");
+        let warm_dir = self.data_dir.join("warm");
+        let cold_dir = self.data_dir.join("cold");
         std::fs::create_dir_all(&cold_dir).map_err(|e| format!("create cold dir: {}", e))?;
 
         let mut demoted = Vec::new();
@@ -1100,7 +1101,7 @@ impl LifecycleApi {
     }
 
     fn archive_arrow(&self, older_than_days: u64) -> Result<Vec<String>, String> {
-        let archive_dir = self.parquet_dir.join("archive");
+        let archive_dir = self.data_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).map_err(|e| format!("create archive dir: {}", e))?;
 
         let today = chrono::Local::now().date_naive();
@@ -1173,7 +1174,7 @@ impl LifecycleApi {
             }
         }
 
-        let warm_dir = self.parquet_dir.join("warm");
+        let warm_dir = self.data_dir.join("warm");
         if let Ok(entries) = std::fs::read_dir(&warm_dir) {
             for entry in entries.flatten() {
                 let partition_dir = entry.path();
@@ -1241,7 +1242,7 @@ impl LifecycleApi {
             }
         }
 
-        let cold_dir = self.parquet_dir.join("cold");
+        let cold_dir = self.data_dir.join("cold");
         if let Ok(entries) = std::fs::read_dir(&cold_dir) {
             for entry in entries.flatten() {
                 let partition_dir = entry.path();
@@ -1461,7 +1462,7 @@ mod tests {
         let parquet_dir = tmp.path().join("parquet");
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::create_dir_all(&parquet_dir).unwrap();
-        (data_dir, parquet_dir)
+        (data_dir.clone(), parquet_dir)
     }
 
     fn create_arrow_active_partition(data_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
@@ -1473,16 +1474,16 @@ mod tests {
         }
     }
 
-    fn create_warm_partition(parquet_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
-        let warm_dir = parquet_dir.join("warm").join(format!("data_{}", date)).join(measurement);
+    fn create_warm_partition(base_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
+        let warm_dir = base_dir.join("warm").join(format!("data_{}", date)).join(measurement);
         std::fs::create_dir_all(&warm_dir).unwrap();
         for i in 0..file_count {
             create_fake_parquet(&warm_dir, &format!("warm_{}.parquet", i));
         }
     }
 
-    fn create_cold_partition(parquet_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
-        let cold_dir = parquet_dir.join("cold").join(format!("data_{}", date)).join(measurement);
+    fn create_cold_partition(base_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
+        let cold_dir = base_dir.join("cold").join(format!("data_{}", date)).join(measurement);
         std::fs::create_dir_all(&cold_dir).unwrap();
         for i in 0..file_count {
             create_fake_parquet(&cold_dir, &format!("cold_{}.parquet", i));
@@ -1620,13 +1621,13 @@ mod tests {
 
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 3);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir.clone());
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("3 files hot → warm"));
 
-        let warm_cpu_dir = parquet_dir.join("warm").join("data_20260401").join("cpu");
+        let warm_cpu_dir = data_dir.join("warm").join("data_20260401").join("cpu");
         assert!(dir_exists(&warm_cpu_dir));
         assert_eq!(count_parquet_in_dir(&warm_cpu_dir), 3);
 
@@ -1662,7 +1663,7 @@ mod tests {
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 2);
         create_arrow_active_partition(&data_dir, "20260401", "mem", 3);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.demote_to_warm_arrow(&[
             "cpu_20260401".to_string(),
             "mem_20260401".to_string(),
@@ -1670,8 +1671,8 @@ mod tests {
 
         assert_eq!(result.len(), 2);
 
-        let warm_cpu = parquet_dir.join("warm/data_20260401/cpu");
-        let warm_mem = parquet_dir.join("warm/data_20260401/mem");
+        let warm_cpu = data_dir.join("warm/data_20260401/cpu");
+        let warm_mem = data_dir.join("warm/data_20260401/mem");
         assert_eq!(count_parquet_in_dir(&warm_cpu), 2);
         assert_eq!(count_parquet_in_dir(&warm_mem), 3);
     }
@@ -1681,18 +1682,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
-        create_warm_partition(&parquet_dir, "20260301", "cpu", 2);
+        create_warm_partition(&data_dir, "20260301", "cpu", 2);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.demote_to_cold_arrow(&["cpu_20260301".to_string()]).unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("warm → cold"));
 
-        let cold_cpu = parquet_dir.join("cold/data_20260301/cpu");
+        let cold_cpu = data_dir.join("cold/data_20260301/cpu");
         assert_eq!(count_parquet_in_dir(&cold_cpu), 2);
 
-        let warm_cpu = parquet_dir.join("warm/data_20260301/cpu");
+        let warm_cpu = data_dir.join("warm/data_20260301/cpu");
         assert!(!dir_exists(&warm_cpu));
     }
 
@@ -1703,15 +1704,15 @@ mod tests {
 
         create_arrow_active_partition(&data_dir, "20260301", "cpu", 2);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.demote_to_cold_arrow(&["cpu_20260301".to_string()]).unwrap();
 
         assert_eq!(result.len(), 1);
 
-        let cold_cpu = parquet_dir.join("cold/data_20260301/cpu");
+        let cold_cpu = data_dir.join("cold/data_20260301/cpu");
         assert_eq!(count_parquet_in_dir(&cold_cpu), 2);
 
-        let warm_cpu = parquet_dir.join("warm/data_20260301/cpu");
+        let warm_cpu = data_dir.join("warm/data_20260301/cpu");
         assert!(!dir_exists(&warm_cpu));
     }
 
@@ -1735,12 +1736,12 @@ mod tests {
             .to_string();
         create_arrow_active_partition(&data_dir, &old_date, "cpu", 2);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir.clone());
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.archive_arrow(30).unwrap();
 
         assert_eq!(result.len(), 1);
 
-        let archive_dir = parquet_dir.join("archive").join(format!("data_{}", old_date));
+        let archive_dir = data_dir.join("archive").join(format!("data_{}", old_date));
         assert!(dir_exists(&archive_dir));
 
         let hot_partition = data_dir.join(format!("data_{}", old_date));
@@ -1769,14 +1770,14 @@ mod tests {
         let old_date = (chrono::Local::now().date_naive() - chrono::Duration::days(60))
             .format("%Y%m%d")
             .to_string();
-        create_cold_partition(&parquet_dir, &old_date, "cpu", 2);
+        create_cold_partition(&data_dir, &old_date, "cpu", 2);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.archive_arrow(30).unwrap();
 
         assert_eq!(result.len(), 1);
 
-        let cold_dir = parquet_dir.join("cold").join(format!("data_{}", old_date));
+        let cold_dir = data_dir.join("cold").join(format!("data_{}", old_date));
         assert!(!dir_exists(&cold_dir));
     }
 
@@ -1787,10 +1788,10 @@ mod tests {
 
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 1);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let _ = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
 
-        let marker = parquet_dir.join("warm/data_20260401/cpu/.demote_marker");
+        let marker = data_dir.join("warm/data_20260401/cpu/.demote_marker");
         assert!(!marker.exists(), "demote marker should be cleaned up after successful demote");
     }
 
@@ -1814,10 +1815,10 @@ mod tests {
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 2);
-        create_warm_partition(&parquet_dir, "20260315", "mem", 1);
-        create_cold_partition(&parquet_dir, "20260301", "disk", 1);
+        create_warm_partition(&data_dir, "20260315", "mem", 1);
+        create_cold_partition(&data_dir, "20260301", "disk", 1);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
         let status = api.status_arrow_from_fs();
 
         assert_eq!(status.engine_type, "arrow");
@@ -1834,11 +1835,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
-        let archive_dir = parquet_dir.join("archive").join("data_20260201").join("cpu");
+        let archive_dir = data_dir.join("archive").join("data_20260201").join("cpu");
         std::fs::create_dir_all(&archive_dir).unwrap();
         create_fake_parquet(&archive_dir, "archived_0.parquet");
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
         let status = api.status_arrow_from_fs();
 
         assert_eq!(status.engine_type, "arrow");
@@ -1852,12 +1853,12 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
-        let warm_measurement = parquet_dir.join("warm/data_20260401/cpu");
+        let warm_measurement = data_dir.join("warm/data_20260401/cpu");
         std::fs::create_dir_all(&warm_measurement).unwrap();
         create_fake_parquet(&warm_measurement, "part_0.parquet");
         std::fs::write(warm_measurement.join(".demote_marker"), "demoting_to_warm").unwrap();
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
         let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
 
         assert!(!result.is_empty(), "should report crash recovery");
@@ -1870,15 +1871,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
-        let warm_measurement = parquet_dir.join("warm/data_20260401/cpu");
+        let warm_measurement = data_dir.join("warm/data_20260401/cpu");
         std::fs::create_dir_all(&warm_measurement).unwrap();
         create_fake_parquet(&warm_measurement, "part_0.parquet");
 
-        let cold_measurement = parquet_dir.join("cold/data_20260401/cpu");
+        let cold_measurement = data_dir.join("cold/data_20260401/cpu");
         std::fs::create_dir_all(&cold_measurement).unwrap();
         std::fs::write(cold_measurement.join(".demote_cold_marker"), "demoting_to_cold").unwrap();
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
         let result = api.demote_to_cold_arrow(&["cpu_20260401".to_string()]).unwrap();
 
         assert!(!result.is_empty(), "should report crash recovery");
@@ -1922,18 +1923,18 @@ mod tests {
         let old_date = (chrono::Utc::now().date_naive() - chrono::Duration::days(90))
             .format("%Y%m%d")
             .to_string();
-        create_warm_partition(&parquet_dir, &old_date, "cpu", 2);
+        create_warm_partition(&data_dir, &old_date, "cpu", 2);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.archive_arrow(30).unwrap();
 
         assert!(!result.is_empty(), "should archive warm data");
         assert!(result[0].contains("warm"), "should indicate warm → archive");
 
-        let warm_measurement = parquet_dir.join("warm").join(format!("data_{}", old_date)).join("cpu");
+        let warm_measurement = data_dir.join("warm").join(format!("data_{}", old_date)).join("cpu");
         assert!(!warm_measurement.exists(), "warm source should be removed");
 
-        let archive_measurement = parquet_dir.join("archive").join(format!("data_{}", old_date)).join("cpu");
+        let archive_measurement = data_dir.join("archive").join(format!("data_{}", old_date)).join("cpu");
         assert!(archive_measurement.is_dir(), "archive destination should exist");
         assert_eq!(count_parquet_in_dir(&archive_measurement), 2);
     }
@@ -1946,9 +1947,9 @@ mod tests {
         let recent_date = (chrono::Utc::now().date_naive() - chrono::Duration::days(5))
             .format("%Y%m%d")
             .to_string();
-        create_cold_partition(&parquet_dir, &recent_date, "cpu", 1);
+        create_cold_partition(&data_dir, &recent_date, "cpu", 1);
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
         let result = api.archive_arrow(30).unwrap();
 
         assert!(result.is_empty(), "should not archive recent data");
@@ -1981,11 +1982,11 @@ mod tests {
         std::fs::write(partition_dir.join("readme.txt"), b"not parquet").unwrap();
         std::fs::write(partition_dir.join(".demote_marker"), "stale").unwrap();
 
-        let api = LifecycleApi::new_for_test(parquet_dir.clone(), data_dir);
+        let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
 
         assert!(!result.is_empty());
-        let warm_measurement = parquet_dir.join("warm/data_20260401/cpu");
+        let warm_measurement = data_dir.join("warm/data_20260401/cpu");
         assert_eq!(count_parquet_in_dir(&warm_measurement), 1, "only parquet files should be moved");
         assert!(!warm_measurement.join("readme.txt").exists(), "non-parquet files should not be moved");
     }

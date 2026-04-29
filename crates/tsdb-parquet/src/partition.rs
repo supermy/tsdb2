@@ -10,7 +10,6 @@ pub const CF_PREFIX: &str = "data_";
 pub const METADATA_DIR: &str = "metadata";
 pub const DEFAULT_HOT_DAYS: u64 = 7;
 pub const DEFAULT_RETENTION_DAYS: u64 = 30;
-pub const TIER_HOT: &str = "hot";
 pub const TIER_ACTIVE: &str = "active";
 pub const TIER_WARM: &str = "warm";
 pub const TIER_COLD: &str = "cold";
