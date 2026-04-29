@@ -8,6 +8,7 @@ const { Title, Text } = Typography;
 const tierColor = (tier: string) => {
   switch (tier) {
     case 'hot': return '#ff4d4f';
+    case 'active': return '#722ed1';
     case 'warm': return '#faad14';
     case 'cold': return '#1890ff';
     default: return '#999';
@@ -17,6 +18,7 @@ const tierColor = (tier: string) => {
 const tierLabel = (tier: string) => {
   switch (tier) {
     case 'hot': return '🔥 热数据';
+    case 'active': return '⚡ 活跃数据';
     case 'warm': return '🌤️ 温数据';
     case 'cold': return '❄️ 冷数据';
     default: return tier;
@@ -39,6 +41,14 @@ const DataLifecycle: React.FC = () => {
   const [selectedHotCfs, setSelectedHotCfs] = useState<string[]>([]);
   const [selectedWarmCfs, setSelectedWarmCfs] = useState<string[]>([]);
   const [demoting, setDemoting] = useState(false);
+
+  const isArrowEngine = status?.engine_type === 'arrow';
+  const primaryTier = isArrowEngine ? 'active' : 'hot';
+  const primaryTierLabel = isArrowEngine ? '⚡ 活跃数据' : '🔥 热数据';
+  const primaryEngineName = isArrowEngine ? 'Arrow/Parquet' : 'RocksDB';
+  const primaryStorageDesc = isArrowEngine ? 'Parquet 列式存储' : 'RocksDB LSM-Tree';
+  const primaryFeatureDesc = isArrowEngine ? '列式存储 · 高速写入' : 'LSM-Tree · 高速读写';
+  const demoteWarmDesc = isArrowEngine ? '移动 Parquet 到 warm 目录' : '导出为 Parquet (SNAPPY) 并删除 CF';
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -72,7 +82,7 @@ const DataLifecycle: React.FC = () => {
 
   const handleDemoteToWarm = async () => {
     if (selectedHotCfs.length === 0) {
-      message.warning('请先选择要降级的热数据');
+      message.warning(isArrowEngine ? '请先选择要降级的活跃数据' : '请先选择要降级的热数据');
       return;
     }
     setDemoting(true);
@@ -81,7 +91,7 @@ const DataLifecycle: React.FC = () => {
       Modal.success({
         title: '降级为温数据完成',
         content: result.demoted.length > 0
-          ? `已降级 ${result.demoted.length} 个分区:\n${result.demoted.join('\n')}\n\n操作: 导出 Parquet + 从 RocksDB 删除 CF`
+          ? `已降级 ${result.demoted.length} 个分区:\n${result.demoted.join('\n')}\n\n操作: ${demoteWarmDesc}`
           : '没有需要降级的数据',
       });
       setSelectedHotCfs([]);
@@ -115,9 +125,9 @@ const DataLifecycle: React.FC = () => {
     finally { setDemoting(false); }
   };
 
-  const makeHotColumns = () => [
+  const makePrimaryColumns = () => [
     Table.SELECTION_COLUMN,
-    { title: 'CF 名称', dataIndex: 'cf_name', key: 'cf', width: 220,
+    { title: isArrowEngine ? '分区名称' : 'CF 名称', dataIndex: 'cf_name', key: 'cf', width: 220,
       render: (v: string) => <Text copyable style={{ fontSize: 12, fontFamily: 'monospace' }}>{v}</Text>
     },
     { title: 'Measurement', dataIndex: 'measurement', key: 'measurement', width: 130,
@@ -125,11 +135,14 @@ const DataLifecycle: React.FC = () => {
     },
     { title: '日期', dataIndex: 'date', key: 'date', width: 90 },
     { title: '年龄(天)', dataIndex: 'age_days', key: 'age', width: 70 },
-    { title: 'SST 大小', dataIndex: 'sst_size', key: 'sst', width: 90,
+    { title: isArrowEngine ? '数据大小' : 'SST 大小', dataIndex: 'sst_size', key: 'sst', width: 90,
       render: (v: number) => fmtBytes(v)
     },
-    { title: '键数', dataIndex: 'num_keys', key: 'keys', width: 80,
+    { title: isArrowEngine ? '行数' : '键数', dataIndex: 'num_keys', key: 'keys', width: 80,
       render: (v: number) => v.toLocaleString()
+    },
+    { title: '存储', key: 'storage', width: 120,
+      render: (_: unknown, record: DataTierInfo) => <Tag color={tierColor(record.tier)}>{storageLabel(record.storage, record.tier)}</Tag>
     },
     { title: '可降级', key: 'demote_eligible', width: 100,
       render: (_: unknown, record: DataTierInfo) => {
@@ -148,7 +161,7 @@ const DataLifecycle: React.FC = () => {
         return (
           <Space size={4}>
             {record.demote_eligible === 'warm' && (
-              <Popconfirm title={`确定将 ${record.cf_name} 降级为温数据？数据将从 RocksDB 导出为 Parquet (SNAPPY) 并删除 CF`}
+              <Popconfirm title={`确定将 ${record.cf_name} 降级为温数据？${demoteWarmDesc}`}
                 onConfirm={() => api.lifecycle.demoteToWarm([record.cf_name])
                   .then(() => { message.success('降级为温数据成功'); fetchData(); })
                   .catch((e: unknown) => message.error(`降级失败: ${e instanceof Error ? e.message : String(e)}`))}>
@@ -156,7 +169,7 @@ const DataLifecycle: React.FC = () => {
               </Popconfirm>
             )}
             {record.demote_eligible === 'cold' && (
-              <Popconfirm title={`确定将 ${record.cf_name} 降级为冷数据？数据将从 RocksDB 导出为 Parquet (ZSTD) 并删除 CF`}
+              <Popconfirm title={`确定将 ${record.cf_name} 降级为冷数据？${isArrowEngine ? '移动 Parquet 到 cold 目录' : '导出为 Parquet (ZSTD) 并删除 CF'}`}
                 onConfirm={() => api.lifecycle.demoteToCold([record.cf_name])
                   .then(() => { message.success('降级为冷数据成功'); fetchData(); })
                   .catch((e: unknown) => message.error(`降级失败: ${e instanceof Error ? e.message : String(e)}`))}>
@@ -234,10 +247,11 @@ const DataLifecycle: React.FC = () => {
   ];
 
   const total = (status?.total_hot_bytes || 0) + (status?.total_warm_bytes || 0) + (status?.total_cold_bytes || 0) + (status?.total_archive_bytes || 0);
-  const hotPct = total > 0 ? (status?.total_hot_bytes || 0) / total * 100 : 0;
+  const primaryPct = total > 0 ? (status?.total_hot_bytes || 0) / total * 100 : 0;
   const warmPct = total > 0 ? (status?.total_warm_bytes || 0) / total * 100 : 0;
   const coldPct = total > 0 ? (status?.total_cold_bytes || 0) / total * 100 : 0;
   const archivePct = total > 0 ? (status?.total_archive_bytes || 0) / total * 100 : 0;
+  const primaryColor = isArrowEngine ? '#722ed1' : '#ff4d4f';
 
   return (
     <Spin spinning={loading}>
@@ -258,9 +272,9 @@ const DataLifecycle: React.FC = () => {
             <Card title="数据分布概览" size="small" style={{ marginBottom: 16 }}>
               <Row gutter={[16, 16]}>
                 <Col span={6}>
-                  <Statistic title="🔥 热数据 (RocksDB)" value={fmtBytes(status.total_hot_bytes)} valueStyle={{ color: '#ff4d4f', fontSize: 18 }} />
-                  <Progress percent={Math.round(hotPct)} strokeColor="#ff4d4f" size="small" />
-                  <Text type="secondary" style={{ fontSize: 12 }}>{status.hot_cfs.length} 个 CF · RocksDB</Text>
+                  <Statistic title={`${primaryTierLabel} (${primaryEngineName})`} value={fmtBytes(status.total_hot_bytes)} valueStyle={{ color: primaryColor, fontSize: 18 }} />
+                  <Progress percent={Math.round(primaryPct)} strokeColor={primaryColor} size="small" />
+                  <Text type="secondary" style={{ fontSize: 12 }}>{status.hot_cfs.length} 个{isArrowEngine ? '分区' : ' CF'} · {primaryEngineName}</Text>
                 </Col>
                 <Col span={6}>
                   <Statistic title="🌤️ 温数据 (Parquet SNAPPY)" value={fmtBytes(status.total_warm_bytes)} valueStyle={{ color: '#faad14', fontSize: 18 }} />
@@ -280,7 +294,7 @@ const DataLifecycle: React.FC = () => {
               </Row>
               <div style={{ marginTop: 16 }}>
                 <div style={{ display: 'flex', height: 24, borderRadius: 4, overflow: 'hidden' }}>
-                  {hotPct > 0 && <div style={{ width: `${hotPct}%`, background: '#ff4d4f' }} title={`热 (RocksDB) ${fmtBytes(status.total_hot_bytes)}`} />}
+                  {primaryPct > 0 && <div style={{ width: `${primaryPct}%`, background: primaryColor }} title={`${primaryTierLabel} ${fmtBytes(status.total_hot_bytes)}`} />}
                   {warmPct > 0 && <div style={{ width: `${warmPct}%`, background: '#faad14' }} title={`温 (Parquet) ${fmtBytes(status.total_warm_bytes)}`} />}
                   {coldPct > 0 && <div style={{ width: `${coldPct}%`, background: '#1890ff' }} title={`冷 (Parquet) ${fmtBytes(status.total_cold_bytes)}`} />}
                   {archivePct > 0 && <div style={{ width: `${archivePct}%`, background: '#52c41a' }} title={`归档 ${fmtBytes(status.total_archive_bytes)}`} />}
@@ -291,12 +305,13 @@ const DataLifecycle: React.FC = () => {
             <Card title="数据层级过渡规则 & 手动操作" size="small" style={{ marginBottom: 16 }}>
               <Row gutter={[16, 16]}>
                 <Col span={8} style={{ textAlign: 'center' }}>
-                  <div style={{ padding: 16, background: '#2a1215', borderRadius: 8 }}>
-                    <div style={{ fontSize: 24 }}>🔥</div>
-                    <div style={{ color: '#ff4d4f', fontWeight: 'bold', fontSize: 16 }}>热数据</div>
-                    <div style={{ color: '#aaa', fontSize: 12 }}>RocksDB 中所有 CF</div>
-                    <div style={{ color: '#ff4d4f', fontSize: 12, fontWeight: 'bold' }}>RocksDB</div>
-                    <div style={{ color: '#aaa', fontSize: 12 }}>LSM-Tree · 高速读写</div>
+                  <div style={{ padding: 16, background: isArrowEngine ? '#1a0a2e' : '#2a1215', borderRadius: 8 }}>
+                    <div style={{ fontSize: 24 }}>{isArrowEngine ? '⚡' : '🔥'}</div>
+                    <div style={{ color: primaryColor, fontWeight: 'bold', fontSize: 16 }}>{isArrowEngine ? '活跃数据' : '热数据'}</div>
+                    <div style={{ color: '#aaa', fontSize: 12 }}>{isArrowEngine ? 'Arrow 引擎活跃分区' : 'RocksDB 中所有 CF'}</div>
+                    <div style={{ color: primaryColor, fontSize: 12, fontWeight: 'bold' }}>{primaryEngineName}</div>
+                    <div style={{ color: '#aaa', fontSize: 12 }}>{primaryStorageDesc}</div>
+                    <div style={{ color: '#aaa', fontSize: 12 }}>{primaryFeatureDesc}</div>
                     <div style={{ marginTop: 8, fontSize: 11, color: '#999' }}>age &gt; 3天 可降级为温数据</div>
                     <div style={{ marginTop: 4 }}>
                       <Button size="small" type="primary" style={{ background: '#faad14', borderColor: '#faad14' }}
@@ -341,7 +356,7 @@ const DataLifecycle: React.FC = () => {
 
             <Card title={
               <Space>
-                <span>🔥 热数据 — RocksDB ({status.hot_cfs.length})</span>
+                <span>{primaryTierLabel} — {primaryEngineName} ({status.hot_cfs.length})</span>
                 {selectedHotCfs.length > 0 && (
                   <Button size="small" type="primary" style={{ background: '#faad14', borderColor: '#faad14' }}
                     loading={demoting} onClick={handleDemoteToWarm}>
@@ -352,7 +367,7 @@ const DataLifecycle: React.FC = () => {
             } size="small" style={{ marginBottom: 16 }}>
               <Table
                 dataSource={status.hot_cfs}
-                columns={makeHotColumns()}
+                columns={makePrimaryColumns()}
                 rowKey="cf_name"
                 size="small"
                 pagination={{ pageSize: 10 }}

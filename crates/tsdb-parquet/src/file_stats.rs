@@ -42,16 +42,25 @@ pub fn extract_file_stats(
     })?;
 
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let arrow_schema = builder.schema();
+    let tag_columns: std::collections::HashSet<String> = arrow_schema
+        .fields()
+        .iter()
+        .filter(|f| tsdb_arrow::schema::is_tag_field(f))
+        .map(|f| f.name().clone())
+        .collect();
     let metadata = builder.metadata();
-    let stats = extract_stats_from_metadata(metadata, file_path, measurement, date, tier);
+    let stats = extract_stats_from_metadata(metadata, file_path, measurement, date, tier, &tag_columns);
     Ok(stats)
 }
 
 pub fn write_stats_file(parquet_path: &Path, stats: &FileStats) -> Result<PathBuf> {
     let stats_path = parquet_path.with_extension("stats.json");
+    let tmp_path = parquet_path.with_extension("stats.json.tmp");
     let json = serde_json::to_string_pretty(stats)
         .map_err(TsdbParquetError::Serde)?;
-    std::fs::write(&stats_path, json)?;
+    std::fs::write(&tmp_path, &json)?;
+    std::fs::rename(&tmp_path, &stats_path)?;
     Ok(stats_path)
 }
 
@@ -67,6 +76,7 @@ pub fn extract_stats_from_metadata(
     measurement: &str,
     date: &str,
     tier: &str,
+    tag_columns: &std::collections::HashSet<String>,
 ) -> FileStats {
     let mut found_ts = false;
     let mut found_th = false;
@@ -101,6 +111,7 @@ pub fn extract_stats_from_metadata(
                             if max_bs.len() == 8 {
                                 let v = i64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8]));
                                 ts_max = if found_ts { ts_max.max(v) } else { v };
+                                found_ts = true;
                             }
                         }
                     }
@@ -116,11 +127,13 @@ pub fn extract_stats_from_metadata(
                             if max_bs.len() == 8 {
                                 let v = u64::from_le_bytes(max_bs.try_into().unwrap_or([0; 8]));
                                 th_max = if found_th { th_max.max(v) } else { v };
+                                found_th = true;
                             }
                         }
                     }
                     _ => {
-                        if let Some(tag_key) = col_path.strip_prefix("tag_") {
+                        if tag_columns.contains(&col_path) {
+                            let tag_key = col_path.strip_prefix("tag_").unwrap_or(&col_path);
                             let min_val = min_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
                             let max_val = max_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
                             let null_count = stats.null_count_opt().unwrap_or(0);
@@ -184,7 +197,7 @@ mod tests {
     fn test_extract_file_stats() {
         let dir = TempDir::new().unwrap();
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
 
         let dps: Vec<DataPoint> = (0..100)
             .map(|i| {

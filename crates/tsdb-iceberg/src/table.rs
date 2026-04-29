@@ -88,7 +88,7 @@ impl IcebergTable {
             None => Vec::new(),
         };
 
-        let seq = self.catalog.next_sequence_number();
+        let seq = self.catalog.next_sequence_number()?;
         let snapshot_id = generate_snapshot_id();
         let parent_snapshot_id = if self.metadata.current_snapshot_id >= 0 {
             Some(self.metadata.current_snapshot_id)
@@ -242,7 +242,7 @@ impl IcebergTable {
             .catalog
             .load_manifest_list(&self.name, target.snapshot_id)?;
 
-        let seq = self.catalog.next_sequence_number();
+        let seq = self.catalog.next_sequence_number()?;
         let new_snapshot_id = generate_snapshot_id();
 
         let mut new_snap = Snapshot::new_replace(
@@ -363,7 +363,7 @@ impl IcebergTable {
             compacted_files.push(new_data_file);
         }
 
-        let seq = self.catalog.next_sequence_number();
+        let seq = self.catalog.next_sequence_number()?;
         let new_snapshot_id = generate_snapshot_id();
         let manifest_id = generate_manifest_id();
 
@@ -467,7 +467,12 @@ impl IcebergTable {
         }
 
         for snap_id in &to_remove {
-            let _ = self.catalog.delete_snapshot_data(&self.name, *snap_id);
+            if let Err(e) = self.catalog.delete_snapshot_data(&self.name, *snap_id) {
+                tracing::warn!(
+                    "failed to delete snapshot data for snapshot {}: {}",
+                    snap_id, e
+                );
+            }
         }
 
         let mut new_meta = self.metadata.clone();
@@ -621,6 +626,7 @@ impl IcebergTable {
                                 FieldValue::Integer(i) => serde_json::json!(*i),
                                 FieldValue::String(s) => serde_json::json!(s),
                                 FieldValue::Boolean(b) => serde_json::json!(*b),
+                                FieldValue::Null => serde_json::Value::Null,
                             })
                             .unwrap_or(serde_json::Value::Null)
                     }
@@ -647,7 +653,7 @@ impl IcebergTable {
         let partition_spec = self.metadata.current_partition_spec();
         let partition_path = partition_spec.partition_path(partition_data);
 
-        let data_dir = self.catalog.data_dir(&self.name);
+        let data_dir = self.catalog.data_dir(&self.name)?;
         let dir = if partition_path.is_empty() {
             data_dir
         } else {
@@ -693,7 +699,7 @@ impl IcebergTable {
         let partition_spec = self.metadata.current_partition_spec();
         let partition_path = partition_spec.partition_path(partition_data);
 
-        let data_dir = self.catalog.data_dir(&self.name);
+        let data_dir = self.catalog.data_dir(&self.name)?;
         let dir = if partition_path.is_empty() {
             data_dir
         } else {
@@ -1015,7 +1021,8 @@ mod tests {
         table
             .update_schema(vec![crate::schema::SchemaChange::DeleteField { field_id }])
             .unwrap();
-        assert!(table.schema().field_by_name("usage").is_none());
+        let deleted = table.schema().field_by_name("usage").unwrap();
+        assert_eq!(deleted.field_type, crate::schema::IcebergType::Deleted);
     }
 
     #[test]

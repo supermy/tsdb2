@@ -290,7 +290,7 @@ mod tests {
         use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 
         let pm = PartitionManager::new(parquet_dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "iot_sensor");
         writer.write_batch(&rocks_result).unwrap();
         writer.flush_all().unwrap();
 

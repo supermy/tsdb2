@@ -210,6 +210,7 @@ export interface SqlResult {
 }
 
 export interface LifecycleStatus {
+  engine_type: string;
   hot_cfs: DataTierInfo[];
   warm_cfs: DataTierInfo[];
   cold_cfs: DataTierInfo[];

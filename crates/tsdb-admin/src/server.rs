@@ -32,6 +32,7 @@ pub struct AdminServer {
     lifecycle_api: Arc<LifecycleApi>,
     iceberg_api: Arc<Option<IcebergApi>>,
     parquet_dir: PathBuf,
+    data_dir: PathBuf,
     rep_url: String,
     pub_url: String,
     shutdown: Arc<tokio::sync::watch::Sender<bool>>,
@@ -53,9 +54,10 @@ impl AdminServer {
         iceberg_dir: Option<PathBuf>,
     ) -> Self {
         let service_mgr = ServiceManager::new(base_dir.as_ref());
-        let config_mgr = ConfigManager::new(base_dir);
+        let data_dir_path = base_dir.as_ref().to_path_buf();
+        let config_mgr = ConfigManager::new(&data_dir_path);
         let metrics = MetricsCollector::new(engine.clone());
-        let parquet_api = ParquetApi::new(engine.clone(), parquet_dir.as_ref().to_path_buf());
+        let parquet_api = ParquetApi::new(engine.clone(), parquet_dir.as_ref().to_path_buf(), data_dir_path.clone());
         let iceberg_catalog = match iceberg_dir {
             Some(ref dir) => match tsdb_iceberg::IcebergCatalog::open(dir) {
                 Ok(catalog) => {
@@ -84,7 +86,7 @@ impl AdminServer {
             parquet_dir.as_ref().to_path_buf(),
             iceberg_catalog.clone(),
         );
-        let lifecycle_api = LifecycleApi::new(engine.clone(), parquet_dir.as_ref().to_path_buf());
+        let lifecycle_api = LifecycleApi::new(engine.clone(), parquet_dir.as_ref().to_path_buf(), data_dir_path.clone());
         let (shutdown, _) = tokio::sync::watch::channel(false);
 
         Self {
@@ -97,6 +99,7 @@ impl AdminServer {
             lifecycle_api: Arc::new(lifecycle_api),
             iceberg_api: Arc::new(iceberg_api),
             parquet_dir: parquet_dir.as_ref().to_path_buf(),
+            data_dir: data_dir_path,
             rep_url: format!("tcp://{}:{}", host, admin_port),
             pub_url: format!("tcp://{}:{}", host, admin_port + 1),
             shutdown: Arc::new(shutdown),
@@ -151,8 +154,14 @@ impl BoundAdminServer {
         let service_mgr = self.inner.service_mgr.clone();
         let mut shutdown_rx = self.inner.shutdown.subscribe();
 
+        let engine_type = if self.inner.engine.as_any().downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>().is_some() {
+            "arrow"
+        } else {
+            "rocksdb"
+        };
+
         service_mgr
-            .ensure_default_service("default", 50051, "default", "./data", "rocksdb")
+            .ensure_default_service("default", 50051, "default", "./data", engine_type)
             .await;
 
         let engine_for_writer = self.inner.engine.clone();
@@ -286,6 +295,7 @@ impl AdminServer {
         let lifecycle_api = self.lifecycle_api.clone();
         let iceberg_api = self.iceberg_api.clone();
         let parquet_dir = self.parquet_dir.clone();
+        let data_dir = self.data_dir.clone();
 
         Arc::new(move |req| {
             let service_mgr = service_mgr.clone();
@@ -297,6 +307,7 @@ impl AdminServer {
             let lifecycle_api = lifecycle_api.clone();
             let iceberg_api = iceberg_api.clone();
             let parquet_dir = parquet_dir.clone();
+            let data_dir = data_dir.clone();
 
             Box::pin(async move {
                 match req {
@@ -430,7 +441,7 @@ impl AdminServer {
                     }
 
                     AdminRequest::TestSql { service: _, sql } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone());
+                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner.run_sql(&sql).await {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
@@ -445,7 +456,7 @@ impl AdminServer {
                         workers,
                         batch_size,
                     } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone());
+                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner
                             .run_write_bench(&measurement, total_points, workers, batch_size)
                             .await
@@ -462,7 +473,7 @@ impl AdminServer {
                         queries,
                         workers,
                     } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone());
+                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner.run_read_bench(&measurement, queries, workers).await {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
@@ -475,7 +486,7 @@ impl AdminServer {
                         points_per_series,
                         skip_auto_demote,
                     } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone());
+                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner
                             .generate_business_data(&scenario, points_per_series, skip_auto_demote)
                             .await

@@ -13,7 +13,7 @@ fn bench_write_batch(c: &mut Criterion) {
             b.iter(|| {
                 let dir = tempfile::tempdir().unwrap();
                 let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-                let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+                let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
                 writer.write_batch(black_box(&dps)).unwrap();
                 writer.flush_all().unwrap();
             });
@@ -25,7 +25,7 @@ fn bench_write_batch(c: &mut Criterion) {
 fn bench_write_single(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-    let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+    let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
     let dps = make_simple_datapoints(1000);
 
     c.bench_function("write_single_1000", |b| {

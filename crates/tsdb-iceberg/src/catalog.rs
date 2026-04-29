@@ -75,7 +75,10 @@ impl TableMetadata {
             .iter()
             .find(|s| s.schema_id == self.current_schema_id)
             .or_else(|| self.schemas.last())
-            .expect("table metadata must contain at least one schema")
+            .unwrap_or_else(|| {
+                static EMPTY: std::sync::OnceLock<Schema> = std::sync::OnceLock::new();
+                EMPTY.get_or_init(|| Schema::new(0, Vec::new()))
+            })
     }
 
     pub fn current_partition_spec(&self) -> &PartitionSpec {
@@ -83,7 +86,10 @@ impl TableMetadata {
             .iter()
             .find(|ps| ps.spec_id == self.default_spec_id)
             .or_else(|| self.partition_specs.last())
-            .expect("table metadata must contain at least one partition spec")
+            .unwrap_or_else(|| {
+                static EMPTY: std::sync::OnceLock<PartitionSpec> = std::sync::OnceLock::new();
+                EMPTY.get_or_init(|| PartitionSpec::unpartitioned(0))
+            })
     }
 
     pub fn current_snapshot(&self) -> Option<&Snapshot> {
@@ -138,7 +144,9 @@ impl IcebergCatalog {
         let db = DB::open_cf_descriptors(&opts, &base_dir, cf_descriptors)?;
 
         let seq_counter = {
-            let seq_cf = db.cf_handle(SEQ_CF).expect("seq cf must exist");
+            let seq_cf = db.cf_handle(SEQ_CF).ok_or_else(|| {
+                IcebergError::Catalog("seq column family not found".to_string())
+            })?;
             let saved: u64 = db
                 .get_cf(&seq_cf, b"seq_counter")
                 .ok()
@@ -168,6 +176,8 @@ impl IcebergCatalog {
             return Err(IcebergError::TableAlreadyExists(name.to_string()));
         }
 
+        Self::validate_table_name(name)?;
+
         let table_dir = self.base_dir.join("data").join(name);
         std::fs::create_dir_all(&table_dir)?;
 
@@ -193,6 +203,7 @@ impl IcebergCatalog {
         batch.put_cf(&self.cf(REFS_CF)?, ref_key(name, "main"), &ref_json);
 
         self.db.write(batch)?;
+
         Ok(())
     }
 
@@ -222,6 +233,14 @@ impl IcebergCatalog {
         }
 
         self.db.write(batch)?;
+
+        let table_dir = self.base_dir.join("data").join(name);
+        if table_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&table_dir) {
+                tracing::warn!("failed to remove table data directory {}: {}", table_dir.display(), e);
+            }
+        }
+
         Ok(())
     }
 
@@ -251,7 +270,9 @@ impl IcebergCatalog {
             return Err(IcebergError::TableAlreadyExists(new_name.to_string()));
         }
 
-        let meta = self.load_metadata(old_name)?;
+        let mut meta = self.load_metadata(old_name)?;
+        let new_table_dir = self.base_dir.join("data").join(new_name);
+        meta.location = new_table_dir.to_string_lossy().to_string();
         let meta_json = serde_json::to_vec(&meta)?;
 
         let mut batch = WriteBatch::default();
@@ -279,6 +300,18 @@ impl IcebergCatalog {
         }
 
         self.db.write(batch)?;
+
+        let old_table_dir = self.base_dir.join("data").join(old_name);
+        let new_table_dir = self.base_dir.join("data").join(new_name);
+        if old_table_dir.exists() && !new_table_dir.exists() {
+            if let Err(e) = std::fs::rename(&old_table_dir, &new_table_dir) {
+                tracing::warn!(
+                    "failed to rename table data directory {:?} -> {:?}: {}",
+                    old_table_dir, new_table_dir, e
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -306,13 +339,16 @@ impl IcebergCatalog {
         Ok(())
     }
 
-    pub fn next_sequence_number(&self) -> u64 {
+    pub fn next_sequence_number(&self) -> Result<u64> {
         let seq = self.seq_counter.fetch_add(1, Ordering::SeqCst) + 1;
-        if let Ok(seq_cf) = self.cf(SEQ_CF) {
-            let val = serde_json::to_vec(&seq).unwrap_or_default();
-            let _ = self.db.put_cf(&seq_cf, b"seq_counter", &val);
-        }
-        seq
+        let seq_cf = self.cf(SEQ_CF)?;
+        let val = serde_json::to_vec(&seq).map_err(|e| {
+            IcebergError::Catalog(format!("failed to serialize sequence number: {}", e))
+        })?;
+        self.db.put_cf(&seq_cf, b"seq_counter", &val).map_err(|e| {
+            IcebergError::Catalog(format!("failed to persist sequence number: {}", e))
+        })?;
+        Ok(seq)
     }
 
     pub fn save_snapshot(&self, table_name: &str, snapshot: &Snapshot) -> Result<()> {
@@ -463,8 +499,31 @@ impl IcebergCatalog {
         &self.base_dir
     }
 
-    pub fn data_dir(&self, table_name: &str) -> PathBuf {
-        self.base_dir.join("data").join(table_name)
+    pub fn data_dir(&self, table_name: &str) -> Result<PathBuf> {
+        Self::validate_table_name(table_name)?;
+        Ok(self.base_dir.join("data").join(table_name))
+    }
+
+    fn validate_table_name(name: &str) -> Result<()> {
+        if name.is_empty() {
+            return Err(IcebergError::Catalog("table name cannot be empty".into()));
+        }
+        if name.contains("..") || name.contains('/') || name.contains('\\') {
+            return Err(IcebergError::Catalog(format!(
+                "table name contains invalid characters: {}",
+                name
+            )));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return Err(IcebergError::Catalog(format!(
+                "table name must be alphanumeric, dash, underscore, or dot only: {}",
+                name
+            )));
+        }
+        Ok(())
     }
 
     pub fn cf(&self, name: &str) -> Result<Arc<BoundColumnFamily<'_>>> {
@@ -675,9 +734,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let catalog = IcebergCatalog::open(dir.path()).unwrap();
 
-        let seq1 = catalog.next_sequence_number();
-        let seq2 = catalog.next_sequence_number();
-        let seq3 = catalog.next_sequence_number();
+        let seq1 = catalog.next_sequence_number().unwrap();
+        let seq2 = catalog.next_sequence_number().unwrap();
+        let seq3 = catalog.next_sequence_number().unwrap();
 
         assert!(seq1 < seq2);
         assert!(seq2 < seq3);
@@ -742,6 +801,64 @@ mod tests {
         assert!(catalog.base_dir().exists());
         assert!(catalog
             .data_dir("test_table")
+            .unwrap()
             .starts_with(catalog.base_dir()));
+    }
+
+    #[test]
+    fn test_drop_table_removes_data_directory() {
+        let dir = TempDir::new().unwrap();
+        let catalog = IcebergCatalog::open(dir.path()).unwrap();
+
+        let schema = make_test_schema();
+        let spec = PartitionSpec::unpartitioned(0);
+        catalog.create_table("cpu", schema, spec).unwrap();
+
+        let data_dir = catalog.data_dir("cpu").unwrap();
+        assert!(data_dir.exists(), "data directory should exist after create_table");
+
+        catalog.drop_table("cpu").unwrap();
+        assert!(!data_dir.exists(), "data directory should be deleted after drop_table");
+    }
+
+    #[test]
+    fn test_rename_table_updates_location() {
+        let dir = TempDir::new().unwrap();
+        let catalog = IcebergCatalog::open(dir.path()).unwrap();
+
+        let schema = make_test_schema();
+        let spec = PartitionSpec::unpartitioned(0);
+        catalog.create_table("cpu", schema, spec).unwrap();
+
+        catalog.rename_table("cpu", "memory").unwrap();
+
+        let meta = catalog.load_table("memory").unwrap();
+        assert!(
+            meta.location.contains("memory"),
+            "location should be updated to new table name, got: {}",
+            meta.location
+        );
+        assert!(
+            !meta.location.contains("cpu"),
+            "location should not contain old table name, got: {}",
+            meta.location
+        );
+    }
+
+    #[test]
+    fn test_next_sequence_number_persisted() {
+        let dir = TempDir::new().unwrap();
+
+        let seq2 = {
+            let catalog = IcebergCatalog::open(dir.path()).unwrap();
+            let seq1 = catalog.next_sequence_number().unwrap();
+            let seq2 = catalog.next_sequence_number().unwrap();
+            assert!(seq2 > seq1, "sequence numbers should be monotonically increasing");
+            seq2
+        };
+
+        let catalog2 = IcebergCatalog::open(dir.path()).unwrap();
+        let seq3 = catalog2.next_sequence_number().unwrap();
+        assert!(seq3 > seq2, "sequence should persist across catalog reopen, got seq2={} seq3={}", seq2, seq3);
     }
 }

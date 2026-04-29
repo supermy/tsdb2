@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use tsdb_arrow::schema::{DataPoint, Fields, Tags};
 
 struct LastCacheEntry {
@@ -8,8 +8,10 @@ struct LastCacheEntry {
     tags: Tags,
 }
 
+type MeasurementCache = Arc<RwLock<HashMap<String, LastCacheEntry>>>;
+
 pub struct LastCache {
-    cache: RwLock<HashMap<String, HashMap<String, LastCacheEntry>>>,
+    cache: RwLock<HashMap<String, MeasurementCache>>,
     max_series_per_measurement: usize,
 }
 
@@ -23,9 +25,22 @@ impl LastCache {
 
     pub fn update(&self, dp: &DataPoint) {
         let series_key = dp.series_key();
-        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
 
-        let measurement_cache = cache.entry(dp.measurement.clone()).or_default();
+        let measurement_lock = {
+            let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(m_lock) = cache.get(&dp.measurement) {
+                m_lock.clone()
+            } else {
+                drop(cache);
+                let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+                cache
+                    .entry(dp.measurement.clone())
+                    .or_insert_with(|| Arc::new(RwLock::new(HashMap::new())))
+                    .clone()
+            }
+        };
+
+        let mut measurement_cache = measurement_lock.write().unwrap_or_else(|e| e.into_inner());
 
         let should_insert = match measurement_cache.get(&series_key) {
             Some(existing) => dp.timestamp >= existing.timestamp,
@@ -56,14 +71,69 @@ impl LastCache {
     }
 
     pub fn update_batch(&self, datapoints: &[DataPoint]) {
+        let mut by_measurement: std::collections::HashMap<&str, Vec<&DataPoint>> =
+            std::collections::HashMap::new();
         for dp in datapoints {
-            self.update(dp);
+            by_measurement
+                .entry(&dp.measurement)
+                .or_default()
+                .push(dp);
+        }
+
+        for (measurement, dps) in by_measurement {
+            let measurement_lock = {
+                let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(m_lock) = cache.get(measurement) {
+                    m_lock.clone()
+                } else {
+                    drop(cache);
+                    let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
+                    cache
+                        .entry(measurement.to_string())
+                        .or_insert_with(|| Arc::new(RwLock::new(HashMap::new())))
+                        .clone()
+                }
+            };
+
+            let mut measurement_cache =
+                measurement_lock.write().unwrap_or_else(|e| e.into_inner());
+            for dp in dps {
+                let series_key = dp.series_key();
+
+                let should_insert = match measurement_cache.get(&series_key) {
+                    Some(existing) => dp.timestamp >= existing.timestamp,
+                    None => true,
+                };
+
+                if should_insert {
+                    if measurement_cache.len() >= self.max_series_per_measurement
+                        && !measurement_cache.contains_key(&series_key)
+                    {
+                        if let Some(oldest_key) = measurement_cache
+                            .iter()
+                            .min_by_key(|(_, v)| v.timestamp)
+                            .map(|(k, _)| k.clone())
+                        {
+                            measurement_cache.remove(&oldest_key);
+                        }
+                    }
+                    measurement_cache.insert(
+                        series_key,
+                        LastCacheEntry {
+                            timestamp: dp.timestamp,
+                            fields: dp.fields.clone(),
+                            tags: dp.tags.clone(),
+                        },
+                    );
+                }
+            }
         }
     }
 
     pub fn get_last(&self, measurement: &str, tags: &Tags) -> Option<DataPoint> {
         let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
-        let measurement_cache = cache.get(measurement)?;
+        let m_lock = cache.get(measurement)?;
+        let measurement_cache = m_lock.read().unwrap_or_else(|e| e.into_inner());
 
         if tags.is_empty() {
             let latest = measurement_cache.values().max_by_key(|v| v.timestamp)?;
@@ -93,9 +163,10 @@ impl LastCache {
 
     pub fn get_all_last(&self, measurement: &str) -> Vec<DataPoint> {
         let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
-        let Some(measurement_cache) = cache.get(measurement) else {
+        let Some(m_lock) = cache.get(measurement) else {
             return Vec::new();
         };
+        let measurement_cache = m_lock.read().unwrap_or_else(|e| e.into_inner());
         measurement_cache
             .values()
             .map(|entry| DataPoint {
@@ -113,8 +184,9 @@ impl LastCache {
     }
 
     pub fn invalidate_series(&self, measurement: &str, tags: &Tags) {
-        let mut cache = self.cache.write().unwrap_or_else(|e| e.into_inner());
-        if let Some(measurement_cache) = cache.get_mut(measurement) {
+        let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
+        if let Some(m_lock) = cache.get(measurement) {
+            let mut measurement_cache = m_lock.write().unwrap_or_else(|e| e.into_inner());
             let temp_dp = DataPoint {
                 measurement: measurement.to_string(),
                 tags: tags.clone(),
@@ -128,7 +200,13 @@ impl LastCache {
 
     pub fn series_count(&self, measurement: &str) -> usize {
         let cache = self.cache.read().unwrap_or_else(|e| e.into_inner());
-        cache.get(measurement).map(|m| m.len()).unwrap_or(0)
+        cache
+            .get(measurement)
+            .map(|m_lock| {
+                let m = m_lock.read().unwrap_or_else(|e| e.into_inner());
+                m.len()
+            })
+            .unwrap_or(0)
     }
 
     pub fn measurement_count(&self) -> usize {

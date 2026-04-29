@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Card, Row, Col, Statistic, Tag, Typography, Select, Spin, Progress } from 'antd';
+import { Card, Row, Col, Statistic, Tag, Typography, Select, Spin, Progress, message } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 import { api, useWebSocket, type HealthStatus, type MetricsSnapshot, type Alert } from '../api';
 import { fmtBytes } from '../utils';
@@ -35,7 +35,9 @@ const Monitoring: React.FC = () => {
     api.services.list().then(list => {
       const opts = list.map(s => ({ value: s.name, label: s.name }));
       if (opts.length > 0) setServices(opts);
-    }).catch(() => {});
+    }).catch(e => {
+      message.warning(e instanceof Error ? e.message : '加载服务列表失败');
+    });
   }, []);
 
   useEffect(() => {
@@ -55,7 +57,9 @@ const Monitoring: React.FC = () => {
       setHealth(h);
       setAlerts(a);
       setTimeseries(ts);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '加载监控数据失败');
+    }
     finally { setLoading(false); }
   }, [service]);
 

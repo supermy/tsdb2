@@ -70,6 +70,8 @@ pub enum IcebergType {
         value_required: bool,
         value: Box<IcebergType>,
     },
+    #[serde(rename = "deleted")]
+    Deleted,
 }
 
 impl Schema {
@@ -136,6 +138,7 @@ impl Schema {
                 tsdb_arrow::schema::FieldValue::Integer(_) => IcebergType::Long,
                 tsdb_arrow::schema::FieldValue::String(_) => IcebergType::String,
                 tsdb_arrow::schema::FieldValue::Boolean(_) => IcebergType::Boolean,
+                tsdb_arrow::schema::FieldValue::Null => IcebergType::String,
             };
             iceberg_fields.push(Field {
                 id: col_id,
@@ -226,6 +229,7 @@ fn iceberg_type_to_arrow(itype: &IcebergType) -> Result<DataType> {
                 false,
             ))
         }
+        IcebergType::Deleted => Ok(DataType::Null),
     }
 }
 
@@ -280,7 +284,9 @@ impl Schema {
                 });
             }
             SchemaChange::DeleteField { field_id } => {
-                new_fields.retain(|f| f.id != field_id);
+                if let Some(f) = new_fields.iter_mut().find(|f| f.id == field_id) {
+                    f.field_type = IcebergType::Deleted;
+                }
             }
             SchemaChange::RenameField { field_id, new_name } => {
                 if let Some(f) = new_fields.iter_mut().find(|f| f.id == field_id) {
@@ -441,8 +447,9 @@ mod tests {
         let new = schema
             .apply_change(SchemaChange::DeleteField { field_id: 2 })
             .unwrap();
-        assert_eq!(new.fields.len(), 3);
-        assert!(new.field_by_name("tag_host").is_none());
+        assert_eq!(new.fields.len(), 4);
+        let deleted_field = new.field_by_id(2).unwrap();
+        assert_eq!(deleted_field.field_type, IcebergType::Deleted);
     }
 
     #[test]

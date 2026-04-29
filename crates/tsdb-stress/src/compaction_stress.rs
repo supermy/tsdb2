@@ -24,6 +24,7 @@ mod tests {
                 max_buffer_rows: 100,
                 ..Default::default()
             },
+            "cpu",
         );
 
         let total_points = 5000;

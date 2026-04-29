@@ -91,7 +91,18 @@ impl ScalarUDFImpl for TimeBucketFunc {
             .downcast_ref::<Int64Array>()
             .ok_or_else(|| DataFusionError::Execution("second argument must be Int64".into()))?;
 
+        if bucket_size.is_empty() {
+            return Err(DataFusionError::Execution(
+                "time_bucket: bucket_size array is empty".into(),
+            ));
+        }
+
         let bucket = bucket_size.value(0);
+        if bucket == 0 {
+            return Err(DataFusionError::Execution(
+                "time_bucket: bucket_size must not be zero".into(),
+            ));
+        }
         let mut builder = TimestampMicrosecondBuilder::new();
 
         for i in 0..timestamps.len() {

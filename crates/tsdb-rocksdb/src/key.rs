@@ -41,7 +41,7 @@ impl TsdbKey {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::with_capacity(KEY_SIZE);
         buf.extend_from_slice(&self.tags_hash.to_be_bytes());
-        buf.extend_from_slice(&self.timestamp.to_be_bytes());
+        buf.extend_from_slice(&(self.timestamp ^ i64::MIN).to_be_bytes());
         buf
     }
 
@@ -60,13 +60,13 @@ impl TsdbKey {
         let tags_hash = u64::from_be_bytes(
             data[..TAGS_HASH_SIZE]
                 .try_into()
-                .map_err(|_| TsdbRocksDbError::InvalidKey("tags_hash parse".into()))?,
+                .map_err(|e| TsdbRocksDbError::InvalidKey(format!("tags_hash parse: {}", e)))?,
         );
         let timestamp = i64::from_be_bytes(
             data[TAGS_HASH_SIZE..KEY_SIZE]
                 .try_into()
-                .map_err(|_| TsdbRocksDbError::InvalidKey("timestamp parse".into()))?,
-        );
+                .map_err(|e| TsdbRocksDbError::InvalidKey(format!("timestamp parse: {}", e)))?,
+        ) ^ i64::MIN;
         Ok(Self {
             tags_hash,
             timestamp,
@@ -79,27 +79,7 @@ impl TsdbKey {
     }
 }
 
-/// 计算标签集合的哈希值
-///
-/// 使用 FxHash 对排序后的 key-value 对依次哈希,
-/// 保证: 1) 确定性 (相同输入必定相同输出)
-///       2) 顺序无关 (插入顺序不影响哈希结果)
-///       3) 高性能 (FxHash 比 SipHash 快约 2x)
-pub fn compute_tags_hash(tags: &tsdb_arrow::schema::Tags) -> u64 {
-    use std::collections::BTreeMap;
-    use std::hash::{Hash, Hasher};
-
-    let mut sorted: BTreeMap<&str, &str> = BTreeMap::new();
-    for (k, v) in tags.iter() {
-        sorted.insert(k.as_str(), v.as_str());
-    }
-    let mut hasher = fxhash::FxHasher::default();
-    for (k, v) in &sorted {
-        k.hash(&mut hasher);
-        v.hash(&mut hasher);
-    }
-    hasher.finish()
-}
+pub use tsdb_arrow::converter::compute_tags_hash;
 
 #[cfg(test)]
 mod tests {

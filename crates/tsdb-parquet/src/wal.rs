@@ -115,17 +115,23 @@ impl WALEntry {
 /// 保证写入持久性: 数据先写入 WAL, 再写入内存缓冲区。
 /// 崩溃恢复时从 WAL 重放未持久化的条目。
 pub struct TsdbWAL {
-    path: std::path::PathBuf,
+    dir: std::path::PathBuf,
+    current_path: std::sync::RwLock<std::path::PathBuf>,
+    segment_seq: std::sync::atomic::AtomicU64,
     sequence: std::sync::atomic::AtomicU64,
     writer: std::sync::Mutex<BufWriter<std::fs::File>>,
+    max_file_size: u64,
+    current_size: std::sync::atomic::AtomicU64,
 }
 
+const DEFAULT_MAX_WAL_FILE_SIZE: u64 = 64 * 1024 * 1024;
+
 impl TsdbWAL {
-    /// 创建新的 WAL 文件
-    ///
-    /// 自动创建父目录, 序列号从 0 开始。
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
+        let dir = path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| path.clone());
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| TsdbParquetError::Wal(format!("failed to create WAL dir: {}", e)))?;
@@ -137,17 +143,65 @@ impl TsdbWAL {
             .open(&path)
             .map_err(|e| TsdbParquetError::Wal(format!("failed to open WAL: {}", e)))?;
 
+        let existing_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+        let segment_seq = if existing_size > 0 { 1u64 } else { 0u64 };
+
         Ok(Self {
-            path,
+            dir,
+            current_path: std::sync::RwLock::new(path),
+            segment_seq: std::sync::atomic::AtomicU64::new(segment_seq),
             sequence: std::sync::atomic::AtomicU64::new(0),
             writer: std::sync::Mutex::new(BufWriter::new(file)),
+            max_file_size: DEFAULT_MAX_WAL_FILE_SIZE,
+            current_size: std::sync::atomic::AtomicU64::new(existing_size),
         })
+    }
+
+    pub fn with_max_file_size(mut self, max_size: u64) -> Self {
+        self.max_file_size = max_size;
+        self
+    }
+
+    fn rotate_if_needed(&self) -> Result<()> {
+        let size = self.current_size.load(std::sync::atomic::Ordering::Acquire);
+        if size < self.max_file_size {
+            return Ok(());
+        }
+
+        let new_seq = self.segment_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let new_path = self.dir.join(format!("wal-{:06}.log", new_seq));
+
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&new_path)
+            .map_err(|e| TsdbParquetError::Wal(format!("failed to create WAL segment: {}", e)))?;
+
+        {
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = writer.flush();
+            *writer = BufWriter::new(file);
+        }
+
+        self.current_size.store(0, std::sync::atomic::Ordering::Release);
+        {
+            let mut path = self.current_path.write().unwrap_or_else(|e| e.into_inner());
+            *path = new_path;
+        }
+
+        tracing::info!("WAL rotated to segment {}", new_seq);
+        Ok(())
     }
 
     /// 追加条目到 WAL
     ///
     /// 序列号自动递增, 返回分配的序列号。
     pub fn append(&self, entry_type: WALEntryType, payload: &[u8]) -> Result<u64> {
+        self.rotate_if_needed()?;
+
+        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+
         let seq = self
             .sequence
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -159,14 +213,20 @@ impl TsdbWAL {
         };
 
         let encoded = entry.encode();
+        let encoded_len = encoded.len() as u64;
 
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         writer
             .write_all(&encoded)
             .map_err(|e| TsdbParquetError::Wal(format!("WAL write failed: {}", e)))?;
         writer
             .flush()
             .map_err(|e| TsdbParquetError::Wal(format!("WAL flush failed: {}", e)))?;
+        writer
+            .get_ref()
+            .sync_all()
+            .map_err(|e| TsdbParquetError::Wal(format!("WAL sync failed: {}", e)))?;
+
+        self.current_size.fetch_add(encoded_len, std::sync::atomic::Ordering::Release);
 
         Ok(seq)
     }
@@ -188,18 +248,39 @@ impl TsdbWAL {
     ///
     /// 在数据成功刷盘到 Parquet 后调用, 防止重启时重复回放。
     pub fn truncate(&self) -> Result<()> {
-        let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-        writer
-            .flush()
-            .map_err(|e| TsdbParquetError::Wal(format!("WAL flush before truncate failed: {}", e)))?;
-        let file = writer.get_mut();
-        file.set_len(0)
-            .map_err(|e| TsdbParquetError::Wal(format!("WAL truncate failed: {}", e)))?;
-        file.rewind()
-            .map_err(|e| TsdbParquetError::Wal(format!("WAL rewind failed: {}", e)))?;
-        file.sync_all()
-            .map_err(|e| TsdbParquetError::Wal(format!("WAL sync after truncate failed: {}", e)))?;
+        {
+            let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+            writer
+                .flush()
+                .map_err(|e| TsdbParquetError::Wal(format!("WAL flush before truncate failed: {}", e)))?;
+            writer
+                .get_ref()
+                .sync_all()
+                .map_err(|e| TsdbParquetError::Wal(format!("WAL fsync before truncate failed: {}", e)))?;
+            let file = writer.get_mut();
+            file.set_len(0)
+                .map_err(|e| TsdbParquetError::Wal(format!("WAL truncate failed: {}", e)))?;
+            file.rewind()
+                .map_err(|e| TsdbParquetError::Wal(format!("WAL rewind failed: {}", e)))?;
+            file.sync_all()
+                .map_err(|e| TsdbParquetError::Wal(format!("WAL sync after truncate failed: {}", e)))?;
+        }
+
+        self.current_size.store(0, std::sync::atomic::Ordering::Release);
         self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                if name.starts_with("wal-") && name.ends_with(".log") && path != *self.current_path.read().unwrap_or_else(|e| e.into_inner()) {
+                    if let Err(e) = std::fs::remove_file(&path) {
+                        tracing::warn!("failed to remove old WAL segment {:?}: {}", path, e);
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -208,48 +289,82 @@ impl TsdbWAL {
     /// 逐条解码, CRC 校验失败时停止 (截断尾部损坏数据)。
     pub fn recover(path: impl AsRef<Path>) -> Result<Vec<WALEntry>> {
         let path = path.as_ref();
-        if !path.exists() {
+        let dir = path.parent().unwrap_or(path);
+
+        let mut wal_files = Vec::new();
+
+        if path.exists() {
+            wal_files.push(path.to_path_buf());
+        }
+
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let mut segment_files: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    name.starts_with("wal-") && name.ends_with(".log") && p != path
+                })
+                .collect();
+            segment_files.sort();
+            wal_files.splice(0..0, segment_files);
+        }
+
+        if wal_files.is_empty() {
             return Ok(Vec::new());
         }
 
-        let data = std::fs::read(path)
-            .map_err(|e| TsdbParquetError::Wal(format!("failed to read WAL: {}", e)))?;
+        let mut all_entries = Vec::new();
+        for wal_file in &wal_files {
+            let data = std::fs::read(wal_file)
+                .map_err(|e| TsdbParquetError::Wal(format!("failed to read WAL {:?}: {}", wal_file, e)))?;
 
-        let mut entries = Vec::new();
-        let mut offset = 0;
-
-        while offset < data.len() {
-            if offset + WAL_HEADER_SIZE + WAL_FOOTER_SIZE > data.len() {
-                break;
+            if data.is_empty() {
+                continue;
             }
 
-            let payload_len = u32::from_le_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]) as usize;
-
-            let entry_len = WAL_HEADER_SIZE + payload_len + WAL_FOOTER_SIZE;
-            if offset + entry_len > data.len() {
-                break;
-            }
-
-            match WALEntry::decode(&data[offset..offset + entry_len]) {
-                Ok(entry) => {
-                    entries.push(entry);
-                    offset += entry_len;
+            let mut offset = 0;
+            while offset < data.len() {
+                if offset + WAL_HEADER_SIZE + WAL_FOOTER_SIZE > data.len() {
+                    break;
                 }
-                Err(_) => break,
+
+                let payload_len = u32::from_le_bytes([
+                    data[offset],
+                    data[offset + 1],
+                    data[offset + 2],
+                    data[offset + 3],
+                ]) as usize;
+
+                let entry_len = WAL_HEADER_SIZE + payload_len + WAL_FOOTER_SIZE;
+                if offset + entry_len > data.len() {
+                    break;
+                }
+
+                match WALEntry::decode(&data[offset..offset + entry_len]) {
+                    Ok(entry) => {
+                        all_entries.push(entry);
+                        offset += entry_len;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "WAL recovery: corrupt entry at offset {} in {:?}, stopping: {}",
+                            offset,
+                            wal_file,
+                            e
+                        );
+                        break;
+                    }
+                }
             }
         }
 
-        Ok(entries)
+        Ok(all_entries)
     }
 
     /// 获取 WAL 文件路径
-    pub fn path(&self) -> &Path {
-        &self.path
+    pub fn path(&self) -> std::path::PathBuf {
+        self.current_path.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 }
 
@@ -315,5 +430,62 @@ mod tests {
         let wal_path = dir.path().join("nonexistent.wal");
         let entries = TsdbWAL::recover(&wal_path).unwrap();
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_wal_truncate() {
+        let dir = TempDir::new().unwrap();
+        let wal_path = dir.path().join("test.wal");
+
+        let wal = TsdbWAL::create(&wal_path).unwrap();
+        wal.append(WALEntryType::Insert, b"point1").unwrap();
+        wal.append(WALEntryType::Insert, b"point2").unwrap();
+        wal.sync().unwrap();
+
+        let entries_before = TsdbWAL::recover(&wal_path).unwrap();
+        assert_eq!(entries_before.len(), 2);
+
+        wal.truncate().unwrap();
+
+        let entries_after = TsdbWAL::recover(&wal_path).unwrap();
+        assert!(entries_after.is_empty());
+    }
+
+    #[test]
+    fn test_wal_recover_stops_at_corrupt_entry() {
+        let dir = TempDir::new().unwrap();
+        let wal_path = dir.path().join("test.wal");
+
+        let wal = TsdbWAL::create(&wal_path).unwrap();
+        wal.append(WALEntryType::Insert, b"good1").unwrap();
+        wal.append(WALEntryType::Insert, b"good2").unwrap();
+        wal.sync().unwrap();
+
+        let mut data = std::fs::read(&wal_path).unwrap();
+        let corrupt_offset = data.len() / 2;
+        if corrupt_offset < data.len() {
+            data[corrupt_offset] ^= 0xFF;
+        }
+        std::fs::write(&wal_path, &data).unwrap();
+
+        let entries = TsdbWAL::recover(&wal_path).unwrap();
+        assert!(entries.len() < 2, "recovery should stop at first corrupt entry, got {} entries", entries.len());
+    }
+
+    #[test]
+    fn test_wal_truncate_resets_sequence() {
+        let dir = TempDir::new().unwrap();
+        let wal_path = dir.path().join("test.wal");
+
+        let wal = TsdbWAL::create(&wal_path).unwrap();
+        let seq1 = wal.append(WALEntryType::Insert, b"point1").unwrap();
+        assert_eq!(seq1, 0);
+        let seq2 = wal.append(WALEntryType::Insert, b"point2").unwrap();
+        assert_eq!(seq2, 1);
+
+        wal.truncate().unwrap();
+
+        let seq3 = wal.append(WALEntryType::Insert, b"point3").unwrap();
+        assert_eq!(seq3, 0, "sequence should reset to 0 after truncate");
     }
 }

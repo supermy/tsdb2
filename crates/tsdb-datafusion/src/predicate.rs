@@ -1,6 +1,7 @@
 use datafusion::logical_expr::{Expr, Operator};
 use datafusion::scalar::ScalarValue;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 pub struct ExtractedFilters {
     pub time_range: Option<(i64, i64)>,
@@ -8,11 +9,18 @@ pub struct ExtractedFilters {
 }
 
 pub fn extract_filters(filters: &[Expr]) -> ExtractedFilters {
+    extract_filters_with_schema(filters, None)
+}
+
+pub fn extract_filters_with_schema(
+    filters: &[Expr],
+    schema: Option<arrow::datatypes::SchemaRef>,
+) -> ExtractedFilters {
     let mut time_range: Option<(i64, i64)> = None;
     let mut tag_filters: HashMap<String, String> = HashMap::new();
 
     for expr in filters {
-        extract_from_expr(expr, &mut time_range, &mut tag_filters);
+        extract_from_expr(expr, &mut time_range, &mut tag_filters, schema.as_ref());
     }
 
     ExtractedFilters {
@@ -25,12 +33,13 @@ fn extract_from_expr(
     expr: &Expr,
     time_range: &mut Option<(i64, i64)>,
     tag_filters: &mut HashMap<String, String>,
+    schema: Option<&Arc<arrow::datatypes::Schema>>,
 ) {
     if let Expr::BinaryExpr(binary) = expr {
         match binary.op {
             Operator::And => {
-                extract_from_expr(&binary.left, time_range, tag_filters);
-                extract_from_expr(&binary.right, time_range, tag_filters);
+                extract_from_expr(&binary.left, time_range, tag_filters, schema);
+                extract_from_expr(&binary.right, time_range, tag_filters, schema);
             }
             Operator::Gt
             | Operator::GtEq
@@ -43,6 +52,7 @@ fn extract_from_expr(
                     &binary.op,
                     time_range,
                     tag_filters,
+                    schema,
                 );
             }
             _ => {}
@@ -56,6 +66,7 @@ fn try_extract_comparison(
     op: &Operator,
     time_range: &mut Option<(i64, i64)>,
     tag_filters: &mut HashMap<String, String>,
+    schema: Option<&Arc<arrow::datatypes::Schema>>,
 ) {
     let (col_expr, val_expr, flipped) = match (left, right) {
         (Expr::Column(_), Expr::Literal(_)) => (left, right, false),
@@ -125,15 +136,30 @@ fn try_extract_comparison(
                 }
             }
         }
-        name if name.starts_with("tag_") => {
-            if let Operator::Eq = op {
-                if let ScalarValue::Utf8(Some(val)) = scalar {
-                    let tag_key = name.strip_prefix("tag_").unwrap_or(name).to_string();
-                    tag_filters.insert(tag_key, val.clone());
+        name => {
+            let is_tag = if let Some(s) = schema {
+                s.field_with_name(name)
+                    .map(|f| {
+                        f.metadata()
+                            .get("tsdb_role")
+                            .map(|r| r == "tag")
+                            .unwrap_or_else(|| {
+                                name.starts_with("tag_") && f.data_type() == &arrow::datatypes::DataType::Utf8
+                            })
+                    })
+                    .unwrap_or(false)
+            } else {
+                name.starts_with("tag_")
+            };
+            if is_tag {
+                if let Operator::Eq = op {
+                    if let ScalarValue::Utf8(Some(val)) = scalar {
+                        let tag_key = name.strip_prefix("tag_").unwrap_or(name).to_string();
+                        tag_filters.insert(tag_key, val.clone());
+                    }
                 }
             }
         }
-        _ => {}
     }
 }
 

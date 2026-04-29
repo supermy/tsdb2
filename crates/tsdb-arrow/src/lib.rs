@@ -16,7 +16,7 @@ pub mod error;
 pub mod memory;
 pub mod schema;
 
-pub use converter::{compute_tags_hash, datapoints_to_record_batch, record_batch_to_datapoints};
+pub use converter::{compute_series_hash, compute_tags_hash, datapoints_to_record_batch, record_batch_to_datapoints};
 pub use engine::StorageEngine;
 pub use error::{Result, TsdbArrowError};
 pub use memory::TsdbMemoryPool;

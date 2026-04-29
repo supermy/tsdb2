@@ -9,7 +9,7 @@ use tsdb_test_utils::make_simple_datapoints;
 fn bench_read_range(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
     let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-    let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+    let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
     let dps = make_simple_datapoints(10_000);
     writer.write_batch(&dps).unwrap();
     writer.flush_all().unwrap();

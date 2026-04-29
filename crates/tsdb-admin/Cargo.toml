@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 tsdb-arrow = { workspace = true }
 tsdb-rocksdb = { workspace = true }
+tsdb-storage-arrow = { workspace = true }
 tsdb-iceberg = { workspace = true }
 tsdb-datafusion = { workspace = true }
 serde = { workspace = true }

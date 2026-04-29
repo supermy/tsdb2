@@ -70,13 +70,13 @@ impl TsdbParquetReader {
     /// 可选投影指定列。
     pub fn read_range_arrow(
         &self,
-        _measurement: &str,
+        measurement: &str,
         start_micros: i64,
         end_micros: i64,
         projection: Option<&[String]>,
     ) -> Result<Vec<RecordBatch>> {
         self.read_range_arrow_with_filters(
-            _measurement,
+            measurement,
             start_micros,
             end_micros,
             projection,
@@ -87,7 +87,7 @@ impl TsdbParquetReader {
 
     pub fn read_range_arrow_with_filters(
         &self,
-        _measurement: &str,
+        measurement: &str,
         start_micros: i64,
         end_micros: i64,
         projection: Option<&[String]>,
@@ -96,8 +96,8 @@ impl TsdbParquetReader {
     ) -> Result<Vec<RecordBatch>> {
         self.partition_manager.refresh()?;
 
-        let start_date = micros_to_date(start_micros);
-        let end_date = micros_to_date(end_micros);
+        let start_date = micros_to_date(start_micros)?;
+        let end_date = micros_to_date(end_micros)?;
 
         let partitions = self
             .partition_manager
@@ -106,16 +106,63 @@ impl TsdbParquetReader {
         let mut batches = Vec::new();
 
         for partition in partitions {
-            let files = self.partition_manager.list_parquet_files(partition.date)?;
+            let measurement_dir = partition.dir.join(measurement);
+            let measurement_files = if measurement_dir.is_dir() {
+                let mut files = Vec::new();
+                crate::partition::collect_parquet_files(&measurement_dir, &mut files);
+                files.sort();
+                files
+            } else {
+                Vec::new()
+            };
 
-            for file_path in files {
-                let file_batches = self.read_parquet_file_with_pruning(
-                    &file_path,
-                    time_range,
-                    tag_filters,
-                    projection,
-                )?;
-                batches.extend(file_batches);
+            if !measurement_files.is_empty() {
+                for file_path in measurement_files {
+                    let file_batches = self.read_parquet_file_with_pruning(
+                        &file_path,
+                        time_range,
+                        tag_filters,
+                        projection,
+                    )?;
+                    batches.extend(file_batches);
+                }
+            } else {
+                let mut all_files = Vec::new();
+                crate::partition::collect_parquet_files(&partition.dir, &mut all_files);
+                all_files.sort();
+                let partition_dir = &partition.dir;
+                for file_path in all_files {
+                    let is_root_file = file_path
+                        .parent()
+                        .map(|p| p == partition_dir)
+                        .unwrap_or(false);
+                    if !is_root_file {
+                        continue;
+                    }
+                    let file_batches = self.read_parquet_file_with_pruning(
+                        &file_path,
+                        time_range,
+                        tag_filters,
+                        projection,
+                    )?;
+                    let filtered: Vec<RecordBatch> = file_batches
+                        .into_iter()
+                        .filter(|batch| {
+                            batch
+                                .schema()
+                                .metadata()
+                                .get("measurement")
+                                .map(|m| m == measurement)
+                                .unwrap_or_else(|| {
+                                    tracing::warn!(
+                                        "parquet file batch missing measurement metadata, excluding from results"
+                                    );
+                                    false
+                                })
+                        })
+                        .collect();
+                    batches.extend(filtered);
+                }
             }
         }
 
@@ -129,8 +176,31 @@ impl TsdbParquetReader {
         tags: &Tags,
         timestamp: i64,
     ) -> Result<Option<DataPoint>> {
-        let points = self.read_range(measurement, tags, timestamp, timestamp)?;
-        Ok(points.into_iter().next())
+        let tag_filters: HashMap<String, String> = tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let batches = self.read_range_arrow_with_filters(
+            measurement,
+            timestamp,
+            timestamp,
+            None,
+            Some((timestamp, timestamp)),
+            Some(&tag_filters),
+        )?;
+
+        for batch in &batches {
+            let mut points = record_batch_to_datapoints(batch)?;
+            for dp in &mut points {
+                if dp.measurement.is_empty() {
+                    dp.measurement = measurement.to_string();
+                }
+            }
+            for dp in points {
+                if dp.timestamp == timestamp && tags.iter().all(|(k, v)| dp.tags.get(k) == Some(v)) {
+                    return Ok(Some(dp));
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     /// 读取单个 Parquet 文件, 可选列投影
@@ -157,8 +227,10 @@ impl TsdbParquetReader {
         })?;
 
         if metadata.len() < 8 {
-            tracing::warn!("skipping invalid parquet file (too small): {:?}", path);
-            return Ok(Vec::new());
+            return Err(TsdbParquetError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid parquet file (too small): {:?}", path),
+            )));
         }
 
         let file = File::open(path).map_err(|e| {
@@ -168,13 +240,12 @@ impl TsdbParquetReader {
             )))
         })?;
 
-        let builder = match ParquetRecordBatchReaderBuilder::try_new(file) {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::warn!("skipping corrupt parquet file {:?}: {}", path, e);
-                return Ok(Vec::new());
-            }
-        };
+        let builder = ParquetRecordBatchReaderBuilder::try_new(file).map_err(|e| {
+            TsdbParquetError::Io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("corrupt parquet file {:?}: {}", path, e),
+            ))
+        })?;
 
         let parquet_metadata = builder.metadata();
         let arrow_schema = builder.schema().clone();
@@ -245,9 +316,16 @@ impl TsdbParquetReader {
                 && arrow_schema.metadata().get("measurement").is_some()
             {
                 let enriched_schema = arrow_schema.clone();
-                let batch = RecordBatch::try_new(enriched_schema, batch.columns().to_vec())
-                    .unwrap_or(batch);
-                batches.push(batch);
+                match RecordBatch::try_new(enriched_schema, batch.columns().to_vec()) {
+                    Ok(enriched) => batches.push(enriched),
+                    Err(e) => {
+                        tracing::warn!(
+                            "schema enrichment failed for batch in {:?}: {}, keeping original",
+                            path, e
+                        );
+                        batches.push(batch);
+                    }
+                }
             } else {
                 batches.push(batch);
             }
@@ -276,21 +354,55 @@ impl TsdbParquetReader {
         let mut all_points = Vec::new();
 
         for partition in partitions {
-            let files = self.partition_manager.list_parquet_files(partition.date)?;
+            let measurement_dir = partition.dir.join(measurement);
+            let measurement_files = if measurement_dir.is_dir() {
+                let mut files = Vec::new();
+                crate::partition::collect_parquet_files(&measurement_dir, &mut files);
+                files.sort();
+                files
+            } else {
+                Vec::new()
+            };
 
-            for file_path in files {
-                let file_batches = self.read_parquet_file(&file_path, None)?;
-                for batch in file_batches {
-                    let mut points = record_batch_to_datapoints(&batch)?;
-                    for dp in &mut points {
-                        if dp.measurement.is_empty() && !measurement.is_empty() {
-                            dp.measurement = measurement.to_string();
+            if !measurement_files.is_empty() {
+                for file_path in &measurement_files {
+                    let file_batches = self.read_parquet_file(file_path, None)?;
+                    for batch in file_batches {
+                        let mut points = record_batch_to_datapoints(&batch)?;
+                        for dp in &mut points {
+                            if dp.measurement.is_empty() && !measurement.is_empty() {
+                                dp.measurement = measurement.to_string();
+                            }
                         }
+                        all_points.append(&mut points);
                     }
-                    if !measurement.is_empty() {
-                        points.retain(|dp| dp.measurement == measurement);
+                }
+            } else {
+                let mut all_files = Vec::new();
+                crate::partition::collect_parquet_files(&partition.dir, &mut all_files);
+                all_files.sort();
+                let partition_dir = &partition.dir;
+                for file_path in &all_files {
+                    let is_root_file = file_path
+                        .parent()
+                        .map(|p| p == partition_dir)
+                        .unwrap_or(false);
+                    if !is_root_file {
+                        continue;
                     }
-                    all_points.append(&mut points);
+                    let file_batches = self.read_parquet_file(file_path, None)?;
+                    for batch in file_batches {
+                        let mut points = record_batch_to_datapoints(&batch)?;
+                        for dp in &mut points {
+                            if dp.measurement.is_empty() && !measurement.is_empty() {
+                                dp.measurement = measurement.to_string();
+                            }
+                        }
+                        if !measurement.is_empty() {
+                            points.retain(|dp| dp.measurement == measurement);
+                        }
+                        all_points.append(&mut points);
+                    }
                 }
             }
         }
@@ -311,7 +423,14 @@ fn build_tag_row_filter(
         let col_name = format!("tag_{}", tag_key);
         let idx = match arrow_schema.index_of(&col_name) {
             Ok(idx) => idx,
-            Err(_) => continue,
+            Err(_) => {
+                let mask = ProjectionMask::leaves(parquet_schema, []);
+                let predicate = ArrowPredicateFn::new(mask, move |_batch| {
+                    Ok(BooleanArray::from(vec![false; _batch.num_rows()]))
+                });
+                filters.push(Box::new(predicate) as Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>);
+                continue;
+            }
         };
 
         let mask = ProjectionMask::leaves(parquet_schema, [idx]);
@@ -320,11 +439,11 @@ fn build_tag_row_filter(
             let col = batch.column(0);
             let string_col = match col.as_any().downcast_ref::<StringArray>() {
                 Some(c) => c,
-                None => return Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|_| Some(true)))),
+                None => return Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|_| Some(false)))),
             };
             let filtered: BooleanArray = string_col
                 .iter()
-                .map(|opt| opt.map(|s| s == tag_value_clone.as_str()))
+                .map(|opt| Some(opt.map(|s| s == tag_value_clone.as_str()).unwrap_or(false)))
                 .collect();
             Ok(filtered)
         });
@@ -348,7 +467,7 @@ mod tests {
 
     fn write_test_data(dir: &TempDir) -> PartitionManager {
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
 
         let dps: Vec<DataPoint> = (0..50)
             .map(|i| {
@@ -408,12 +527,144 @@ mod tests {
         let pm = write_test_data(&dir);
         let reader = TsdbParquetReader::new(Arc::new(pm));
 
-        let date = micros_to_date(1_000_000_000);
+        let date = micros_to_date(1_000_000_000).unwrap();
         let files = reader.partition_manager.list_parquet_files(date).unwrap();
         assert!(!files.is_empty());
 
         let batches = reader.read_parquet_file(&files[0], None).unwrap();
         assert!(!batches.is_empty());
         assert!(batches[0].num_rows() > 0);
+    }
+
+    #[test]
+    fn test_read_range_nonexistent_tag_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let pm = write_test_data(&dir);
+        let reader = TsdbParquetReader::new(Arc::new(pm));
+
+        let mut tags = Tags::new();
+        tags.insert("nonexistent_tag".to_string(), "value".to_string());
+
+        let points = reader
+            .read_range("cpu", &tags, 1_000_000_000, 1_000_050_000_000)
+            .unwrap();
+
+        assert!(
+            points.is_empty(),
+            "filtering by a tag that does not exist in data should return no results"
+        );
+    }
+
+    #[test]
+    fn test_read_range_wrong_tag_value_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let pm = write_test_data(&dir);
+        let reader = TsdbParquetReader::new(Arc::new(pm));
+
+        let mut tags = Tags::new();
+        tags.insert("host".to_string(), "nonexistent_host".to_string());
+
+        let points = reader
+            .read_range("cpu", &tags, 1_000_000_000, 1_000_050_000_000)
+            .unwrap();
+
+        assert!(
+            points.is_empty(),
+            "filtering by a tag value that does not match should return no results"
+        );
+    }
+
+    #[test]
+    fn test_read_range_with_null_tag_values() {
+        let dir = TempDir::new().unwrap();
+        let pm = Arc::new(PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap());
+        let mut writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
+
+        let mut dps_with_nulls = Vec::new();
+        for i in 0..10 {
+            let mut dp = DataPoint::new("cpu", 1_000_000_000 + i as i64 * 1_000_000);
+            if i % 2 == 0 {
+                dp = dp.with_tag("host", "server01");
+            }
+            dp = dp.with_field("usage", FieldValue::Float(0.5 + i as f64 * 0.01));
+            dps_with_nulls.push(dp);
+        }
+
+        writer.write_batch(&dps_with_nulls).unwrap();
+        writer.flush_all().unwrap();
+        drop(writer);
+
+        let reader = TsdbParquetReader::new(pm);
+
+        let mut tags = Tags::new();
+        tags.insert("host".to_string(), "server01".to_string());
+
+        let points = reader
+            .read_range("cpu", &tags, 1_000_000_000, 1_000_010_000_000)
+            .unwrap();
+
+        for p in &points {
+            assert_eq!(
+                p.tags.get("host"),
+                Some(&"server01".to_string()),
+                "null tag values should not match the filter"
+            );
+        }
+    }
+
+    #[test]
+    fn test_read_range_measurement_isolation() {
+        let dir = TempDir::new().unwrap();
+        let pm = Arc::new(PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap());
+
+        let mut cpu_writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
+        let mut mem_writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "mem");
+
+        let base_ts = 1_000_000_000i64;
+        let cpu_dps: Vec<DataPoint> = (0..5)
+            .map(|i| {
+                DataPoint::new("cpu", base_ts + i as i64 * 1_000_000)
+                    .with_tag("host", "s1")
+                    .with_field("usage", FieldValue::Float(i as f64))
+            })
+            .collect();
+        let mem_dps: Vec<DataPoint> = (0..5)
+            .map(|i| {
+                DataPoint::new("mem", base_ts + i as i64 * 1_000_000)
+                    .with_tag("host", "s1")
+                    .with_field("percent", FieldValue::Float(i as f64 * 10.0))
+            })
+            .collect();
+
+        cpu_writer.write_batch(&cpu_dps).unwrap();
+        mem_writer.write_batch(&mem_dps).unwrap();
+        cpu_writer.flush_all().unwrap();
+        mem_writer.flush_all().unwrap();
+        drop(cpu_writer);
+        drop(mem_writer);
+
+        let reader = TsdbParquetReader::new(pm);
+
+        let tags = Tags::new();
+        let cpu_points = reader
+            .read_range("cpu", &tags, base_ts, base_ts + 10_000_000)
+            .unwrap();
+        let mem_points = reader
+            .read_range("mem", &tags, base_ts, base_ts + 10_000_000)
+            .unwrap();
+
+        assert_eq!(cpu_points.len(), 5, "should read 5 cpu data points");
+        assert_eq!(mem_points.len(), 5, "should read 5 mem data points");
+
+        for p in &cpu_points {
+            assert_eq!(p.measurement, "cpu");
+            assert!(p.fields.contains_key("usage"));
+            assert!(!p.fields.contains_key("percent"));
+        }
+        for p in &mem_points {
+            assert_eq!(p.measurement, "mem");
+            assert!(p.fields.contains_key("percent"));
+            assert!(!p.fields.contains_key("usage"));
+        }
     }
 }

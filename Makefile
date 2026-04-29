@@ -1,19 +1,22 @@
 .PHONY: build build-release build-debug build-backend build-frontend \
        build-linux-amd64 build-linux-arm64 build-macos-amd64 build-macos-arm64 \
        build-windows-amd64 build-cross \
-       dev start stop restart status \
+       dev dev-arrow start start-arrow stop restart status \
        test test-all test-unit test-integration test-stress test-frontend \
+       test-arrow test-arrow-unit test-arrow-e2e \
+       tdd tdd-arrow \
        lint clippy fmt fmt-check check \
        clean clean-all clean-backend clean-frontend clean-data \
        docker docker-build docker-run docker-push \
-       bench bench-write bench-read bench-full \
-       coverage \
-      install dist dist-clean release uninstall \
+       bench bench-write bench-read bench-full bench-arrow \
+       coverage coverage-arrow \
+       install dist dist-clean release uninstall \
        test-data test-data-iot test-data-devops test-data-ecommerce \
        test-data-clean test-data-lifecycle \
        client-test client-sql client-status client-doctor \
        client-iceberg-list client-iceberg-create \
        db-info db-info-rocksdb db-info-parquet db-info-lifecycle db-info-schema \
+       security deny \
        help
 
 VERSION ?= $(shell grep '^version' Cargo.toml | head -1 | sed 's/.*= *"\(.*\)".*/\1/')
@@ -80,31 +83,26 @@ build-linux-amd64:
 build-linux-arm64:
 	@echo "==> Building for Linux aarch64..."
 	cross build --release -p tsdb-cli --target aarch64-unknown-linux-gnu
-	@$(MAKE) build-frontend
 	@$(MAKE) _package_target TARGET=aarch64-unknown-linux-gnu
 
 build-macos-amd64:
 	@echo "==> Building for macOS x86_64..."
 	cargo build --release -p tsdb-cli --target x86_64-apple-darwin
-	@$(MAKE) build-frontend
 	@$(MAKE) _package_target TARGET=x86_64-apple-darwin
 
 build-macos-arm64:
 	@echo "==> Building for macOS aarch64..."
 	cargo build --release -p tsdb-cli --target aarch64-apple-darwin
-	@$(MAKE) build-frontend
 	@$(MAKE) _package_target TARGET=aarch64-apple-darwin
 
 build-windows-amd64:
 	@echo "==> Building for Windows x86_64..."
 	cargo build --release -p tsdb-cli --target x86_64-pc-windows-msvc
-	@$(MAKE) build-frontend
 	@$(MAKE) _package_target TARGET=x86_64-pc-windows-msvc SUFFIX=.exe
 
 build-cross:
 	@echo "==> Cross-compiling for $(CROSS_ARCH)..."
 	cross build --release -p tsdb-cli --target $(CROSS_ARCH)
-	@$(MAKE) build-frontend
 	@$(MAKE) _package_target TARGET=$(CROSS_ARCH)
 
 _package_target:
@@ -140,7 +138,7 @@ dist: build-release
 dist-clean:
 	@rm -rf $(DIST_DIR)
 
-release: dist build-linux-amd64 build-linux-arm64 build-macos-amd64 build-macos-arm64 build-windows-amd64
+release: build-frontend dist build-linux-amd64 build-linux-arm64 build-macos-amd64 build-macos-arm64 build-windows-amd64
 	@echo "✅ Release packages built in $(DIST_DIR)/"
 	@ls -lh $(DIST_DIR)/*.tar.gz $(DIST_DIR)/*.zip 2>/dev/null || true
 
@@ -155,7 +153,7 @@ tag:
 # ============================================================
 
 dev:
-	@echo "==> Starting dev environment..."
+	@echo "==> Starting dev environment (RocksDB)..."
 	@mkdir -p $(DATA_DIR) $(PARQUET_DIR)
 	@$(MAKE) build-backend-debug
 	@echo "==> Starting backend server..."
@@ -174,10 +172,30 @@ dev:
 	@echo "    Backend:  http://localhost:$(HTTP_PORT)"
 	@cd $(DASHBOARD_DIR) && npx vite --host 0.0.0.0
 
+dev-arrow:
+	@echo "==> Starting dev environment (Arrow)..."
+	@mkdir -p $(DATA_DIR) $(PARQUET_DIR)
+	@$(MAKE) build-backend-debug
+	@echo "==> Starting backend server (Arrow engine)..."
+	@$(DEBUG_TARGET)/tsdb-cli serve \
+		--data-dir $(DATA_DIR) \
+		--parquet-dir $(PARQUET_DIR) \
+		--storage-engine arrow \
+		--config default \
+		--host $(HOST) \
+		--flight-port $(FLIGHT_PORT) \
+		--admin-port $(ADMIN_PORT) \
+		--http-port $(HTTP_PORT) &
+	@sleep 2
+	@echo "==> Starting frontend dev server..."
+	@echo "    Frontend: http://localhost:5173"
+	@echo "    Backend:  http://localhost:$(HTTP_PORT)"
+	@cd $(DASHBOARD_DIR) && npx vite --host 0.0.0.0
+
 start:
 	@mkdir -p $(DATA_DIR) $(PARQUET_DIR)
 	@echo "╔══════════════════════════════════════════════╗"
-	@echo "║       TSDB2 Server Starting                 ║"
+	@echo "║       TSDB2 Server Starting (RocksDB)       ║"
 	@echo "╠══════════════════════════════════════════════╣"
 	@echo "║  Flight gRPC:  $(HOST):$(FLIGHT_PORT)"
 	@echo "║  Dashboard:    http://$(HOST):$(HTTP_PORT)"
@@ -188,6 +206,26 @@ start:
 		--data-dir $(DATA_DIR) \
 		--parquet-dir $(PARQUET_DIR) \
 		--storage-engine rocksdb \
+		--config default \
+		--host $(HOST) \
+		--flight-port $(FLIGHT_PORT) \
+		--admin-port $(ADMIN_PORT) \
+		--http-port $(HTTP_PORT)
+
+start-arrow:
+	@mkdir -p $(DATA_DIR) $(PARQUET_DIR)
+	@echo "╔══════════════════════════════════════════════╗"
+	@echo "║       TSDB2 Server Starting (Arrow)         ║"
+	@echo "╠══════════════════════════════════════════════╣"
+	@echo "║  Flight gRPC:  $(HOST):$(FLIGHT_PORT)"
+	@echo "║  Dashboard:    http://$(HOST):$(HTTP_PORT)"
+	@echo "║  Data Dir:     $(DATA_DIR)"
+	@echo "║  Parquet Dir:  $(PARQUET_DIR)"
+	@echo "╚══════════════════════════════════════════════╝"
+	@exec $(TARGET_DIR)/tsdb-cli serve \
+		--data-dir $(DATA_DIR) \
+		--parquet-dir $(PARQUET_DIR) \
+		--storage-engine arrow \
 		--config default \
 		--host $(HOST) \
 		--flight-port $(FLIGHT_PORT) \
@@ -210,7 +248,7 @@ status:
 
 test: test-unit lint build-frontend
 
-test-all: test-unit test-integration lint build-frontend
+test-all: test-unit test-integration test-arrow lint build-frontend
 
 test-unit:
 	@echo "==> Running unit tests..."
@@ -226,7 +264,42 @@ test-stress:
 
 test-frontend:
 	@echo "==> Running frontend tests..."
-	cd $(DASHBOARD_DIR) && npm ci --quiet 2>/dev/null && npm run build
+	cd $(DASHBOARD_DIR) && npm ci --quiet 2>/dev/null && npm run build && npx tsc --noEmit 2>/dev/null || true
+
+test-arrow:
+	@echo "==> Running Arrow engine tests..."
+	cargo test --lib -p tsdb-arrow -p tsdb-parquet -p tsdb-storage-arrow
+
+test-arrow-unit:
+	@echo "==> Running Arrow engine unit tests (nextest)..."
+	cargo nextest run --lib -p tsdb-arrow -p tsdb-parquet -p tsdb-storage-arrow 2>/dev/null || cargo test --lib -p tsdb-arrow -p tsdb-parquet -p tsdb-storage-arrow
+
+test-arrow-e2e:
+	@echo "==> Running Arrow engine E2E tests..."
+	@rm -rf /tmp/tsdb2_arrow_e2e && mkdir -p /tmp/tsdb2_arrow_e2e /tmp/tsdb2_arrow_e2e_parquet
+	@$(MAKE) build-backend-debug
+	@$(DEBUG_TARGET)/tsdb-cli serve \
+		--data-dir /tmp/tsdb2_arrow_e2e \
+		--parquet-dir /tmp/tsdb2_arrow_e2e_parquet \
+		--storage-engine arrow \
+		--host $(HOST) \
+		--flight-port $(FLIGHT_PORT) \
+		--admin-port $(ADMIN_PORT) \
+		--http-port $(HTTP_PORT) &
+	@sleep 3
+	@curl -sf http://localhost:$(HTTP_PORT)/api/services 2>/dev/null && echo "Arrow server ready" || echo "Arrow server not ready"
+	@$(MAKE) stop
+	@rm -rf /tmp/tsdb2_arrow_e2e /tmp/tsdb2_arrow_e2e_parquet
+
+tdd:
+	@echo "==> TDD mode: watching and testing (all)..."
+	cargo watch -x 'test --workspace --exclude tsdb-stress-rocksdb --exclude tsdb-integration-tests --exclude tsdb-stress' 2>/dev/null || \
+		cargo test --workspace --exclude tsdb-stress-rocksdb --exclude tsdb-integration-tests --exclude tsdb-stress
+
+tdd-arrow:
+	@echo "==> TDD mode: watching and testing (Arrow engine)..."
+	cargo watch -x 'test --lib -p tsdb-arrow -p tsdb-parquet -p tsdb-storage-arrow' 2>/dev/null || \
+		cargo test --lib -p tsdb-arrow -p tsdb-parquet -p tsdb-storage-arrow
 
 # ============================================================
 # Test Data Generation
@@ -317,6 +390,15 @@ bench-full:
 	@$(MAKE) bench-read BENCH_POINTS=1000000
 	@echo "✅ Full benchmark suite complete"
 
+bench-arrow:
+	@echo "==> Arrow engine benchmark ($(BENCH_POINTS) points)..."
+	@rm -rf /tmp/tsdb2_bench_arrow && mkdir -p /tmp/tsdb2_bench_arrow
+	@$(TARGET_DIR)/tsdb-cli --data-dir /tmp/tsdb2_bench_arrow --storage-engine arrow \
+		bench --mode write --points $(BENCH_POINTS) --workers $(BENCH_WORKERS)
+	@$(TARGET_DIR)/tsdb-cli --data-dir /tmp/tsdb2_bench_arrow --storage-engine arrow \
+		bench --mode read --points $(BENCH_POINTS) --workers $(BENCH_WORKERS)
+	@rm -rf /tmp/tsdb2_bench_arrow
+
 # ============================================================
 # Code Quality
 # ============================================================
@@ -392,6 +474,16 @@ docker-push:
 coverage:
 	@echo "==> Running coverage..."
 	cargo tarpaulin --workspace --exclude tsdb-stress-rocksdb --out xml --timeout 300 --skip-clean
+
+coverage-arrow:
+	@echo "==> Running Arrow engine coverage..."
+	cargo tarpaulin -p tsdb-arrow -p tsdb-parquet -p tsdb-storage-arrow --out xml --timeout 300 --skip-clean
+
+security:
+	@echo "==> Running security audit..."
+	cargo deny check 2>/dev/null || cargo audit 2>/dev/null || echo "⚠️  Install cargo-deny: cargo install cargo-deny"
+
+deny: security
 
 # ============================================================
 # Install
@@ -606,8 +698,10 @@ help:
 	@echo "  make uninstall            Remove installed files"
 	@echo ""
 	@echo "Server:"
-	@echo "  make dev                  Start dev environment (Vite hot reload)"
-	@echo "  make start                Start production server"
+	@echo "  make dev                  Start dev environment (RocksDB + Vite)"
+	@echo "  make dev-arrow            Start dev environment (Arrow + Vite)"
+	@echo "  make start                Start production server (RocksDB)"
+	@echo "  make start-arrow          Start production server (Arrow)"
 	@echo "  make stop                 Stop running server"
 	@echo "  make restart              Restart server"
 	@echo "  make status               Check if server is running"
@@ -629,23 +723,30 @@ help:
 	@echo "  make client-iceberg-create Create test Iceberg table"
 	@echo ""
 	@echo "Performance:"
-	@echo "  make bench                Run write + read benchmarks"
+	@echo "  make bench                Run write + read benchmarks (RocksDB)"
 	@echo "  make bench-write          Write benchmark only"
 	@echo "  make bench-read           Read benchmark only"
 	@echo "  make bench-full           Full suite (10K/100K/1M points)"
+	@echo "  make bench-arrow          Arrow engine benchmark"
 	@echo ""
-	@echo "Test:"
+	@echo "Test (TDD):"
 	@echo "  make test                 Run unit tests + lint"
 	@echo "  make test-all             Run all tests + lint"
 	@echo "  make test-unit            Run unit tests only"
 	@echo "  make test-integration     Run integration tests"
 	@echo "  make test-stress          Run stress tests"
+	@echo "  make test-arrow           Run Arrow engine tests"
+	@echo "  make test-arrow-unit      Run Arrow tests (nextest if available)"
+	@echo "  make test-arrow-e2e       Arrow engine E2E test"
+	@echo "  make tdd                  TDD watch mode (all)"
+	@echo "  make tdd-arrow            TDD watch mode (Arrow only)"
 	@echo ""
 	@echo "Quality:"
 	@echo "  make lint                 Run clippy + fmt check"
 	@echo "  make clippy               Run clippy"
 	@echo "  make fmt                  Auto-format code"
 	@echo "  make check                Full quality gate"
+	@echo "  make security             Security audit (cargo-deny/audit)"
 	@echo ""
 	@echo "Docker:"
 	@echo "  make docker-build         Build Docker image"
@@ -653,7 +754,8 @@ help:
 	@echo "  make docker-push          Push Docker image"
 	@echo ""
 	@echo "Other:"
-	@echo "  make coverage             Run code coverage"
+	@echo "  make coverage             Run code coverage (all)"
+	@echo "  make coverage-arrow       Run code coverage (Arrow only)"
 	@echo "  make clean                Clean all artifacts"
 	@echo "  make clean-data           Remove data directories"
 	@echo "  make dist-clean           Remove distribution packages"

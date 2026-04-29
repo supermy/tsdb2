@@ -53,7 +53,9 @@ const Dashboard: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    api.rocksdb.seriesSchema().then(s => setMeasurements(s.measurements)).catch(() => {});
+    api.rocksdb.seriesSchema().then(s => setMeasurements(s.measurements)).catch(e => {
+      message.warning(e instanceof Error ? e.message : '加载Schema失败');
+    });
   }, [genResult]);
 
   const handleGenerate = async () => {

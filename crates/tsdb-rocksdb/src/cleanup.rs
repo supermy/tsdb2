@@ -49,6 +49,14 @@ impl TtlManager {
                 }
             }
         }
+
+        if !dropped.is_empty() {
+            tracing::info!(
+                "dropped {} expired CFs; consider running cleanup_series_meta to remove orphaned _series_meta entries",
+                dropped.len()
+            );
+        }
+
         Ok(dropped)
     }
 

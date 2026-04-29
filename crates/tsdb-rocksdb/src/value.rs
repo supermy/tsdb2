@@ -71,6 +71,10 @@ fn encode_field_value(buf: &mut Vec<u8>, fv: &FieldValue) {
             buf.push(FIELD_TYPE_BOOLEAN);
             buf.push(if *v { 1 } else { 0 });
         }
+        FieldValue::Null => {
+            buf.push(FIELD_TYPE_UTF8);
+            encode_u16(buf, 0);
+        }
     }
 }
 
@@ -91,7 +95,7 @@ fn decode_field_value(data: &[u8], cursor: &mut usize) -> Result<FieldValue> {
             let val = f64::from_be_bytes(
                 data[*cursor..*cursor + 8]
                     .try_into()
-                    .map_err(|_| TsdbRocksDbError::InvalidValue("f64 parse".into()))?,
+                    .map_err(|e| TsdbRocksDbError::InvalidValue(format!("f64 parse: {}", e)))?,
             );
             *cursor += 8;
             Ok(FieldValue::Float(val))
@@ -103,7 +107,7 @@ fn decode_field_value(data: &[u8], cursor: &mut usize) -> Result<FieldValue> {
             let val = i64::from_be_bytes(
                 data[*cursor..*cursor + 8]
                     .try_into()
-                    .map_err(|_| TsdbRocksDbError::InvalidValue("i64 parse".into()))?,
+                    .map_err(|e| TsdbRocksDbError::InvalidValue(format!("i64 parse: {}", e)))?,
             );
             *cursor += 8;
             Ok(FieldValue::Integer(val))

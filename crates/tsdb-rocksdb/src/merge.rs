@@ -46,10 +46,24 @@ pub fn tsdb_full_merge(
     existing_val: Option<&[u8]>,
     operands: &MergeOperands,
 ) -> Option<Vec<u8>> {
-    let existing_fields: Option<Fields> = existing_val.and_then(|v| decode_fields(v).ok());
+    let existing_fields: Option<Fields> = existing_val.and_then(|v| {
+        decode_fields(v)
+            .map_err(|e| {
+                tracing::warn!("tsdb_full_merge: failed to decode existing value: {}", e);
+                e
+            })
+            .ok()
+    });
     let operand_fields: Vec<Fields> = operands
         .iter()
-        .filter_map(|op| decode_fields(op).ok())
+        .filter_map(|op| {
+            decode_fields(op)
+                .map_err(|e| {
+                    tracing::warn!("tsdb_full_merge: failed to decode operand: {}", e);
+                    e
+                })
+                .ok()
+        })
         .collect();
     let operand_refs: Vec<&Fields> = operand_fields.iter().collect();
 

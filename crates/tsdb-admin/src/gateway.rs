@@ -21,8 +21,14 @@ fn validate_name(name: &str) -> std::result::Result<(), String> {
 }
 
 fn validate_parquet_path(path: &str) -> std::result::Result<(), String> {
-    if path.contains("..") {
+    if path.contains('\0') {
+        return Err("null byte in path not allowed".to_string());
+    }
+    if path.contains("..") || path.contains("%2e%2e") || path.contains("%2E%2E") {
         return Err("path traversal not allowed".to_string());
+    }
+    if path.contains('\\') {
+        return Err("backslash in path not allowed".to_string());
     }
     if path.starts_with('/')
         && !path.starts_with("/tmp/")
@@ -381,6 +387,9 @@ async fn get_service_logs(
     Path(name): Path<String>,
     Query(query): Query<LogsQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::ServiceLogs {
@@ -440,6 +449,12 @@ async fn apply_config(
     State(state): State<GatewayState>,
     Json(body): Json<ApplyConfigBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&body.service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
+    if let Err(e) = validate_name(&body.profile) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::ConfigApply {
@@ -459,6 +474,12 @@ async fn compare_config(
     State(state): State<GatewayState>,
     Json(body): Json<CompareConfigBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&body.profile_a) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
+    if let Err(e) = validate_name(&body.profile_b) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::ConfigCompare {
@@ -478,6 +499,9 @@ async fn test_sql(
     State(state): State<GatewayState>,
     Json(body): Json<TestSqlBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&body.service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::TestSql {
@@ -497,6 +521,12 @@ async fn test_write_bench(
     State(state): State<GatewayState>,
     Json(body): Json<TestWriteBenchBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&body.service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
+    if let Err(e) = validate_name(&body.measurement) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::TestWriteBench {
@@ -522,6 +552,12 @@ async fn test_read_bench(
     State(state): State<GatewayState>,
     Json(body): Json<TestReadBenchBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&body.service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
+    if let Err(e) = validate_name(&body.measurement) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::TestReadBench {
@@ -566,6 +602,9 @@ async fn metrics_health(
     State(state): State<GatewayState>,
     Query(query): Query<MetricsHealthQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&query.service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::MetricsHealth {
@@ -583,10 +622,14 @@ async fn metrics_stats(
     State(state): State<GatewayState>,
     Query(query): Query<MetricsStatsQuery>,
 ) -> impl IntoResponse {
+    let service = query.service.unwrap_or_else(|| "default".to_string());
+    if let Err(e) = validate_name(&service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::MetricsStats {
-            service: query.service.unwrap_or_else(|| "default".to_string())
+            service
         }
     )
 }
@@ -600,11 +643,19 @@ async fn metrics_timeseries(
     State(state): State<GatewayState>,
     Query(query): Query<MetricsTimeseriesQuery>,
 ) -> impl IntoResponse {
+    let service = query.service.unwrap_or_else(|| "default".to_string());
+    if let Err(e) = validate_name(&service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
+    let metric = query.metric.unwrap_or_else(|| "all".to_string());
+    if let Err(e) = validate_name(&metric) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::MetricsTimeseries {
-            service: query.service.unwrap_or_else(|| "default".to_string()),
-            metric: query.metric.unwrap_or_else(|| "all".to_string()),
+            service,
+            metric,
             range_secs: query.range_secs.unwrap_or(60),
         }
     )
@@ -621,6 +672,9 @@ async fn metrics_alerts(
     State(state): State<GatewayState>,
     Query(query): Query<MetricsAlertsQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&query.service) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::MetricsAlerts {
@@ -687,6 +741,11 @@ async fn rocksdb_compact(
     State(state): State<GatewayState>,
     Json(body): Json<RocksdbCompactBody>,
 ) -> impl IntoResponse {
+    if let Some(ref cf) = body.cf {
+        if let Err(e) = validate_name(cf) {
+            return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+        }
+    }
     api_handler!(state, AdminRequest::RocksdbCompact { cf: body.cf })
 }
 
@@ -707,6 +766,9 @@ async fn rocksdb_kv_scan(
     State(state): State<GatewayState>,
     Query(query): Query<KvScanQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&query.cf) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::RocksdbKvScan {
@@ -728,6 +790,9 @@ async fn rocksdb_kv_get(
     State(state): State<GatewayState>,
     Query(query): Query<KvGetQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&query.cf) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::RocksdbKvGet {
@@ -896,6 +961,9 @@ async fn iceberg_create_table(
     State(state): State<GatewayState>,
     Json(body): Json<IcebergCreateTableBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&body.name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::IcebergCreateTable {
@@ -938,6 +1006,9 @@ async fn iceberg_append(
     Path(name): Path<String>,
     Json(body): Json<IcebergAppendBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::IcebergAppend {
@@ -957,6 +1028,9 @@ async fn iceberg_scan(
     Path(name): Path<String>,
     Query(query): Query<IcebergScanQuery>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::IcebergScan {
@@ -975,6 +1049,9 @@ async fn iceberg_snapshots(
     State(state): State<GatewayState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(state, AdminRequest::IcebergSnapshots { table: name })
 }
 
@@ -983,6 +1060,9 @@ async fn iceberg_rollback(
     Path(name): Path<String>,
     Json(body): Json<IcebergRollbackBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::IcebergRollback {
@@ -1001,6 +1081,9 @@ async fn iceberg_compact(
     State(state): State<GatewayState>,
     Path(name): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(state, AdminRequest::IcebergCompact { table: name })
 }
 
@@ -1009,6 +1092,9 @@ async fn iceberg_expire(
     Path(name): Path<String>,
     Json(body): Json<IcebergExpireBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::IcebergExpire {
@@ -1028,6 +1114,9 @@ async fn iceberg_update_schema(
     Path(name): Path<String>,
     Json(body): Json<IcebergUpdateSchemaBody>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate_name(&name) {
+        return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
+    }
     api_handler!(
         state,
         AdminRequest::IcebergUpdateSchema {

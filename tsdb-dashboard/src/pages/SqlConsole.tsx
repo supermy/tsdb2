@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Card, Row, Col, Typography, Table, Tag, Button, Space, Input } from 'antd';
+import { Card, Row, Col, Typography, Table, Tag, Button, Space, Input, message } from 'antd';
 import { api, type SqlResult } from '../api';
 
 const { Title, Text } = Typography;
@@ -28,7 +28,9 @@ const SqlConsole: React.FC = () => {
     try {
       const t = await api.sql.tables();
       setTables(t);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      message.warning(e instanceof Error ? e.message : '加载表列表失败');
+    }
   }, []);
 
   useEffect(() => { fetchTables(); }, [fetchTables]);

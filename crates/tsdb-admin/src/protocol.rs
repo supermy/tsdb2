@@ -361,6 +361,8 @@ pub struct SqlResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LifecycleStatus {
+    #[serde(default)]
+    pub engine_type: String,
     pub hot_cfs: Vec<DataTierInfo>,
     pub warm_cfs: Vec<DataTierInfo>,
     pub cold_cfs: Vec<DataTierInfo>,
@@ -567,6 +569,7 @@ mod tests {
     #[test]
     fn test_lifecycle_status_serde() {
         let status = LifecycleStatus {
+            engine_type: "arrow".to_string(),
             hot_cfs: vec![],
             warm_cfs: vec![],
             cold_cfs: vec![],

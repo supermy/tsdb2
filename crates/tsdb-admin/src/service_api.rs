@@ -70,10 +70,22 @@ impl ServiceManager {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                if let Err(e) = std::fs::write(&path, data) {
-                    tracing::warn!("persist services: {}", e);
+                let tmp_path = path.with_extension("json.tmp");
+                if let Ok(mut f) = std::fs::File::create(&tmp_path) {
+                    use std::io::Write;
+                    if f.write_all(data.as_bytes()).is_ok() && f.sync_all().is_ok() {
+                        if std::fs::rename(&tmp_path, &path).is_err() {
+                            let _ = std::fs::remove_file(&tmp_path);
+                            tracing::error!("persist services: rename failed");
+                        }
+                        return;
+                    }
+                    let _ = std::fs::remove_file(&tmp_path);
                 }
+                tracing::error!("persist services: atomic write failed, refusing non-atomic fallback");
             }
+        } else {
+            tracing::warn!("persist services: could not acquire read lock");
         }
     }
 
@@ -108,6 +120,13 @@ impl ServiceManager {
     }
 
     pub async fn list_services(&self) -> Vec<ServiceInfo> {
+        {
+            let services = self.services.read().await;
+            let needs_refresh = services.values().any(|s| s.status == ServiceStatus::Running);
+            if !needs_refresh {
+                return services.values().cloned().collect();
+            }
+        }
         let mut services = self.services.write().await;
         self.refresh_statuses(&mut services).await;
         services.values().cloned().collect()
@@ -371,6 +390,12 @@ impl ServiceManager {
     }
 
     async fn kill_child(child: &mut std::process::Child) {
+        match child.try_wait() {
+            Ok(Some(_)) => {}
+            Err(_) => return,
+            Ok(None) => {}
+        }
+
         unsafe {
             libc::kill(child.id() as i32, libc::SIGTERM);
         }
@@ -378,14 +403,10 @@ impl ServiceManager {
         match child.try_wait() {
             Ok(Some(_)) => {}
             Ok(None) => {
-                unsafe {
-                    libc::kill(child.id() as i32, libc::SIGKILL);
-                }
+                let _ = child.kill();
                 let _ = child.wait();
             }
-            Err(_) => unsafe {
-                libc::kill(child.id() as i32, libc::SIGKILL);
-            },
+            Err(_) => {}
         }
     }
 

@@ -49,7 +49,14 @@ fn extract_field_value_from_array(
         DataType::UInt64 => col
             .as_any()
             .downcast_ref::<UInt64Array>()
-            .map(|a| FieldValue::Integer(a.value(index) as i64))
+            .map(|a| {
+                let v = a.value(index);
+                if v > i64::MAX as u64 {
+                    FieldValue::String(format!("{}", v))
+                } else {
+                    FieldValue::Integer(v as i64)
+                }
+            })
             .ok_or_else(|| TsdbDatafusionError::Query("failed to downcast UInt64".into())),
         _ => Err(TsdbDatafusionError::Query(format!(
             "unsupported data type: {:?}",
@@ -99,7 +106,7 @@ impl DataFusionQueryEngine {
 
     /// 执行 SQL 查询并返回结构化结果
     ///
-    /// 空值 (null) 会被转换为 FieldValue::Float(NaN)。
+    /// 空值 (null) 会被转换为 FieldValue::Null。
     pub async fn execute(&self, sql: &str) -> Result<QueryResult> {
         let df = self
             .ctx
@@ -125,7 +132,7 @@ impl DataFusionQueryEngine {
                     for (col_idx, field) in schema.fields().iter().enumerate() {
                         let col = batch.column(col_idx);
                         if col.is_null(row_idx) {
-                            row.push(tsdb_arrow::schema::FieldValue::Float(f64::NAN));
+                            row.push(tsdb_arrow::schema::FieldValue::Null);
                         } else {
                             let fv =
                                 extract_field_value_from_array(col, row_idx, field.data_type())?;
@@ -192,7 +199,7 @@ mod tests {
         use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 
         let pm = PartitionManager::new(dir, PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), &dps[0].measurement);
         writer.write_batch(dps).unwrap();
         writer.flush_all().unwrap();
     }
@@ -272,5 +279,100 @@ mod tests {
         let engine = DataFusionQueryEngine::new(dir.path());
         let result = engine.register_from_datapoints("cpu", &[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_extract_field_value_null_column() {
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Float64, true),
+        ]);
+        let array = Float64Array::from(vec![Some(1.0), None, Some(3.0)]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(array)],
+        )
+        .unwrap();
+
+        let col = batch.column(0);
+        assert!(!col.is_null(0));
+        let fv = extract_field_value_from_array(col, 0, col.data_type()).unwrap();
+        assert!(matches!(fv, FieldValue::Float(v) if v == 1.0));
+
+        assert!(col.is_null(1));
+
+        let fv = extract_field_value_from_array(col, 2, col.data_type()).unwrap();
+        assert!(matches!(fv, FieldValue::Float(v) if v == 3.0));
+    }
+
+    #[test]
+    fn test_extract_field_value_uint64_within_range() {
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("val", arrow::datatypes::DataType::UInt64, false),
+        ]);
+        let array = UInt64Array::from(vec![100u64, i64::MAX as u64]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(array)],
+        )
+        .unwrap();
+
+        let col = batch.column(0);
+        let fv = extract_field_value_from_array(col, 0, col.data_type()).unwrap();
+        assert!(matches!(fv, FieldValue::Integer(100)));
+
+        let fv = extract_field_value_from_array(col, 1, col.data_type()).unwrap();
+        assert!(matches!(fv, FieldValue::Integer(v) if v == i64::MAX));
+    }
+
+    #[test]
+    fn test_extract_field_value_uint64_overflow_to_string() {
+        let schema = arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("val", arrow::datatypes::DataType::UInt64, false),
+        ]);
+        let overflow_val = (i64::MAX as u64) + 1;
+        let array = UInt64Array::from(vec![overflow_val]);
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![Arc::new(array)],
+        )
+        .unwrap();
+
+        let col = batch.column(0);
+        let fv = extract_field_value_from_array(col, 0, col.data_type()).unwrap();
+        match fv {
+            FieldValue::String(s) => assert_eq!(s, overflow_val.to_string()),
+            other => panic!("expected FieldValue::String for overflow UInt64, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_null_values_in_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let dps: Vec<DataPoint> = (0..10)
+            .map(|i| {
+                if i % 3 == 0 {
+                    DataPoint::new("cpu", 1_000_000 + i as i64 * 1_000_000)
+                        .with_tag("host", "s1")
+                        .with_field("usage", FieldValue::Float(i as f64))
+                } else {
+                    DataPoint::new("cpu", 1_000_000 + i as i64 * 1_000_000)
+                        .with_tag("host", "s1")
+                        .with_field("idle", FieldValue::Float(i as f64))
+                }
+            })
+            .collect();
+
+        write_datapoints_to_dir(dir.path(), &dps);
+
+        let engine = DataFusionQueryEngine::new(dir.path());
+        engine.register_from_datapoints("cpu", &dps).unwrap();
+
+        let result = engine.execute("SELECT * FROM cpu").await.unwrap();
+        assert!(!result.rows.is_empty());
+
+        let has_null = result.rows.iter().any(|row| {
+            row.iter().any(|fv| matches!(fv, FieldValue::Null))
+        });
+        assert!(has_null, "rows with missing fields should contain FieldValue::Null");
     }
 }

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::error::{IcebergError, Result};
 use crate::manifest::{DataFile, EntryStatus, ManifestMeta, PartitionFieldSummary};
+use crate::partition::PartitionSpec;
 use crate::schema::Schema;
 use crate::snapshot::Snapshot;
 use crate::table::IcebergTable;
@@ -116,11 +117,13 @@ impl<'a> IcebergScanBuilder<'a> {
             .catalog()
             .load_manifest_list(self.table.name(), snapshot.snapshot_id)?;
 
+        let partition_spec = self.table.partition_spec().clone();
+
         let mut result = Vec::new();
 
         for mm in &manifest_metas {
             if let Some(ref pred) = self.predicate {
-                if !manifest_matches_predicate(mm, pred) {
+                if !manifest_matches_predicate(mm, pred, &partition_spec) {
                     continue;
                 }
             }
@@ -208,7 +211,11 @@ impl IcebergScan {
     }
 }
 
-fn manifest_matches_predicate(mm: &ManifestMeta, pred: &Predicate) -> bool {
+fn manifest_matches_predicate(
+    mm: &ManifestMeta,
+    pred: &Predicate,
+    partition_spec: &PartitionSpec,
+) -> bool {
     if mm.partitions_summary.is_none() {
         return true;
     }
@@ -216,78 +223,89 @@ fn manifest_matches_predicate(mm: &ManifestMeta, pred: &Predicate) -> bool {
     if summaries.is_empty() {
         return true;
     }
-    manifest_predicate_check(summaries, pred)
+    manifest_predicate_check(summaries, pred, partition_spec)
 }
 
-fn manifest_predicate_check(summaries: &[PartitionFieldSummary], pred: &Predicate) -> bool {
+fn manifest_predicate_check(
+    summaries: &[PartitionFieldSummary],
+    pred: &Predicate,
+    partition_spec: &PartitionSpec,
+) -> bool {
     match pred {
         Predicate::AlwaysTrue => true,
         Predicate::And(left, right) => {
-            manifest_predicate_check(summaries, left) && manifest_predicate_check(summaries, right)
+            manifest_predicate_check(summaries, left, partition_spec)
+                && manifest_predicate_check(summaries, right, partition_spec)
         }
         Predicate::Or(left, right) => {
-            manifest_predicate_check(summaries, left) || manifest_predicate_check(summaries, right)
+            manifest_predicate_check(summaries, left, partition_spec)
+                || manifest_predicate_check(summaries, right, partition_spec)
         }
-        Predicate::Not(inner) => !manifest_predicate_check(summaries, inner),
+        Predicate::Not(inner) => !manifest_predicate_check(summaries, inner, partition_spec),
         Predicate::Gt(field_id, val) => {
-            let idx = *field_id as usize;
-            if idx < summaries.len() {
-                if let Some(ref upper) = summaries[idx].upper_bound {
-                    let upper_val = decode_bound_value(upper);
-                    if let Some(uv) = upper_val {
-                        return !value_le(&uv, val);
+            if let Some(idx) = partition_spec.field_index(*field_id) {
+                if idx < summaries.len() {
+                    if let Some(ref upper) = summaries[idx].upper_bound {
+                        let upper_val = decode_bound_value(upper);
+                        if let Some(uv) = upper_val {
+                            return !value_le(&uv, val);
+                        }
                     }
                 }
             }
             true
         }
         Predicate::GtEq(field_id, val) => {
-            let idx = *field_id as usize;
-            if idx < summaries.len() {
-                if let Some(ref upper) = summaries[idx].upper_bound {
-                    let upper_val = decode_bound_value(upper);
-                    if let Some(uv) = upper_val {
-                        return !value_lt(&uv, val);
+            if let Some(idx) = partition_spec.field_index(*field_id) {
+                if idx < summaries.len() {
+                    if let Some(ref upper) = summaries[idx].upper_bound {
+                        let upper_val = decode_bound_value(upper);
+                        if let Some(uv) = upper_val {
+                            return !value_lt(&uv, val);
+                        }
                     }
                 }
             }
             true
         }
         Predicate::Lt(field_id, val) => {
-            let idx = *field_id as usize;
-            if idx < summaries.len() {
-                if let Some(ref lower) = summaries[idx].lower_bound {
-                    let lower_val = decode_bound_value(lower);
-                    if let Some(lv) = lower_val {
-                        return !value_ge(&lv, val);
+            if let Some(idx) = partition_spec.field_index(*field_id) {
+                if idx < summaries.len() {
+                    if let Some(ref lower) = summaries[idx].lower_bound {
+                        let lower_val = decode_bound_value(lower);
+                        if let Some(lv) = lower_val {
+                            return !value_ge(&lv, val);
+                        }
                     }
                 }
             }
             true
         }
         Predicate::LtEq(field_id, val) => {
-            let idx = *field_id as usize;
-            if idx < summaries.len() {
-                if let Some(ref lower) = summaries[idx].lower_bound {
-                    let lower_val = decode_bound_value(lower);
-                    if let Some(lv) = lower_val {
-                        return !value_gt(&lv, val);
+            if let Some(idx) = partition_spec.field_index(*field_id) {
+                if idx < summaries.len() {
+                    if let Some(ref lower) = summaries[idx].lower_bound {
+                        let lower_val = decode_bound_value(lower);
+                        if let Some(lv) = lower_val {
+                            return !value_gt(&lv, val);
+                        }
                     }
                 }
             }
             true
         }
         Predicate::Eq(field_id, val) => {
-            let idx = *field_id as usize;
-            if idx < summaries.len() {
-                if let (Some(lower), Some(upper)) = (
-                    summaries[idx].lower_bound.as_ref(),
-                    summaries[idx].upper_bound.as_ref(),
-                ) {
-                    let lower_val = decode_bound_value(lower);
-                    let upper_val = decode_bound_value(upper);
-                    if let (Some(lv), Some(uv)) = (lower_val, upper_val) {
-                        return value_ge(&lv, val) && value_le(&uv, val);
+            if let Some(idx) = partition_spec.field_index(*field_id) {
+                if idx < summaries.len() {
+                    if let (Some(lower), Some(upper)) = (
+                        summaries[idx].lower_bound.as_ref(),
+                        summaries[idx].upper_bound.as_ref(),
+                    ) {
+                        let lower_val = decode_bound_value(lower);
+                        let upper_val = decode_bound_value(upper);
+                        if let (Some(lv), Some(uv)) = (lower_val, upper_val) {
+                            return value_ge(&lv, val) && value_le(&uv, val);
+                        }
                     }
                 }
             }

@@ -1,5 +1,5 @@
 use crate::error::{Result, TsdbDatafusionError};
-use crate::predicate::extract_filters;
+use crate::predicate::extract_filters_with_schema;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::catalog::{Session, TableProvider};
@@ -138,7 +138,7 @@ impl TableProvider for TsdbTableProvider {
             self.schema.clone()
         };
 
-        let extracted = extract_filters(filters);
+        let extracted = extract_filters_with_schema(filters, Some(self.schema.clone()));
         let time_range = extracted.time_range;
         let tag_filters = extracted.tag_filters;
 
@@ -225,7 +225,30 @@ impl TableProvider for TsdbTableProvider {
             return mem_table.scan(state, None, filters, limit).await;
         }
 
-        let partitions = vec![limited_batches];
+        let aligned_batches: Vec<arrow::record_batch::RecordBatch> = limited_batches
+            .into_iter()
+            .map(|batch| {
+                if batch.schema() == projected_schema {
+                    batch
+                } else {
+                    let mut columns = Vec::new();
+                    for field in projected_schema.fields() {
+                        if let Ok(idx) = batch.schema().index_of(field.name()) {
+                            columns.push(batch.column(idx).clone());
+                        } else {
+                            columns.push(arrow::array::new_null_array(
+                                field.data_type(),
+                                batch.num_rows(),
+                            ));
+                        }
+                    }
+                    arrow::record_batch::RecordBatch::try_new(projected_schema.clone(), columns)
+                        .unwrap_or(batch)
+                }
+            })
+            .collect();
+
+        let partitions = vec![aligned_batches];
         let mem_table = MemTable::try_new(projected_schema, partitions)?;
 
         mem_table.scan(state, None, filters, limit).await

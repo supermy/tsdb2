@@ -185,6 +185,7 @@ impl TsdbRocksDb {
         timestamp: i64,
         fields: &tsdb_arrow::schema::Fields,
     ) -> Result<()> {
+        validate_measurement_name(measurement)?;
         let tags_hash = compute_tags_hash(tags);
         let key = TsdbKey::new(tags_hash, timestamp).encode();
 
@@ -220,6 +221,7 @@ impl TsdbRocksDb {
         timestamp: i64,
         fields: &tsdb_arrow::schema::Fields,
     ) -> Result<()> {
+        validate_measurement_name(measurement)?;
         let tags_hash = compute_tags_hash(tags);
         let key = TsdbKey::new(tags_hash, timestamp).encode();
 
@@ -252,6 +254,10 @@ impl TsdbRocksDb {
     pub fn write_batch(&self, dps: &[tsdb_arrow::schema::DataPoint]) -> Result<()> {
         if dps.is_empty() {
             return Ok(());
+        }
+
+        for dp in dps {
+            validate_measurement_name(&dp.measurement)?;
         }
 
         let mut by_cf: BTreeMap<String, Vec<&tsdb_arrow::schema::DataPoint>> = BTreeMap::new();
@@ -312,6 +318,7 @@ impl TsdbRocksDb {
         tags: &tsdb_arrow::schema::Tags,
         timestamp: i64,
     ) -> Result<Option<tsdb_arrow::schema::DataPoint>> {
+        validate_measurement_name(measurement)?;
         let tags_hash = compute_tags_hash(tags);
         let key = TsdbKey::new(tags_hash, timestamp).encode();
 
@@ -432,6 +439,7 @@ impl TsdbRocksDb {
         start_micros: i64,
         end_micros: i64,
     ) -> Result<Vec<tsdb_arrow::schema::DataPoint>> {
+        validate_measurement_name(measurement)?;
         let start_date = micros_to_date(start_micros)?;
         let end_date = micros_to_date(end_micros)?;
 
@@ -503,6 +511,7 @@ impl TsdbRocksDb {
         start_micros: i64,
         end_micros: i64,
     ) -> Result<Vec<tsdb_arrow::schema::DataPoint>> {
+        validate_measurement_name(measurement)?;
         let tags_hash = compute_tags_hash(tags);
 
         let start_date = micros_to_date(start_micros)?;
@@ -560,6 +569,7 @@ impl TsdbRocksDb {
         end_micros: i64,
         field_names: &[&str],
     ) -> Result<Vec<tsdb_arrow::schema::DataPoint>> {
+        validate_measurement_name(measurement)?;
         let start_date = micros_to_date(start_micros)?;
         let end_date = micros_to_date(end_micros)?;
         let projection: std::collections::HashSet<&str> = field_names.iter().copied().collect();
@@ -701,7 +711,12 @@ impl TsdbRocksDb {
         }
         self.db
             .create_cf(SERIES_META_CF, &Self::meta_cf_options())?;
-        Ok(self.db.cf_handle(SERIES_META_CF).unwrap())
+        self.db.cf_handle(SERIES_META_CF).ok_or_else(|| {
+            crate::error::TsdbRocksDbError::Io(std::io::Error::other(format!(
+                "cf_handle for {} not found after creation",
+                SERIES_META_CF
+            )))
+        })
     }
 
     /// 确保时序数据 CF 存在, 不存在则创建 (含竞态安全处理)
@@ -722,7 +737,12 @@ impl TsdbRocksDb {
                 return Err(e.into());
             }
         }
-        Ok(self.db.cf_handle(cf_name).unwrap())
+        self.db.cf_handle(cf_name).ok_or_else(|| {
+            crate::error::TsdbRocksDbError::Io(std::io::Error::other(format!(
+                "cf_handle for {} not found after creation",
+                cf_name
+            )))
+        })
     }
 
     /// 获取数据目录路径
@@ -734,6 +754,35 @@ impl TsdbRocksDb {
     pub fn db(&self) -> &DB {
         &self.db
     }
+}
+
+fn validate_measurement_name(measurement: &str) -> Result<()> {
+    if measurement.is_empty() {
+        return Err(TsdbRocksDbError::InvalidKey(
+            "measurement name must not be empty".to_string(),
+        ));
+    }
+    if measurement.len() > 255 {
+        return Err(TsdbRocksDbError::InvalidKey(format!(
+            "measurement name too long: {} bytes (max 255)",
+            measurement.len()
+        )));
+    }
+    for ch in measurement.chars() {
+        if ch.is_control() || ch == '/' || ch == '\\' || ch == '\0' {
+            return Err(TsdbRocksDbError::InvalidKey(format!(
+                "measurement name contains invalid character: {:?}",
+                ch
+            )));
+        }
+    }
+    if measurement == "." || measurement == ".." {
+        return Err(TsdbRocksDbError::InvalidKey(format!(
+            "measurement name cannot be '.' or '..': {:?}",
+            measurement
+        )));
+    }
+    Ok(())
 }
 
 /// 微秒时间戳转日期 (用于确定 CF 分区)

@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+impl PartitionSpec {
+    pub fn field_index(&self, source_id: i32) -> Option<usize> {
+        self.fields
+            .iter()
+            .position(|f| f.source_id == source_id)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PartitionSpec {
     pub spec_id: i32,
@@ -79,7 +87,9 @@ impl Transform {
                 }
             }
             Transform::Bucket { n } => {
-                if let Some(s) = value.as_str() {
+                if *n == 0 {
+                    None
+                } else if let Some(s) = value.as_str() {
                     let hash = murmur2_hash(s.as_bytes());
                     Some(serde_json::Value::Number(((hash % *n) as i64).into()))
                 } else if let Some(i) = value.as_i64() {

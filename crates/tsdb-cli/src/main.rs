@@ -518,7 +518,8 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
             println!("\nSnapshot Log:");
             for entry in &meta.snapshot_log {
                 let dt =
-                    chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64).unwrap();
+                    chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
+                        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
                 println!(
                     "  snapshot_id={}, time={}",
                     entry.snapshot_id,
@@ -552,7 +553,9 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
             table.append(&dps)?;
             println!("Appended {} datapoints to table '{}'", dps.len(), name);
 
-            let snap = table.current_snapshot().unwrap();
+            let snap = table.current_snapshot().ok_or_else(|| {
+                anyhow::anyhow!("no current snapshot after append")
+            })?;
             println!("New snapshot: {}", snap.snapshot_id);
         }
         IcebergActions::Scan { name, sql } => {
@@ -601,7 +604,11 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                 tsdb_iceberg::IcebergTable::new(std::sync::Arc::new(catalog), name.clone(), meta);
 
             let before_files = table
-                .collect_data_files(table.current_snapshot().unwrap())
+                .collect_data_files(
+                    table
+                        .current_snapshot()
+                        .ok_or_else(|| anyhow::anyhow!("no current snapshot before compact"))?,
+                )
                 .unwrap_or_default()
                 .len();
             println!("Before compact: {} data files", before_files);
@@ -609,7 +616,11 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
             table.compact()?;
 
             let after_files = table
-                .collect_data_files(table.current_snapshot().unwrap())
+                .collect_data_files(
+                    table
+                        .current_snapshot()
+                        .ok_or_else(|| anyhow::anyhow!("no current snapshot after compact"))?,
+                )
                 .unwrap_or_default()
                 .len();
             println!("After compact: {} data files", after_files);
@@ -743,13 +754,13 @@ fn execute_query(
                 let table = query_engine
                     .session_context()
                     .catalog("datafusion")
-                    .unwrap()
+                    .ok_or_else(|| anyhow::anyhow!("catalog 'datafusion' not found"))?
                     .schema("public")
-                    .unwrap()
+                    .ok_or_else(|| anyhow::anyhow!("schema 'public' not found"))?
                     .table(measurement)
                     .await
-                    .unwrap()
-                    .unwrap();
+                    .map_err(|e| anyhow::anyhow!("table lookup failed: {}", e))?
+                    .ok_or_else(|| anyhow::anyhow!("table '{}' not found", measurement))?;
                 let schema = table.schema();
                 let batch = datapoints_to_record_batch(&dps, schema.clone())?;
                 let mem_table = MemTable::try_new(schema, vec![vec![batch]])?;
@@ -783,6 +794,7 @@ fn execute_query(
                                 tsdb_arrow::schema::FieldValue::Integer(i) => serde_json::json!(i),
                                 tsdb_arrow::schema::FieldValue::String(s) => serde_json::json!(s),
                                 tsdb_arrow::schema::FieldValue::Boolean(b) => serde_json::json!(b),
+                                tsdb_arrow::schema::FieldValue::Null => serde_json::Value::Null,
                             };
                             map.insert(col.clone(), val);
                         }
@@ -801,6 +813,7 @@ fn execute_query(
                             tsdb_arrow::schema::FieldValue::Integer(i) => i.to_string(),
                             tsdb_arrow::schema::FieldValue::String(s) => s.clone(),
                             tsdb_arrow::schema::FieldValue::Boolean(b) => b.to_string(),
+                            tsdb_arrow::schema::FieldValue::Null => "NULL".to_string(),
                         })
                         .collect();
                     println!("{}", vals.join(","));
@@ -1075,6 +1088,7 @@ fn execute_export(
                         tsdb_arrow::schema::FieldValue::Integer(i) => i.to_string(),
                         tsdb_arrow::schema::FieldValue::String(s) => s.clone(),
                         tsdb_arrow::schema::FieldValue::Boolean(b) => b.to_string(),
+                        tsdb_arrow::schema::FieldValue::Null => "NULL".to_string(),
                     });
                     row.push(v);
                 }

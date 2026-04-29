@@ -52,8 +52,16 @@ impl PartitionManifest {
 
     pub fn write(&self, partition_dir: &Path) -> Result<()> {
         let path = Self::manifest_path(partition_dir);
+        let tmp_path = path.with_extension("json.tmp");
         let json = serde_json::to_string_pretty(self)?;
-        std::fs::write(&path, json)?;
+        std::fs::write(&tmp_path, &json)?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| {
+            let _ = std::fs::remove_file(&tmp_path);
+            TsdbParquetError::Io(std::io::Error::other(format!(
+                "failed to rename manifest tmp file: {}",
+                e
+            )))
+        })?;
         Ok(())
     }
 

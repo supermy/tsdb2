@@ -45,10 +45,12 @@ COPY tsdb-dashboard/ ./
 RUN npm run build
 
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y ca-certificates libgcc-s1 tzdata && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates libgcc-s1 tzdata curl && rm -rf /var/lib/apt/lists/*
 RUN useradd -m -s /bin/bash tsdb
 COPY --from=builder /app/target/release/tsdb-cli /usr/local/bin/tsdb-cli
 COPY --from=frontend /app/tsdb-dashboard/dist /usr/local/bin/dashboard
 USER tsdb
-EXPOSE 50051
+EXPOSE 50051 8080 3000
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:8080/api/health || exit 1
 ENTRYPOINT ["tsdb-cli"]

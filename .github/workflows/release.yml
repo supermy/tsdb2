@@ -39,9 +39,24 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+
+      - name: Run tests
+        if: "!matrix.use_cross"
+        run: cargo test --lib --release
+
+      - name: Run Clippy
+        if: "!matrix.use_cross"
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Check formatting
+        if: "!matrix.use_cross"
+        run: cargo fmt --all -- --check
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+          cache: npm
+          cache-dependency-path: tsdb-dashboard/package-lock.json
 
       - name: Install cross
         if: matrix.use_cross
@@ -121,7 +136,7 @@ jobs:
       - name: Generate changelog
         id: changelog
         run: |
-          PREV_TAG=$(git tag --sort=-version:refname | head -2 | tail -1)
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${GITHUB_REF_NAME}$" | head -1)
           if [ -z "$PREV_TAG" ]; then
             CHANGELOG=$(git log --pretty=format:"- %s" HEAD~20..HEAD)
           else

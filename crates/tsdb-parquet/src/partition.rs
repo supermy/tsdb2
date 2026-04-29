@@ -6,25 +6,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tracing::info;
 
-/// 数据目录前缀
 pub const CF_PREFIX: &str = "data_";
-/// 元数据目录名
 pub const METADATA_DIR: &str = "metadata";
-/// 默认热数据保留天数
 pub const DEFAULT_HOT_DAYS: u64 = 7;
-/// 默认数据总保留天数
 pub const DEFAULT_RETENTION_DAYS: u64 = 30;
+pub const TIER_HOT: &str = "hot";
+pub const TIER_ACTIVE: &str = "active";
+pub const TIER_WARM: &str = "warm";
+pub const TIER_COLD: &str = "cold";
 
-/// 分区配置
 #[derive(Debug, Clone)]
 pub struct PartitionConfig {
-    /// 热数据保留天数, 默认 7 天
     pub hot_days: u64,
-    /// 数据总保留天数, 默认 30 天
     pub retention_days: u64,
-    /// 目标文件大小 (字节), 默认 64MB
     pub target_file_size: usize,
-    /// 行组大小, 默认 100 万行
     pub row_group_size: usize,
 }
 
@@ -39,38 +34,25 @@ impl Default for PartitionConfig {
     }
 }
 
-/// 日期分区管理器
-///
-/// 按日期组织 Parquet 文件, 每个日期对应一个目录 `data_{YYYYMMDD}`。
-/// 支持热/冷数据判定、过期分区清理、范围查询分区列表。
+type PartitionKey = (NaiveDate, String);
+
 pub struct PartitionManager {
-    /// 基础目录
     base_dir: PathBuf,
-    /// 分区配置
     config: PartitionConfig,
-    /// 已发现的分区 (线程安全, 按日期排序)
-    known_partitions: Mutex<BTreeMap<NaiveDate, PartitionInfo>>,
+    known_partitions: Mutex<BTreeMap<PartitionKey, PartitionInfo>>,
 }
 
-/// 分区信息
 #[derive(Debug, Clone)]
 pub struct PartitionInfo {
-    /// 分区日期
     pub date: NaiveDate,
-    /// 分区目录路径
     pub dir: PathBuf,
-    /// Parquet 文件数量
     pub file_count: usize,
-    /// 总文件大小 (字节)
     pub total_size: u64,
-    /// 是否为热数据分区
     pub is_hot: bool,
+    pub tier: String,
 }
 
 impl PartitionManager {
-    /// 创建分区管理器
-    ///
-    /// 自动创建基础目录和元数据目录, 并扫描已有分区。
     pub fn new(base_dir: impl AsRef<Path>, config: PartitionConfig) -> Result<Self> {
         let base_dir = base_dir.as_ref().to_path_buf();
         fs::create_dir_all(&base_dir).map_err(|e| {
@@ -88,42 +70,12 @@ impl PartitionManager {
             known_partitions: Mutex::new(BTreeMap::new()),
         };
 
-        pm.discover_partitions()?;
+        pm.discover_partitions_impl()?;
         Ok(pm)
     }
 
-    fn discover_partitions(&mut self) -> Result<()> {
-        self.discover_partitions_impl()
-    }
-
-    /// 刷新分区列表 (重新扫描磁盘目录)
     pub fn refresh(&self) -> Result<()> {
-        let entries = fs::read_dir(&self.base_dir)
-            .map_err(|e| TsdbParquetError::Partition(format!("failed to read base dir: {}", e)))?;
-
-        let mut partitions = BTreeMap::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if let Some(date_str) = name_str.strip_prefix(CF_PREFIX) {
-                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y%m%d") {
-                    let dir = entry.path();
-                    let (file_count, total_size) = count_parquet_files(&dir);
-                    let is_hot = self.is_hot_date(date);
-                    partitions.insert(
-                        date,
-                        PartitionInfo {
-                            date,
-                            dir,
-                            file_count,
-                            total_size,
-                            is_hot,
-                        },
-                    );
-                }
-            }
-        }
-
+        let partitions = self.scan_all_partitions();
         *self
             .known_partitions
             .lock()
@@ -131,45 +83,87 @@ impl PartitionManager {
         Ok(())
     }
 
-    fn discover_partitions_impl(&mut self) -> Result<()> {
-        let entries = fs::read_dir(&self.base_dir)
-            .map_err(|e| TsdbParquetError::Partition(format!("failed to read base dir: {}", e)))?;
-
+    fn scan_all_partitions(&self) -> BTreeMap<PartitionKey, PartitionInfo> {
         let mut partitions = BTreeMap::new();
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if let Some(date_str) = name_str.strip_prefix(CF_PREFIX) {
-                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y%m%d") {
-                    let dir = entry.path();
-                    let (file_count, total_size) = count_parquet_files(&dir);
-                    let is_hot = self.is_hot_date(date);
-                    partitions.insert(
-                        date,
-                        PartitionInfo {
-                            date,
-                            dir,
-                            file_count,
-                            total_size,
-                            is_hot,
-                        },
-                    );
+
+        if let Ok(entries) = fs::read_dir(&self.base_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str == "warm" || name_str == "cold" || name_str == "archive" || name_str == "wal" || name_str == METADATA_DIR {
+                    continue;
+                }
+                if let Some(date_str) = name_str.strip_prefix(CF_PREFIX) {
+                    if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y%m%d") {
+                        let dir = entry.path();
+                        let (file_count, total_size) = count_parquet_files_recursive(&dir);
+                        let is_hot = self.is_hot_date(date);
+                        partitions.insert(
+                            (date, TIER_ACTIVE.to_string()),
+                            PartitionInfo {
+                                date,
+                                dir,
+                                file_count,
+                                total_size,
+                                is_hot,
+                                tier: TIER_ACTIVE.to_string(),
+                            },
+                        );
+                    }
                 }
             }
         }
 
-        *self.known_partitions.get_mut().unwrap() = partitions;
+        for tier_name in &[TIER_WARM, TIER_COLD, "archive"] {
+            let tier_dir = self.base_dir.join(tier_name);
+            if !tier_dir.is_dir() {
+                continue;
+            }
+            if let Ok(entries) = fs::read_dir(&tier_dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    if let Some(date_str) = name_str.strip_prefix(CF_PREFIX) {
+                        if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y%m%d") {
+                            let dir = entry.path();
+                            let (file_count, total_size) = count_parquet_files_recursive(&dir);
+                            partitions.insert(
+                                (date, tier_name.to_string()),
+                                PartitionInfo {
+                                    date,
+                                    dir,
+                                    file_count,
+                                    total_size,
+                                    is_hot: false,
+                                    tier: tier_name.to_string(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        partitions
+    }
+
+    fn discover_partitions_impl(&mut self) -> Result<()> {
+        let partitions = self.scan_all_partitions();
+        *self.known_partitions.get_mut().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in scan_partitions, recovering: {}", e);
+            e.into_inner()
+        }) = partitions;
         Ok(())
     }
 
-    /// 确保分区目录存在 (不存在则创建)
     pub fn ensure_partition(&self, date: NaiveDate) -> Result<PathBuf> {
+        let key = (date, TIER_ACTIVE.to_string());
         {
             let partitions = self
                 .known_partitions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            if let Some(info) = partitions.get(&date) {
+            if let Some(info) = partitions.get(&key) {
                 return Ok(info.dir.clone());
             }
         }
@@ -181,7 +175,7 @@ impl PartitionManager {
         })?;
 
         let is_hot = self.is_hot_date(date);
-        let (file_count, total_size) = count_parquet_files(&dir);
+        let (file_count, total_size) = count_parquet_files_recursive(&dir);
 
         let info = PartitionInfo {
             date,
@@ -189,74 +183,118 @@ impl PartitionManager {
             file_count,
             total_size,
             is_hot,
+            tier: TIER_ACTIVE.to_string(),
         };
 
         self.known_partitions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(date, info);
+            .insert(key, info);
 
         info!("created partition {} (hot={})", dir_name, is_hot);
         Ok(dir)
     }
 
-    /// 获取分区目录路径
+    pub fn ensure_measurement_partition(
+        &self,
+        date: NaiveDate,
+        measurement: &str,
+    ) -> Result<PathBuf> {
+        let date_dir = self.ensure_partition(date)?;
+        let measurement_dir = date_dir.join(measurement);
+        fs::create_dir_all(&measurement_dir).map_err(|e| {
+            TsdbParquetError::Partition(format!(
+                "failed to create measurement partition dir: {}",
+                e
+            ))
+        })?;
+        Ok(measurement_dir)
+    }
+
     pub fn get_partition_dir(&self, date: NaiveDate) -> Option<PathBuf> {
+        let key = (date, TIER_ACTIVE.to_string());
         self.known_partitions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&date)
+            .get(&key)
             .map(|i| i.dir.clone())
     }
 
-    /// 获取日期范围内的分区列表
-    pub fn get_partitions_in_range(&self, start: NaiveDate, end: NaiveDate) -> Vec<PartitionInfo> {
+    pub fn get_partitions_in_range(
+        &self,
+        start: NaiveDate,
+        end: NaiveDate,
+    ) -> Vec<PartitionInfo> {
         self.known_partitions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .range(start..=end)
+            .range((start, String::new())..=(end, String::from("\x7f")))
             .map(|(_, v)| v.clone())
             .collect()
     }
 
-    /// 清理过期分区
-    ///
-    /// 删除早于 `now - retention_days` 的分区目录
     pub fn cleanup_expired(&self) -> Result<Vec<String>> {
-        let cutoff = chrono::Local::now().date_naive()
-            - chrono::Duration::days(self.config.retention_days as i64);
+        self.cleanup_expired_with_retention(self.config.retention_days)
+    }
+
+    pub fn cleanup_expired_with_retention(&self, retention_days: u64) -> Result<Vec<String>> {
+        self.refresh()?;
+        let today = chrono::Utc::now().date_naive();
 
         let mut dropped = Vec::new();
-        let expired: Vec<NaiveDate> = self
+        let mut errors = Vec::new();
+        let expired: Vec<PartitionKey> = self
             .known_partitions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .keys()
-            .filter(|&&d| d < cutoff)
-            .copied()
+            .filter(|(d, tier)| {
+                let tier_retention = match tier.as_str() {
+                    TIER_ACTIVE => retention_days,
+                    TIER_WARM => retention_days * 2,
+                    TIER_COLD => retention_days * 4,
+                    "archive" => u64::MAX,
+                    _ => retention_days,
+                };
+                *d < today - chrono::Duration::days(tier_retention as i64)
+            })
+            .cloned()
             .collect();
 
-        for date in expired {
-            if let Some(info) = self
+        for key in expired {
+            let info = self
                 .known_partitions
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .remove(&date)
-            {
+                .get(&key)
+                .cloned();
+            if let Some(info) = info {
                 info!("dropping expired partition: {}", info.dir.display());
                 if info.dir.exists() {
-                    fs::remove_dir_all(&info.dir).map_err(|e| {
-                        TsdbParquetError::Partition(format!("failed to remove partition: {}", e))
-                    })?;
+                    if let Err(e) = fs::remove_dir_all(&info.dir) {
+                        tracing::error!(
+                            "failed to remove partition {}: {}",
+                            info.dir.display(),
+                            e
+                        );
+                        errors.push(format!("{}: {}", info.dir.display(), e));
+                        continue;
+                    }
                 }
+                self.known_partitions
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&key);
                 dropped.push(info.dir.to_string_lossy().to_string());
             }
         }
 
+        if !errors.is_empty() {
+            tracing::warn!("cleanup_expired completed with {} errors", errors.len());
+        }
         Ok(dropped)
     }
 
-    /// 列出指定日期分区内的所有 Parquet 文件
     pub fn list_parquet_files(&self, date: NaiveDate) -> Result<Vec<PathBuf>> {
         let dir = self.ensure_partition(date)?;
         let mut files = Vec::new();
@@ -265,56 +303,110 @@ impl PartitionManager {
         Ok(files)
     }
 
-    /// 获取元数据目录路径
+    pub fn list_measurement_parquet_files(
+        &self,
+        date: NaiveDate,
+        measurement: &str,
+    ) -> Result<Vec<PathBuf>> {
+        let dir = self.ensure_partition(date)?;
+        let measurement_dir = dir.join(measurement);
+        if !measurement_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut files = Vec::new();
+        collect_parquet_files(&measurement_dir, &mut files);
+        files.sort();
+        Ok(files)
+    }
+
+    pub fn list_measurements_for_date(&self, date: NaiveDate) -> Result<Vec<String>> {
+        let dir = self.ensure_partition(date)?;
+        let mut measurements = Vec::new();
+        if let Ok(entries) = fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && has_parquet_files(&path) {
+                    if let Some(name) = entry.file_name().to_str() {
+                        measurements.push(name.to_string());
+                    }
+                }
+            }
+        }
+        measurements.sort();
+        Ok(measurements)
+    }
+
     pub fn metadata_dir(&self) -> PathBuf {
         self.base_dir.join(METADATA_DIR)
     }
 
-    /// 获取基础目录路径
     pub fn base_dir(&self) -> &Path {
         &self.base_dir
     }
 
-    /// 获取分区配置
     pub fn config(&self) -> &PartitionConfig {
         &self.config
     }
 
-    /// 删除指定日期的分区
     pub fn remove_partition(&self, date: NaiveDate) -> Result<()> {
-        if let Some(info) = self
+        let key = (date, TIER_ACTIVE.to_string());
+        let info = self
             .known_partitions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&date)
-        {
-            if info.dir.exists() {
-                fs::remove_dir_all(&info.dir).map_err(|e| {
-                    TsdbParquetError::Partition(format!("failed to remove partition: {}", e))
-                })?;
-            }
+            .get(&key)
+            .cloned();
+        let info = match info {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        if info.dir.exists() {
+            fs::remove_dir_all(&info.dir).map_err(|e| {
+                TsdbParquetError::Partition(format!("failed to remove partition: {}", e))
+            })?;
         }
+        self.known_partitions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&key);
         Ok(())
     }
 
     pub fn list_measurements(&self) -> Vec<String> {
         let mut measurements = std::collections::HashSet::new();
-        if let Ok(entries) = fs::read_dir(&self.base_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().to_string();
-                if name.starts_with(CF_PREFIX) {
-                    let date_str = name.trim_start_matches(CF_PREFIX).to_string();
-                    if NaiveDate::parse_from_str(&date_str, "%Y%m%d").is_ok() {
-                        let dir = entry.path();
-                        if let Ok(files) = fs::read_dir(&dir) {
-                            for file_entry in files.flatten() {
-                                let file_path = file_entry.path();
-                                if file_path.extension().map(|e| e == "parquet").unwrap_or(false) {
-                                    if let Ok(file) = std::fs::File::open(&file_path) {
-                                        if let Ok(builder) = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file) {
-                                            let arrow_schema = builder.schema();
-                                            if let Some(mf) = arrow_schema.metadata().get("measurement") {
-                                                measurements.insert(mf.clone());
+
+        let mut scan_dir = |dir: &Path| {
+            if let Ok(entries) = fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if name.starts_with(CF_PREFIX) {
+                        let date_str = name.trim_start_matches(CF_PREFIX).to_string();
+                        if NaiveDate::parse_from_str(&date_str, "%Y%m%d").is_ok() {
+                            let date_dir = entry.path();
+                            if let Ok(sub_entries) = fs::read_dir(&date_dir) {
+                                for sub_entry in sub_entries.flatten() {
+                                    if sub_entry.path().is_dir() {
+                                        let m_name = sub_entry.file_name().to_string_lossy().to_string();
+                                        let sub_path = sub_entry.path();
+                                        if has_parquet_files(&sub_path) {
+                                            measurements.insert(m_name);
+                                        }
+                                    }
+                                }
+                            }
+                            let (file_count, _) = count_parquet_files_flat(&date_dir);
+                            if file_count > 0 {
+                                if let Ok(files) = fs::read_dir(&date_dir) {
+                                    for file_entry in files.flatten() {
+                                        let file_path = file_entry.path();
+                                        if file_path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                                            if let Ok(file) = std::fs::File::open(&file_path) {
+                                                if let Ok(builder) = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file) {
+                                                    let arrow_schema = builder.schema();
+                                                    if let Some(mf) = arrow_schema.metadata().get("measurement") {
+                                                        measurements.insert(mf.clone());
+                                                    }
+                                                }
                                             }
                                         }
                                     }
@@ -324,22 +416,63 @@ impl PartitionManager {
                     }
                 }
             }
+        };
+
+        scan_dir(&self.base_dir);
+
+        for tier in &[TIER_WARM, TIER_COLD, "archive"] {
+            let tier_dir = self.base_dir.join(tier);
+            if tier_dir.is_dir() {
+                scan_dir(&tier_dir);
+            }
         }
+
         let mut result: Vec<String> = measurements.into_iter().collect();
         result.sort();
         result
     }
 
-    /// 判断日期是否为热数据
     fn is_hot_date(&self, date: NaiveDate) -> bool {
-        let today = chrono::Local::now().date_naive();
+        let today = chrono::Utc::now().date_naive();
         let diff = (today - date).num_days();
         diff >= 0 && (diff as u64) <= self.config.hot_days
     }
 }
 
-/// 统计目录中的 Parquet 文件数量和总大小
-fn count_parquet_files(dir: &Path) -> (usize, u64) {
+fn has_parquet_files(dir: &Path) -> bool {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn count_parquet_files_recursive(dir: &Path) -> (usize, u64) {
+    let mut count = 0;
+    let mut size = 0u64;
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let (c, s) = count_parquet_files_recursive(&path);
+                count += c;
+                size += s;
+            } else if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                count += 1;
+                if let Ok(meta) = path.metadata() {
+                    size += meta.len();
+                }
+            }
+        }
+    }
+    (count, size)
+}
+
+fn count_parquet_files_flat(dir: &Path) -> (usize, u64) {
     let mut count = 0;
     let mut size = 0u64;
     if let Ok(entries) = fs::read_dir(dir) {
@@ -356,8 +489,7 @@ fn count_parquet_files(dir: &Path) -> (usize, u64) {
     (count, size)
 }
 
-/// 递归收集目录中的 Parquet 文件
-fn collect_parquet_files(dir: &Path, files: &mut Vec<PathBuf>) {
+pub fn collect_parquet_files(dir: &Path, files: &mut Vec<PathBuf>) {
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -370,15 +502,15 @@ fn collect_parquet_files(dir: &Path, files: &mut Vec<PathBuf>) {
     }
 }
 
-/// 微秒时间戳转日期
-///
-/// 将微秒时间戳截断为秒, 再转换为 UTC 日期。
-/// 转换失败时回退到当前本地日期。
-pub fn micros_to_date(micros: i64) -> NaiveDate {
-    let secs = micros / 1_000_000;
-    chrono::DateTime::from_timestamp(secs, 0)
+pub fn micros_to_date(micros: i64) -> Result<NaiveDate> {
+    chrono::DateTime::from_timestamp_micros(micros)
         .map(|dt| dt.date_naive())
-        .unwrap_or_else(|| chrono::Local::now().date_naive())
+        .ok_or_else(|| {
+            crate::error::TsdbParquetError::Io(std::io::Error::other(format!(
+                "invalid timestamp: {}",
+                micros
+            )))
+        })
 }
 
 #[cfg(test)]
@@ -433,7 +565,151 @@ mod tests {
             .unwrap()
             .and_utc()
             .timestamp_micros();
-        let date = micros_to_date(ts);
+        let date = micros_to_date(ts).unwrap();
         assert_eq!(date, today);
+    }
+
+    #[test]
+    fn test_remove_partition() {
+        let dir = TempDir::new().unwrap();
+        let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+        let partition_dir = pm.ensure_partition(today).unwrap();
+        assert!(partition_dir.exists());
+
+        pm.remove_partition(today).unwrap();
+        assert!(
+            !partition_dir.exists(),
+            "partition directory should be deleted after remove"
+        );
+
+        let range = pm.get_partitions_in_range(today, today);
+        assert!(
+            range.is_empty(),
+            "partition should be removed from known_partitions"
+        );
+    }
+
+    #[test]
+    fn test_remove_partition_nonexistent() {
+        let dir = TempDir::new().unwrap();
+        let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+        let result = pm.remove_partition(today);
+        assert!(
+            result.is_ok(),
+            "removing nonexistent partition should not error"
+        );
+    }
+
+    #[test]
+    fn test_cleanup_expired_continues_on_error() {
+        let dir = TempDir::new().unwrap();
+        let config = PartitionConfig {
+            retention_days: 0,
+            ..Default::default()
+        };
+        let pm = PartitionManager::new(dir.path(), config).unwrap();
+
+        let old_date = chrono::Utc::now().date_naive() - chrono::Duration::days(10);
+        let older_date = chrono::Utc::now().date_naive() - chrono::Duration::days(20);
+
+        pm.ensure_partition(old_date).unwrap();
+        pm.ensure_partition(older_date).unwrap();
+
+        let dropped = pm.cleanup_expired().unwrap();
+        assert_eq!(
+            dropped.len(),
+            2,
+            "both expired partitions should be cleaned up"
+        );
+    }
+
+    #[test]
+    fn test_measurement_subdirectory() {
+        let dir = TempDir::new().unwrap();
+        let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+        let cpu_dir = pm.ensure_measurement_partition(today, "cpu").unwrap();
+        let mem_dir = pm.ensure_measurement_partition(today, "mem").unwrap();
+
+        assert!(cpu_dir.exists());
+        assert!(mem_dir.exists());
+        assert_ne!(cpu_dir, mem_dir);
+        assert!(cpu_dir.to_string_lossy().ends_with("/cpu"));
+        assert!(mem_dir.to_string_lossy().ends_with("/mem"));
+
+        let date_dir = pm.ensure_partition(today).unwrap();
+        assert!(cpu_dir.starts_with(&date_dir));
+        assert!(mem_dir.starts_with(&date_dir));
+    }
+
+    #[test]
+    fn test_list_measurement_parquet_files_empty() {
+        let dir = TempDir::new().unwrap();
+        let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+        let files = pm.list_measurement_parquet_files(today, "nonexistent").unwrap();
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_same_date_active_and_warm_not_overwrite() {
+        let dir = TempDir::new().unwrap();
+        let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
+
+        let today = chrono::Utc::now().date_naive();
+        let active_dir = pm.ensure_partition(today).unwrap();
+
+        let warm_dir_path = dir.path().join("warm").join(format!("data_{}", today.format("%Y%m%d")));
+        std::fs::create_dir_all(&warm_dir_path).unwrap();
+        let warm_cpu_dir = warm_dir_path.join("cpu");
+        std::fs::create_dir_all(&warm_cpu_dir).unwrap();
+        std::fs::write(warm_cpu_dir.join("test.parquet"), "fake").unwrap();
+
+        pm.refresh().unwrap();
+
+        let partitions = pm.get_partitions_in_range(today, today);
+        assert_eq!(partitions.len(), 2, "should have both active and warm partitions for the same date");
+
+        let active_partition = partitions.iter().find(|p| p.tier == TIER_ACTIVE);
+        let warm_partition = partitions.iter().find(|p| p.tier == TIER_WARM);
+
+        assert!(active_partition.is_some(), "active partition should exist");
+        assert!(warm_partition.is_some(), "warm partition should exist");
+
+        assert_eq!(active_partition.unwrap().dir, active_dir);
+        assert_eq!(warm_partition.unwrap().dir, warm_dir_path);
+    }
+
+    #[test]
+    fn test_same_date_all_tiers() {
+        let dir = TempDir::new().unwrap();
+        let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
+
+        let old_date = chrono::Utc::now().date_naive() - chrono::Duration::days(10);
+        let _active_dir = pm.ensure_partition(old_date).unwrap();
+
+        for tier in &["warm", "cold"] {
+            let tier_dir_path = dir.path().join(tier).join(format!("data_{}", old_date.format("%Y%m%d")));
+            std::fs::create_dir_all(&tier_dir_path).unwrap();
+            let m_dir = tier_dir_path.join("mem");
+            std::fs::create_dir_all(&m_dir).unwrap();
+            std::fs::write(m_dir.join("test.parquet"), "fake").unwrap();
+        }
+
+        pm.refresh().unwrap();
+
+        let partitions = pm.get_partitions_in_range(old_date, old_date);
+        assert_eq!(partitions.len(), 3, "should have active + warm + cold partitions for the same date");
+
+        let tiers: Vec<&str> = partitions.iter().map(|p| p.tier.as_str()).collect();
+        assert!(tiers.contains(&TIER_ACTIVE));
+        assert!(tiers.contains(&TIER_WARM));
+        assert!(tiers.contains(&TIER_COLD));
     }
 }

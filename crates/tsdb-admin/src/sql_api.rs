@@ -7,6 +7,7 @@ use tsdb_arrow::engine::StorageEngine;
 const MAX_SQL_RESULT_ROWS: usize = 5000;
 const SQL_TIMEOUT_SECS: u64 = 30;
 const MAX_ROCKSDB_LOAD_ROWS: usize = 100_000;
+const MAX_SQL_LENGTH: usize = 10000;
 
 pub struct SqlApi {
     engine: Arc<dyn StorageEngine>,
@@ -27,15 +28,45 @@ impl SqlApi {
         }
     }
 
-    pub async fn execute(&self, sql: &str) -> Result<SqlResult, String> {
-        let upper = sql.trim().to_uppercase();
-        if !upper.starts_with("SELECT")
-            && !upper.starts_with("SHOW")
-            && !upper.starts_with("EXPLAIN")
-            && !upper.starts_with("WITH")
-        {
-            return Err("only SELECT/SHOW/EXPLAIN/WITH queries are allowed".to_string());
+    fn validate_sql_readonly(sql: &str) -> Result<(), String> {
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return Err("SQL query must not be empty".to_string());
         }
+        if trimmed.len() > MAX_SQL_LENGTH {
+            return Err(format!(
+                "SQL query too long: {} bytes (max {})",
+                trimmed.len(),
+                MAX_SQL_LENGTH
+            ));
+        }
+
+        use datafusion::sql::sqlparser::ast::Statement;
+        use datafusion::sql::sqlparser::dialect::GenericDialect;
+        use datafusion::sql::sqlparser::parser::Parser;
+
+        let dialect = GenericDialect;
+        let statements = Parser::parse_sql(&dialect, sql)
+            .map_err(|_| "SQL parse error".to_string())?;
+
+        for stmt in &statements {
+            match stmt {
+                Statement::Query(_)
+                | Statement::Explain { .. }
+                | Statement::ExplainTable { .. }
+                | Statement::ShowTables { .. }
+                | Statement::ShowColumns { .. }
+                | Statement::ShowCreate { .. } => {}
+                _ => {
+                    return Err("Only SELECT/EXPLAIN/SHOW queries are allowed".to_string());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn execute(&self, sql: &str) -> Result<SqlResult, String> {
+        Self::validate_sql_readonly(sql)?;
 
         let config =
             datafusion::execution::context::SessionConfig::new().with_information_schema(true);
@@ -49,7 +80,10 @@ impl SqlApi {
         let df = ctx
             .sql(sql)
             .await
-            .map_err(|e| format!("SQL parse error: {}", e))?;
+            .map_err(|e| {
+                tracing::error!("SQL parse error: {}", e);
+                "SQL parse error".to_string()
+            })?;
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(SQL_TIMEOUT_SECS),
@@ -59,7 +93,10 @@ impl SqlApi {
 
         let batches = match result {
             Ok(Ok(batches)) => batches,
-            Ok(Err(e)) => return Err(format!("SQL execute error: {}", e)),
+            Ok(Err(e)) => {
+                tracing::error!("SQL execute error: {}", e);
+                return Err("SQL execute error".to_string());
+            }
             Err(_) => return Err(format!("SQL query timed out after {}s", SQL_TIMEOUT_SECS)),
         };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -83,8 +120,18 @@ impl SqlApi {
                 total_rows += 1;
                 if rows.len() < MAX_SQL_RESULT_ROWS {
                     let mut map = serde_json::Map::new();
-                    for (col_idx, col_name) in columns.iter().enumerate() {
-                        let real_idx = batch.schema().index_of(col_name).unwrap_or(col_idx);
+                    for col_name in columns.iter() {
+                        let real_idx = match batch.schema().index_of(col_name) {
+                            Ok(idx) => idx,
+                            Err(_) => {
+                                map.insert(col_name.clone(), serde_json::Value::Null);
+                                continue;
+                            }
+                        };
+                        if real_idx >= batch.num_columns() {
+                            map.insert(col_name.clone(), serde_json::Value::Null);
+                            continue;
+                        }
                         let val = Self::arrow_col_to_json(batch, real_idx, row_idx);
                         map.insert(col_name.clone(), val);
                     }
@@ -584,5 +631,67 @@ impl SqlApi {
             }
             _ => serde_json::Value::Null,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_sql_readonly_select() {
+        assert!(SqlApi::validate_sql_readonly("SELECT * FROM cpu").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_explain() {
+        assert!(SqlApi::validate_sql_readonly("EXPLAIN SELECT * FROM cpu").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_show() {
+        assert!(SqlApi::validate_sql_readonly("SHOW TABLES").is_ok());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_insert_rejected() {
+        assert!(SqlApi::validate_sql_readonly("INSERT INTO cpu VALUES (1, 2, 3)").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_delete_rejected() {
+        assert!(SqlApi::validate_sql_readonly("DELETE FROM cpu WHERE host='a'").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_drop_rejected() {
+        assert!(SqlApi::validate_sql_readonly("DROP TABLE cpu").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_update_rejected() {
+        assert!(SqlApi::validate_sql_readonly("UPDATE cpu SET value=1").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_readonly_create_rejected() {
+        assert!(SqlApi::validate_sql_readonly("CREATE TABLE evil (id INT)").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_length_limit() {
+        let long_sql = format!("SELECT * FROM {}", "a".repeat(MAX_SQL_LENGTH));
+        assert!(SqlApi::validate_sql_readonly(&long_sql).is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_empty_rejected() {
+        assert!(SqlApi::validate_sql_readonly("").is_err());
+        assert!(SqlApi::validate_sql_readonly("   ").is_err());
+    }
+
+    #[test]
+    fn test_validate_sql_invalid_rejected() {
+        assert!(SqlApi::validate_sql_readonly("NOT SQL AT ALL!!!").is_err());
     }
 }

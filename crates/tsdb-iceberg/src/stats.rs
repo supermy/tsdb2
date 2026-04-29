@@ -227,7 +227,7 @@ pub fn merge_column_stats(base: &mut ColumnStats, other: &ColumnStats) {
                 e.insert(lb.clone());
             }
             Entry::Occupied(mut e) => {
-                if lb.as_slice() < e.get().as_slice() {
+                if compare_bounds(lb.as_slice(), e.get().as_slice(), false) {
                     *e.get_mut() = lb.clone();
                 }
             }
@@ -240,10 +240,48 @@ pub fn merge_column_stats(base: &mut ColumnStats, other: &ColumnStats) {
                 e.insert(ub.clone());
             }
             Entry::Occupied(mut e) => {
-                if ub.as_slice() > e.get().as_slice() {
+                if compare_bounds(ub.as_slice(), e.get().as_slice(), true) {
                     *e.get_mut() = ub.clone();
                 }
             }
+        }
+    }
+}
+
+fn compare_bounds(a: &[u8], b: &[u8], is_upper: bool) -> bool {
+    match a.len() {
+        8 => {
+            let va = u64::from_be_bytes(a.try_into().unwrap_or([0; 8]));
+            let vb = u64::from_be_bytes(b.try_into().unwrap_or([0; 8]));
+            let va = if va & 0x8000_0000_0000_0000 != 0 {
+                va ^ 0xFFFF_FFFF_FFFF_FFFF
+            } else {
+                va ^ 0x8000_0000_0000_0000
+            };
+            let vb = if vb & 0x8000_0000_0000_0000 != 0 {
+                vb ^ 0xFFFF_FFFF_FFFF_FFFF
+            } else {
+                vb ^ 0x8000_0000_0000_0000
+            };
+            if is_upper { va > vb } else { va < vb }
+        }
+        4 => {
+            let va = u32::from_be_bytes(a.try_into().unwrap_or([0; 4]));
+            let vb = u32::from_be_bytes(b.try_into().unwrap_or([0; 4]));
+            let va = if va & 0x8000_0000 != 0 {
+                va ^ 0xFFFF_FFFF
+            } else {
+                va ^ 0x8000_0000
+            };
+            let vb = if vb & 0x8000_0000 != 0 {
+                vb ^ 0xFFFF_FFFF
+            } else {
+                vb ^ 0x8000_0000
+            };
+            if is_upper { va > vb } else { va < vb }
+        }
+        _ => {
+            if is_upper { a > b } else { a < b }
         }
     }
 }

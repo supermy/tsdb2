@@ -4,25 +4,37 @@ use arrow::array::*;
 use arrow::datatypes::{DataType, SchemaRef};
 use std::sync::Arc;
 
-const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
-const FNV_PRIME: u64 = 0x100000001b3;
+pub fn compute_tags_hash(tags: &Tags) -> u64 {
+    use std::collections::BTreeMap;
+    use std::hash::{Hash, Hasher};
 
-fn fnv1a_hash_bytes(hash: u64, bytes: &[u8]) -> u64 {
-    let mut h = hash;
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(FNV_PRIME);
+    let mut sorted: BTreeMap<&str, &str> = BTreeMap::new();
+    for (k, v) in tags.iter() {
+        sorted.insert(k.as_str(), v.as_str());
     }
-    h
+    let mut hasher = fxhash::FxHasher::default();
+    for (k, v) in &sorted {
+        k.hash(&mut hasher);
+        v.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
-pub fn compute_tags_hash(tags: &Tags) -> u64 {
-    let mut hash = FNV_OFFSET_BASIS;
-    for (k, v) in tags {
-        hash = fnv1a_hash_bytes(hash, k.as_bytes());
-        hash = fnv1a_hash_bytes(hash, v.as_bytes());
+pub fn compute_series_hash(measurement: &str, tags: &Tags) -> u64 {
+    use std::collections::BTreeMap;
+    use std::hash::{Hash, Hasher};
+
+    let mut sorted: BTreeMap<&str, &str> = BTreeMap::new();
+    for (k, v) in tags.iter() {
+        sorted.insert(k.as_str(), v.as_str());
     }
-    hash
+    let mut hasher = fxhash::FxHasher::default();
+    measurement.hash(&mut hasher);
+    for (k, v) in &sorted {
+        k.hash(&mut hasher);
+        v.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// 将 DataPoint 列表转换为 Arrow RecordBatch
@@ -44,7 +56,7 @@ pub fn datapoints_to_record_batch(
     let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
 
     for field in schema.fields() {
-        let arr = build_column_array(field.name(), field.data_type(), datapoints)?;
+        let arr = build_column_array(field, datapoints)?;
         columns.push(arr);
     }
 
@@ -53,19 +65,21 @@ pub fn datapoints_to_record_batch(
 
 /// 根据列名分发到对应的数组构建函数
 fn build_column_array(
-    name: &str,
-    dtype: &DataType,
+    field: &arrow::datatypes::Field,
     datapoints: &[DataPoint],
 ) -> Result<Arc<dyn Array>> {
-    match name {
+    let name = field.name();
+    let dtype = field.data_type();
+    match name.as_str() {
         "timestamp" => build_timestamp_array(dtype, datapoints),
         "measurement" => build_measurement_array(datapoints),
         "tags_hash" => build_tags_hash_array(datapoints),
         "tag_keys" => build_tag_keys_array(datapoints),
         "tag_values" => build_tag_values_array(datapoints),
         _ => {
-            if let Some(prefix) = name.strip_prefix("tag_") {
-                build_tag_column_array(prefix, datapoints)
+            if crate::schema::is_tag_field(field) {
+                let tag_key = name.strip_prefix("tag_").unwrap_or(name);
+                build_tag_column_array(tag_key, datapoints)
             } else {
                 build_field_column_array(name, dtype, datapoints)
             }
@@ -102,7 +116,7 @@ fn build_measurement_array(datapoints: &[DataPoint]) -> Result<Arc<dyn Array>> {
 fn build_tags_hash_array(datapoints: &[DataPoint]) -> Result<Arc<dyn Array>> {
     let mut builder = UInt64Builder::new();
     for dp in datapoints {
-        let hash = compute_tags_hash(&dp.tags);
+        let hash = compute_series_hash(&dp.measurement, &dp.tags);
         builder.append_value(hash);
     }
     Ok(Arc::new(builder.finish()))
@@ -275,21 +289,14 @@ pub fn record_batch_to_datapoints(batch: &RecordBatch) -> Result<Vec<DataPoint>>
                 continue;
             }
 
-            if let Some(tag_key) = name.strip_prefix("tag_") {
-                if field
-                    .metadata()
-                    .get("tsdb_role")
-                    .map(|r| r == "tag")
-                    .unwrap_or(false)
-                    || (field.metadata().is_empty() && name.starts_with("tag_"))
-                {
-                    if let Some(col) = batch.column(idx).as_any().downcast_ref::<StringArray>() {
-                        if !col.is_null(i) {
-                            tags.insert(tag_key.to_string(), col.value(i).to_string());
-                        }
+            if crate::schema::is_tag_field(field) {
+                let tag_key = name.strip_prefix("tag_").unwrap_or(name);
+                if let Some(col) = batch.column(idx).as_any().downcast_ref::<StringArray>() {
+                    if !col.is_null(i) {
+                        tags.insert(tag_key.to_string(), col.value(i).to_string());
                     }
-                    continue;
                 }
+                continue;
             }
 
             let col = batch.column(idx);

@@ -34,7 +34,11 @@ pub fn measurement_to_schema(
     ];
 
     for key in tag_keys {
-        fields.push(Field::new(format!("tag_{}", key), DataType::Utf8, true));
+        let mut field_meta = HashMap::new();
+        field_meta.insert("tsdb_role".to_string(), "tag".to_string());
+        fields.push(
+            Field::new(format!("tag_{}", key), DataType::Utf8, true).with_metadata(field_meta),
+        );
     }
 
     for (name, value) in field_types {
@@ -43,8 +47,11 @@ pub fn measurement_to_schema(
             FieldValue::Integer(_) => DataType::Int64,
             FieldValue::String(_) => DataType::Utf8,
             FieldValue::Boolean(_) => DataType::Boolean,
+            FieldValue::Null => DataType::Null,
         };
-        fields.push(Field::new(name.clone(), dtype, true));
+        let mut field_meta = HashMap::new();
+        field_meta.insert("tsdb_role".to_string(), "field".to_string());
+        fields.push(Field::new(name.clone(), dtype, true).with_metadata(field_meta));
     }
 
     let mut metadata = HashMap::new();
@@ -64,8 +71,18 @@ pub fn measurement_to_schema(
 /// # 返回
 /// SQL DDL 语句字符串
 pub fn schema_to_sql(schema: &Schema) -> String {
-    let mut cols: Vec<String> = schema.fields().iter().map(|f| f.name().clone()).collect();
-    cols.insert(0, "timestamp".to_string());
+    let cols: Vec<String> = schema
+        .fields()
+        .iter()
+        .map(|f| {
+            let name = f.name();
+            if name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                name.clone()
+            } else {
+                format!("\"{}\"", name.replace('"', "\"\""))
+            }
+        })
+        .collect();
     format!("CREATE TABLE IF NOT EXISTS t ({})", cols.join(", "))
 }
 

@@ -17,7 +17,7 @@ mod tests {
         for t in 0..threads {
             let dps: Vec<DataPoint> = (0..points_per_thread)
                 .map(|i| {
-                    DataPoint::new(format!("metric_{}", t), 1_000_000 + i as i64 * 1_000)
+                    DataPoint::new("cpu", 1_000_000 + i as i64 * 1_000 + t as i64 * 10_000_000)
                         .with_tag("thread", format!("t{}", t))
                         .with_field("value", FieldValue::Float(i as f64 * 0.1))
                 })
@@ -26,7 +26,7 @@ mod tests {
         }
 
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
 
         for dps in &all_dps {
             writer.write_batch(dps).unwrap();
@@ -36,15 +36,11 @@ mod tests {
         let pm2 = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
         let reader = TsdbParquetReader::new(Arc::new(pm2));
 
-        let total: usize = (0..threads)
-            .map(|t| {
-                let tags = Tags::new();
-                reader
-                    .read_range(&format!("metric_{}", t), &tags, 1_000_000, 100_000_000)
-                    .unwrap()
-                    .len()
-            })
-            .sum();
+        let tags = Tags::new();
+        let total = reader
+            .read_range("cpu", &tags, 1_000_000, 100_000_000)
+            .unwrap()
+            .len();
 
         assert!(
             total > 0,

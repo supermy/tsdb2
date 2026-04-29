@@ -94,7 +94,14 @@ impl ConfigManager {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, content)?;
+        let tmp_path = path.with_extension("ini.tmp");
+        {
+            let mut f = std::fs::File::create(&tmp_path)?;
+            use std::io::Write;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+        }
+        std::fs::rename(&tmp_path, &path)?;
         let description = Self::extract_description(content, name);
         let profile = ConfigProfile {
             name: name.to_string(),

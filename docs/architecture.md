@@ -29,7 +29,58 @@
 └──────────────────────────────────────────────────┘
 ```
 
-## 1.1 RocksDB 引擎架构
+## 1.1 Arrow 存储引擎架构
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                    ArrowStorageEngine                                 │
+├──────────────────────────────────────────────────────────────────────┤
+│  写入 API (原子操作, 单次锁获取)                                       │
+│  ┌──────────┬──────────────────────────────────────────────────┐     │
+│  │ write()  │ validate → WAL → write_to_buffer (单次锁)        │     │
+│  │write_batch│ 全量validate → 全量WAL → 按measurement分组写buffer│     │
+│  └──────────┴──────────────────────────────────────────────────┘     │
+├──────────────────────────────────────────────────────────────────────┤
+│  读取 API (ensure_data_visible: 仅write_seq>flush_seq时flush)        │
+│  ┌──────────┬──────────────┬──────────────┬──────────────────┐      │
+│  │read_range│ get_point()  │read_range_   │ execute_sql()    │      │
+│  │范围查询   │ 精确点查+    │arrow()       │ DataFusion SQL   │      │
+│  │          │ 提前退出     │Arrow格式     │                  │      │
+│  └──────────┴──────────────┴──────────────┴──────────────────┘      │
+├──────────────────────────────────────────────────────────────────────┤
+│  生命周期 API                                                        │
+│  ┌──────────┬──────────────┬──────────────┬──────────────────┐      │
+│  │ flush()  │ compact()    │ cleanup()    │ list_measurements│      │
+│  │全量flush │ 分区压缩     │flush+过期清理│ 列出measurements │      │
+│  │+WAL trunc│ L0→L1→L2    │+stale writer │                  │      │
+│  └──────────┴──────────────┴──────────────┴──────────────────┘      │
+├──────────────────────────────────────────────────────────────────────┤
+│  核心组件                                                            │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │  TsdbWAL     │  │AsyncWriteBuf │  │  TsdbParquetWriter       │  │
+│  │ 段文件轮转   │  │ 后台定时flush│  │ Schema Evolution(延迟)   │  │
+│  │ 64MB/段     │  │ write_seq    │  │ align_batch_to_schema    │  │
+│  │ CRC32校验   │  │ 追踪         │  │ sort+dedup+flush         │  │
+│  │ 多段recover │  │              │  │                          │  │
+│  └──────────────┘  └──────────────┘  └──────────────────────────┘  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
+│  │PartitionMgr  │  │TsdbParquetRdr│  │  ParquetCompactor        │  │
+│  │data_YYYYMMDD │  │ Measurement  │  │ 临时文件+fsync+原子rename│  │
+│  │  /measurement│  │ 子目录隔离   │  │ 反向遍历去重             │  │
+│  │ 过期清理     │  │ RowGroup剪枝 │  │ Schema合并+null填充      │  │
+│  └──────────────┘  │ RowFilter下推│  └──────────────────────────┘  │
+│                    └──────────────┘                                  │
+├──────────────────────────────────────────────────────────────────────┤
+│  目录结构                                                            │
+│  data_YYYYMMDD/measurement/*.parquet  ← 热数据                      │
+│  warm/data_YYYYMMDD/measurement/      ← 温数据 (SNAPPY)             │
+│  cold/data_YYYYMMDD/measurement/      ← 冷数据 (ZSTD)               │
+│  archive/data_YYYYMMDD/measurement/   ← 归档 (ZSTD)                 │
+│  wal/wal-NNNNNN.log                   ← WAL段文件                   │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+## 1.2 RocksDB 引擎架构
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -255,33 +306,66 @@
 ### tsdb-storage-arrow
 
 ```
-┌──────────────────────┐     ┌──────────────────────┐
-│ ArrowStorageEngine   │     │   WriteBuffer        │
-├──────────────────────┤     ├──────────────────────┤
-│ - partition_manager  │     │ - buffers: BTreeMap  │
-│ - _reader            │     │ - max_buffer_rows    │
-│ - compactor          │     │ - total_rows         │
-│ - wal                │     ├──────────────────────┤
-│ - async_writer       │     │ + new(max_rows)      │
-│ - query_engine       │     │ + write(dp)          │
-│ - _config            │     │ + write_batch(dps)   │
-│ - base_dir           │     │ + drain()            │
-├──────────────────────┤     │ + total_rows()       │
-│ + open(path, config) │     └──────────────────────┘
-│ + write(dp)          │
-│ + write_batch(dps)   │     ┌──────────────────────┐
-│ + read_range()       │     │  AsyncWriteBuffer    │
-│ + get_point()        │     ├──────────────────────┤
-│ + execute_sql()      │     │ - inner: Mutex<Buf>  │
-│ + flush()            │     │ - writer: Mutex<Wr>  │
-│ + compact()          │     │ - handle: JoinHandle │
-│ + cleanup()          │     ├──────────────────────┤
-└──────────────────────┘     │ + new(writer, config)│
-                             │ + write(dp)          │
-                             │ + write_batch(dps)   │
-                             │ + flush()            │
-                             │ + stop()             │
-                             └──────────────────────┘
+┌──────────────────────────┐     ┌──────────────────────┐
+│ ArrowStorageEngine       │     │   WriteBuffer        │
+├──────────────────────────┤     ├──────────────────────┤
+│ - partition_manager      │     │ - buffers: BTreeMap  │
+│ - _reader                │     │ - max_buffer_rows    │
+│ - compactor              │     │ - total_rows         │
+│ - wal: Option<TsdbWAL>   │     ├──────────────────────┤
+│ - async_writers: Mutex   │     │ + new(max_rows)      │
+│ - writer_config          │     │ + write(dp)          │
+│ - query_engine           │     │ + write_batch(dps)   │
+│ - _config                │     │ + drain()            │
+│ - _base_dir              │     │ + total_rows()       │
+│ - known_measurements     │     └──────────────────────┘
+│ - write_seq: AtomicU64   │
+│ - last_flush_seq:AtmU64  │     ┌──────────────────────┐
+├──────────────────────────┤     │  AsyncWriteBuffer    │
+│ + open(path, config)     │     ├──────────────────────┤
+│ + write(dp) [原子锁]     │     │ - inner: Mutex<Buf>  │
+│ + write_batch(dps)       │     │ - writer: Mutex<Wr>  │
+│   [全量validate→WAL→buf] │     │ - handle: JoinHandle │
+│ + read_range()           │     ├──────────────────────┤
+│ + get_point() [精确+退出]│     │ + new(writer, config)│
+│ + read_range_arrow()     │     │ + write(dp)          │
+│ + execute_sql()          │     │ + write_batch(dps)   │
+│ + ensure_data_visible()  │     │ + flush()            │
+│   [write_seq>flush_seq]  │     │ + stop()             │
+│ + flush() [WAL trunc]    │     └──────────────────────┘
+│ + compact()              │
+│ + cleanup() [flush+stale]│
+│ + list_measurements()    │
+└──────────────────────────┘
+```
+
+### tsdb-parquet WAL (段文件轮转)
+
+```
+┌──────────────────────────┐
+│        TsdbWAL            │
+├──────────────────────────┤
+│ - dir: PathBuf            │
+│ - current_path: RwLock    │
+│ - segment_seq: AtomicU64  │
+│ - sequence: AtomicU64     │
+│ - writer: Mutex<BufWriter>│
+│ - max_file_size: u64      │
+│ - current_size: AtomicU64 │
+├──────────────────────────┤
+│ + create(path)            │
+│ + with_max_file_size(u64) │
+│ + append(type, payload)   │
+│   [rotate_if_needed]      │
+│ + sync()                  │
+│ + truncate()              │
+│   [清理旧段文件]          │
+│ + recover(path)           │
+│   [扫描所有wal-*.log段]   │
+│ + path()                  │
+│ - rotate_if_needed()      │
+│   [64MB自动轮转]          │
+└──────────────────────────┘
 ```
 
 ## 3. 写入流程时序图
@@ -290,20 +374,32 @@
 sequenceDiagram
     participant App
     participant Engine as ArrowStorageEngine
+    participant Validate as DataPoint.validate
     participant WAL as TsdbWAL
     participant Buffer as AsyncWriteBuffer
     participant Writer as TsdbParquetWriter
     participant FS as FileSystem
 
     App->>Engine: write_batch(datapoints)
-    Engine->>WAL: append(Insert, payload)
-    WAL->>FS: append to WAL file
-    Engine->>Buffer: write_batch(datapoints)
-    Buffer->>Buffer: lock & add to WriteBuffer
-
+    loop 全量验证
+        Engine->>Validate: dp.validate()
+        Validate-->>Engine: Ok / Err
+    end
+    loop 全量WAL写入
+        Engine->>WAL: append(Insert, payload)
+        WAL->>WAL: rotate_if_needed()
+        WAL->>FS: write + flush + sync_all
+    end
+    Engine->>Engine: write_seq += N
+    loop 按measurement分组
+        Engine->>Buffer: write_batch_to_buffer(m, dps)
+        Note over Buffer: 单次锁获取, 无TOCTOU竞态
+        Buffer->>Buffer: lock & add to WriteBuffer
+    end
     Note over Buffer: 定时/缓冲满触发
     Buffer->>Writer: drain() → write_batch()
     Writer->>Writer: DataPoint → RecordBatch
+    Writer->>Writer: schema evolution? → align_batch
     Writer->>FS: flush_all() → write Parquet
     FS-->>Writer: 文件写入完成
 ```
@@ -320,20 +416,22 @@ sequenceDiagram
     participant FS as FileSystem
 
     App->>Engine: read_range(measurement, tags, start, end)
-    Engine->>Buffer: flush()
+    Engine->>Engine: ensure_data_visible()
+    Note over Engine: 仅write_seq > last_flush_seq时flush
     Engine->>PM: new(base_dir)
     PM->>PM: refresh() → discover partitions
     Engine->>Reader: new(pm)
     Reader->>PM: get_partitions_in_range(start_date, end_date)
     PM-->>Reader: List<PartitionInfo>
     loop 每个分区
-        Reader->>PM: list_parquet_files(date)
+        Reader->>PM: list_parquet_files(date, measurement)
+        Note over PM: Measurement子目录隔离
         PM-->>Reader: List<PathBuf>
         loop 每个文件
-            Reader->>FS: read Parquet file
+            Reader->>Reader: prune_row_groups() [时间范围剪枝]
+            Reader->>FS: read Parquet file [RowFilter标签下推]
             FS-->>Reader: RecordBatch
             Reader->>Reader: RecordBatch → DataPoint
-            Reader->>Reader: tag 过滤 + 时间过滤
         end
     end
     Reader-->>Engine: Vec<DataPoint>
@@ -378,10 +476,12 @@ flowchart TD
     B --> C{files.len >= min_files?}
     C -->|No| D[返回 None]
     C -->|Yes| E[读取所有文件 → RecordBatch]
-    E --> F[合并 RecordBatch]
-    F --> G[写入新文件 cold_writer_props ZSTD]
-    G --> H[删除旧文件]
-    H --> I[返回 CompactionResult]
+    E --> F[align_batches_to_merged_schema]
+    F --> G[deduplicate_batches 反向遍历]
+    G --> H[sort_batch_by_tags_hash_timestamp]
+    H --> I[write_compacted 临时文件+fsync+原子rename]
+    I --> J[delete_old_files]
+    J --> K[返回 CompactionResult]
 ```
 
 ## 7. 数据模型 ER 图

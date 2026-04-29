@@ -7,6 +7,8 @@ const { Title, Text } = Typography;
 
 const tierTag = (tier: string) => {
   switch (tier) {
+    case 'hot': return <Tag color="#ff4d4f">🔥 热数据</Tag>;
+    case 'active': return <Tag color="#722ed1">⚡ 活跃数据</Tag>;
     case 'warm': return <Tag color="#faad14">🌤️ 温数据</Tag>;
     case 'cold': return <Tag color="#1890ff">❄️ 冷数据</Tag>;
     case 'archive': return <Tag color="#52c41a">📦 归档</Tag>;
@@ -46,9 +48,11 @@ const ParquetViewer: React.FC = () => {
 
   const filteredFiles = filterTier === 'all' ? files : files.filter(f => f.tier === filterTier);
 
+  const activeCount = files.filter(f => f.tier === 'active').length;
   const warmCount = files.filter(f => f.tier === 'warm').length;
   const coldCount = files.filter(f => f.tier === 'cold').length;
   const archiveCount = files.filter(f => f.tier === 'archive').length;
+  const activeSize = files.filter(f => f.tier === 'active').reduce((s, f) => s + f.file_size, 0);
   const warmSize = files.filter(f => f.tier === 'warm').reduce((s, f) => s + f.file_size, 0);
   const coldSize = files.filter(f => f.tier === 'cold').reduce((s, f) => s + f.file_size, 0);
   const archiveSize = files.filter(f => f.tier === 'archive').reduce((s, f) => s + f.file_size, 0);
@@ -103,17 +107,22 @@ const ParquetViewer: React.FC = () => {
 
         <Card size="small" style={{ marginBottom: 16 }}>
           <Row gutter={16}>
-            <Col span={8} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'warm' ? 'all' : 'warm')}>
+            <Col span={6} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'active' ? 'all' : 'active')}>
+              <Statistic title="⚡ 活跃数据 Parquet" value={activeCount} suffix="个文件"
+                valueStyle={{ color: '#722ed1', fontSize: 16 }} />
+              <Text type="secondary" style={{ fontSize: 12 }}>{fmtBytes(activeSize)}</Text>
+            </Col>
+            <Col span={6} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'warm' ? 'all' : 'warm')}>
               <Statistic title="🌤️ 温数据 Parquet" value={warmCount} suffix="个文件"
                 valueStyle={{ color: '#faad14', fontSize: 16 }} />
               <Text type="secondary" style={{ fontSize: 12 }}>{fmtBytes(warmSize)}</Text>
             </Col>
-            <Col span={8} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'cold' ? 'all' : 'cold')}>
+            <Col span={6} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'cold' ? 'all' : 'cold')}>
               <Statistic title="❄️ 冷数据 Parquet" value={coldCount} suffix="个文件"
                 valueStyle={{ color: '#1890ff', fontSize: 16 }} />
               <Text type="secondary" style={{ fontSize: 12 }}>{fmtBytes(coldSize)}</Text>
             </Col>
-            <Col span={8} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'archive' ? 'all' : 'archive')}>
+            <Col span={6} style={{ cursor: 'pointer' }} onClick={() => setFilterTier(filterTier === 'archive' ? 'all' : 'archive')}>
               <Statistic title="📦 归档 Parquet" value={archiveCount} suffix="个文件"
                 valueStyle={{ color: '#52c41a', fontSize: 16 }} />
               <Text type="secondary" style={{ fontSize: 12 }}>{fmtBytes(archiveSize)}</Text>
@@ -125,8 +134,8 @@ const ParquetViewer: React.FC = () => {
           <Space>
             <span>Parquet 文件 ({filteredFiles.length})</span>
             {filterTier !== 'all' && (
-              <Tag color={filterTier === 'warm' ? '#faad14' : filterTier === 'cold' ? '#1890ff' : '#52c41a'}>
-                筛选: {filterTier === 'warm' ? '温数据' : filterTier === 'cold' ? '冷数据' : '归档'}
+              <Tag color={filterTier === 'active' ? '#722ed1' : filterTier === 'warm' ? '#faad14' : filterTier === 'cold' ? '#1890ff' : '#52c41a'}>
+                筛选: {filterTier === 'active' ? '活跃数据' : filterTier === 'warm' ? '温数据' : filterTier === 'cold' ? '冷数据' : '归档'}
               </Tag>
             )}
             {filterTier !== 'all' && <Button size="small" onClick={() => setFilterTier('all')}>清除筛选</Button>}
@@ -139,7 +148,7 @@ const ParquetViewer: React.FC = () => {
             size="small"
             pagination={{ pageSize: 20 }}
             scroll={{ x: 1200 }}
-            locale={{ emptyText: '暂无 Parquet 文件。可通过"数据生命周期"页面将数据降级为温/冷数据生成。' }}
+            locale={{ emptyText: '暂无 Parquet 文件。Arrow 引擎的热数据 Parquet 文件和降级后的温/冷数据文件将在此显示。' }}
           />
         </Card>
 

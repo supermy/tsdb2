@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "cast"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
 
@@ -885,7 +885,7 @@ dependencies = [
 
 [[package]]
 name = "cpufeatures"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
@@ -2474,7 +2474,7 @@ dependencies = [
 
 [[package]]
 name = "normalize-line-endings"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "61807f77802ff30975e01f4f071c8ba10c022052f98b3294119f3e615d13e5be"
 
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "sqlparser_derive"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da5fc6819faabb412da764b99d3b713bb55083c11e7e0c00144d386cd6a1939c"
 dependencies = [
@@ -3869,7 +3869,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tsdb-admin"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "axum",
@@ -3893,15 +3893,17 @@ dependencies = [
  "tsdb-datafusion",
  "tsdb-iceberg",
  "tsdb-rocksdb",
+ "tsdb-storage-arrow",
  "uuid",
  "which",
 ]
 
 [[package]]
 name = "tsdb-arrow"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
+ "fxhash",
  "serde",
  "serde_json",
  "tempfile",
@@ -3911,7 +3913,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-bench"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "criterion",
  "tempfile",
@@ -3925,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arrow",
@@ -3956,7 +3958,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-datafusion"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -3972,7 +3974,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-flight"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -3993,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-iceberg"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4015,7 +4017,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-integration-tests"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "arrow-flight",
@@ -4040,7 +4042,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-parquet"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -4058,11 +4060,10 @@ dependencies = [
 
 [[package]]
 name = "tsdb-rocksdb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "chrono",
- "fxhash",
  "num_cpus",
  "parquet",
  "proptest",
@@ -4076,7 +4077,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-storage-arrow"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "chrono",
@@ -4095,7 +4096,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-stress"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -4108,7 +4109,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-stress-rocksdb"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "rocksdb",
@@ -4122,7 +4123,7 @@ dependencies = [
 
 [[package]]
 name = "tsdb-test-utils"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "chrono",

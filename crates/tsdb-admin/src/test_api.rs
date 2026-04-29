@@ -15,13 +15,15 @@ struct BusinessScenario {
 pub struct TestRunner {
     engine: Arc<dyn StorageEngine>,
     parquet_dir: std::path::PathBuf,
+    data_dir: std::path::PathBuf,
 }
 
 impl TestRunner {
-    pub fn new(engine: Arc<dyn StorageEngine>, parquet_dir: std::path::PathBuf) -> Self {
+    pub fn new(engine: Arc<dyn StorageEngine>, parquet_dir: std::path::PathBuf, data_dir: std::path::PathBuf) -> Self {
         Self {
             engine,
             parquet_dir,
+            data_dir,
         }
     }
 
@@ -137,6 +139,7 @@ impl TestRunner {
                     let lifecycle = crate::lifecycle_api::LifecycleApi::new(
                         self.engine.clone(),
                         self.parquet_dir.clone(),
+                        self.data_dir.clone(),
                     );
                     match lifecycle.demote_to_warm(&warm_cfs) {
                         Ok(results) => {
@@ -151,6 +154,7 @@ impl TestRunner {
                     let lifecycle = crate::lifecycle_api::LifecycleApi::new(
                         self.engine.clone(),
                         self.parquet_dir.clone(),
+                        self.data_dir.clone(),
                     );
                     match lifecycle.demote_to_cold(&cold_cfs) {
                         Ok(results) => {

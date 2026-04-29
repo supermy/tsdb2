@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
         rust: [stable]
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +48,18 @@ jobs:
         run: make test-unit
       - name: Run integration tests
         run: make test-integration
+
+  test-arrow:
+    name: Arrow Engine Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run Arrow engine tests
+        run: make test-arrow
+      - name: Run Arrow engine admin tests
+        run: cargo test --lib -p tsdb-admin
 
   lint:
     name: Lint
@@ -84,7 +96,13 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           working-directory: .
-        continue-on-error: true
+
+  deny:
+    name: Dependency Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
 
   msrv:
     name: MSRV
@@ -127,7 +145,7 @@ jobs:
           linker = "arm-linux-gnueabihf-gcc"
           EOF
       - name: Cross build ${{ matrix.target }}
-        run: make build-cross CROSS_ARCH=${{ matrix.target }}
+        run: cargo build --release -p tsdb-cli --target ${{ matrix.target }}
 
   coverage:
     name: Coverage
@@ -138,7 +156,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked 2>/dev/null || true
       - name: Run coverage
         run: make coverage
       - name: Upload coverage
@@ -195,7 +213,14 @@ jobs:
       - name: Start server
         run: |
           make start DATA_DIR=/tmp/tsdb2_e2e PARQUET_DIR=/tmp/tsdb2_e2e_parquet &
-          sleep 5
+          for i in $(seq 1 30); do
+            if make status 2>/dev/null; then
+              echo "Server is ready"
+              break
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 2
+          done
       - name: Generate test data
         run: make test-data-iot
       - name: Demote lifecycle
@@ -204,6 +229,40 @@ jobs:
         run: make status
       - name: Run client tests
         run: make client-doctor DATA_DIR=/tmp/tsdb2_e2e
+      - name: Stop server
+        run: make stop
+        if: always()
+
+  e2e-arrow:
+    name: E2E Arrow Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: make build-backend-debug
+      - name: Start Arrow server
+        run: |
+          mkdir -p /tmp/tsdb2_arrow_e2e /tmp/tsdb2_arrow_e2e_parquet
+          target/debug/tsdb-cli serve \
+            --data-dir /tmp/tsdb2_arrow_e2e \
+            --parquet-dir /tmp/tsdb2_arrow_e2e_parquet \
+            --storage-engine arrow \
+            --host 0.0.0.0 \
+            --flight-port 50051 \
+            --admin-port 8080 \
+            --http-port 3000 &
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:3000/api/services 2>/dev/null; then
+              echo "Arrow server is ready"
+              break
+            fi
+            echo "Waiting for Arrow server... ($i/30)"
+            sleep 2
+          done
+      - name: Run Arrow engine tests
+        run: make test-arrow
       - name: Stop server
         run: make stop
         if: always()
@@ -227,8 +286,8 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             make_target: build-windows-amd64
-    if: github.ref == 'refs/heads/main'
-    needs: [test, lint, frontend]
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, test-arrow, lint, frontend, e2e, e2e-arrow]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -241,6 +300,8 @@ jobs:
       - name: Install cross (Linux ARM64)
         if: matrix.target == 'aarch64-unknown-linux-gnu'
         run: cargo install cross
+      - name: Build frontend
+        run: make build-frontend
       - name: Build release
         run: make ${{ matrix.make_target }}
       - name: Upload artifact

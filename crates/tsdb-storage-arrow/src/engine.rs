@@ -3,7 +3,7 @@ use crate::config::ArrowStorageConfig;
 use crate::error::{Result, TsdbStorageArrowError};
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tsdb_arrow::schema::{DataPoint, Tags};
@@ -14,35 +14,23 @@ use tsdb_parquet::reader::TsdbParquetReader;
 use tsdb_parquet::wal::{TsdbWAL, WALEntryType};
 use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 
-/// Arrow 存储引擎
-///
-/// 组合 Parquet 存储层、WAL、异步写入缓冲区和 DataFusion 查询引擎,
-/// 提供完整的时序数据读写和 SQL 查询能力。
-///
-/// 架构:
-/// ```text
-/// [写入] → AsyncWriteBuffer → TsdbParquetWriter → Parquet 文件
-///         ↘ WAL (可选)
-/// [读取] → TsdbParquetReader → Parquet 文件
-/// [查询] → DataFusionQueryEngine → SQL → RecordBatch
-/// [维护] → ParquetCompactor (合并/清理)
-/// ```
 pub struct ArrowStorageEngine {
     partition_manager: Arc<PartitionManager>,
     reader: TsdbParquetReader,
     compactor: ParquetCompactor,
     wal: Option<TsdbWAL>,
-    async_writer: AsyncWriteBuffer,
+    async_writers: std::sync::Mutex<HashMap<String, AsyncWriteBuffer>>,
+    writer_config: WriteBufferConfig,
     query_engine: DataFusionQueryEngine,
     _config: ArrowStorageConfig,
     _base_dir: PathBuf,
     known_measurements: std::sync::Mutex<HashSet<String>>,
+    write_seq: std::sync::atomic::AtomicU64,
+    last_flush_seq: std::sync::atomic::AtomicU64,
+    last_flush_time: std::sync::Mutex<std::time::Instant>,
 }
 
 impl ArrowStorageEngine {
-    /// 打开存储引擎
-    ///
-    /// 初始化分区管理器、读取器、Compactor、WAL、异步写入器和查询引擎。
     pub fn open(path: impl AsRef<Path>, config: ArrowStorageConfig) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
 
@@ -55,14 +43,22 @@ impl ArrowStorageEngine {
 
         let partition_manager = Arc::new(PartitionManager::new(&path, partition_config)?);
         let reader = TsdbParquetReader::new(partition_manager.clone());
-        let compactor =
-            ParquetCompactor::new(partition_manager.clone(), CompactionConfig::default());
+        let compactor = ParquetCompactor::new(
+            partition_manager.clone(),
+            CompactionConfig {
+                hot_days: config.hot_days,
+                retention_days: config.retention_days,
+                ..CompactionConfig::default()
+            },
+        );
 
         let mut wal_replay_count = 0usize;
         let mut wal_replay_datapoints: Vec<DataPoint> = Vec::new();
         let wal = if config.wal_enabled {
             let wal_dir = path.join("wal");
-            let _ = std::fs::create_dir_all(&wal_dir);
+            std::fs::create_dir_all(&wal_dir).map_err(|e| {
+                TsdbStorageArrowError::Storage(format!("failed to create WAL dir: {}", e))
+            })?;
             let wal_path = wal_dir.join("wal-000001.log");
 
             if wal_path.exists() {
@@ -71,9 +67,14 @@ impl ArrowStorageEngine {
                         tracing::info!("WAL recovery: found {} entries", entries.len());
                         for entry in &entries {
                             if entry.entry_type == WALEntryType::Insert {
-                                if let Ok(dp) = serde_json::from_slice::<DataPoint>(&entry.payload)
-                                {
-                                    wal_replay_datapoints.push(dp);
+                                match serde_json::from_slice::<DataPoint>(&entry.payload) {
+                                    Ok(dp) => wal_replay_datapoints.push(dp),
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "WAL replay: skipping corrupt entry: {}",
+                                            e
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -95,10 +96,6 @@ impl ArrowStorageEngine {
             flush_interval_ms: config.flush_interval_ms,
             ..Default::default()
         };
-        let writer = TsdbParquetWriter::new(partition_manager.clone(), writer_config);
-
-        let buffer = std::sync::Mutex::new(WriteBuffer::new(config.max_buffer_rows));
-        let async_writer = AsyncWriteBuffer::new(buffer, writer, config.flush_interval_ms);
 
         let query_engine = DataFusionQueryEngine::new(&path);
 
@@ -108,22 +105,47 @@ impl ArrowStorageEngine {
             pm_ref.refresh().ok();
             let today = chrono::Utc::now().date_naive();
             let start = today - chrono::Duration::days(config.retention_days as i64);
-            let partitions = pm_ref.get_partitions_in_range(start, today + chrono::Duration::days(1));
+            let partitions =
+                pm_ref.get_partitions_in_range(start, today + chrono::Duration::days(1));
             for partition in &partitions {
-                if let Ok(files) = pm_ref.list_parquet_files(partition.date) {
-                    for file_path in files {
-                        if let Ok(file) = std::fs::File::open(&file_path) {
-                                if let Ok(builder) = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file) {
+                if let Ok(sub_dirs) = std::fs::read_dir(&partition.dir) {
+                    for sub_entry in sub_dirs.flatten() {
+                        let path = sub_entry.path();
+                        if path.is_dir() {
+                            let m_name = sub_entry.file_name().to_string_lossy().to_string();
+                            known_measurements.insert(m_name);
+                        } else if path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                            if let Ok(file) = std::fs::File::open(&path) {
+                                if let Ok(builder) =
+                                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file)
+                                {
                                     let arrow_schema = builder.schema();
                                     if let Some(mf) = arrow_schema.metadata().get("measurement") {
                                         known_measurements.insert(mf.clone());
                                     }
                                 }
                             }
+                        }
                     }
                 }
             }
         }
+
+        let engine = Self {
+            partition_manager,
+            reader,
+            compactor,
+            wal,
+            async_writers: std::sync::Mutex::new(HashMap::new()),
+            writer_config,
+            query_engine,
+            _config: config,
+            _base_dir: path,
+            known_measurements: std::sync::Mutex::new(known_measurements),
+            write_seq: std::sync::atomic::AtomicU64::new(0),
+            last_flush_seq: std::sync::atomic::AtomicU64::new(0),
+            last_flush_time: std::sync::Mutex::new(std::time::Instant::now()),
+        };
 
         if !wal_replay_datapoints.is_empty() {
             tracing::info!(
@@ -131,12 +153,11 @@ impl ArrowStorageEngine {
                 wal_replay_datapoints.len()
             );
             for chunk in wal_replay_datapoints.chunks(1000) {
-                if let Err(e) = async_writer.write_batch(chunk) {
+                if let Err(e) = engine.write_batch_bypass_wal(chunk) {
                     tracing::warn!("WAL replay write_batch failed: {}", e);
-                    break;
                 }
             }
-            if let Err(e) = async_writer.flush() {
+            if let Err(e) = engine.flush() {
                 tracing::warn!("WAL replay flush failed: {}", e);
             }
             tracing::info!(
@@ -150,20 +171,65 @@ impl ArrowStorageEngine {
             );
         }
 
-        Ok(Self {
-            partition_manager,
-            reader,
-            compactor,
-            wal,
-            async_writer,
-            query_engine,
-            _config: config,
-            _base_dir: path,
-            known_measurements: std::sync::Mutex::new(known_measurements),
-        })
+        if engine.wal.as_ref().map_or(false, |_w| wal_replay_count > 0) {
+            if let Some(ref w) = engine.wal {
+                if let Err(e) = w.truncate() {
+                    tracing::warn!("WAL truncate after recovery failed: {}", e);
+                }
+            }
+        }
+
+        Ok(engine)
     }
 
-    /// 写入单个数据点 (先写 WAL, 再写缓冲区)
+    fn write_to_buffer(&self, measurement: &str, dp: &DataPoint) -> Result<()> {
+        let mut writers = self
+            .async_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !writers.contains_key(measurement) {
+            let writer = TsdbParquetWriter::new(
+                self.partition_manager.clone(),
+                self.writer_config.clone(),
+                measurement,
+            );
+            let buffer = std::sync::Mutex::new(WriteBuffer::new(
+                self.writer_config.max_buffer_rows,
+            ));
+            let async_writer =
+                AsyncWriteBuffer::new(buffer, writer, self.writer_config.flush_interval_ms);
+            writers.insert(measurement.to_string(), async_writer);
+        }
+        if let Some(writer) = writers.get(measurement) {
+            writer.write(dp)?;
+        }
+        Ok(())
+    }
+
+    fn write_batch_to_buffer(&self, measurement: &str, datapoints: &[DataPoint]) -> Result<()> {
+        let mut writers = self
+            .async_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !writers.contains_key(measurement) {
+            let writer = TsdbParquetWriter::new(
+                self.partition_manager.clone(),
+                self.writer_config.clone(),
+                measurement,
+            );
+            let buffer = std::sync::Mutex::new(WriteBuffer::new(
+                self.writer_config.max_buffer_rows,
+            ));
+            let async_writer =
+                AsyncWriteBuffer::new(buffer, writer, self.writer_config.flush_interval_ms);
+            writers.insert(measurement.to_string(), async_writer);
+        }
+        if let Some(writer) = writers.get(measurement) {
+            writer.write_batch(datapoints)?;
+        }
+        Ok(())
+    }
+
     pub fn write(&self, dp: &DataPoint) -> Result<()> {
         if let Err(e) = dp.validate() {
             tracing::warn!("invalid datapoint rejected: {}", e);
@@ -173,11 +239,13 @@ impl ArrowStorageEngine {
             )));
         }
         if let Some(ref wal) = self.wal {
-            let payload = serde_json::to_vec(dp)
-                .map_err(|e| TsdbStorageArrowError::Storage(format!("serialize error: {}", e)))?;
+            let payload = serde_json::to_vec(dp).map_err(|e| {
+                TsdbStorageArrowError::Storage(format!("serialize error: {}", e))
+            })?;
             wal.append(WALEntryType::Insert, &payload)?;
         }
-        self.async_writer.write(dp)?;
+        self.write_to_buffer(&dp.measurement, dp)?;
+        self.write_seq.fetch_add(1, std::sync::atomic::Ordering::Release);
         self.known_measurements
             .lock()
             .unwrap_or_else(|e| {
@@ -198,6 +266,7 @@ impl ArrowStorageEngine {
                 )));
             }
         }
+
         if let Some(ref wal) = self.wal {
             for dp in datapoints {
                 let payload = serde_json::to_vec(dp).map_err(|e| {
@@ -206,7 +275,22 @@ impl ArrowStorageEngine {
                 wal.append(WALEntryType::Insert, &payload)?;
             }
         }
-        self.async_writer.write_batch(datapoints)?;
+
+        let mut by_measurement: HashMap<&str, Vec<&DataPoint>> = HashMap::new();
+        for dp in datapoints {
+            by_measurement
+                .entry(&dp.measurement)
+                .or_default()
+                .push(dp);
+        }
+
+        for (measurement, dps) in by_measurement {
+            let owned: Vec<DataPoint> = dps.into_iter().cloned().collect();
+            self.write_batch_to_buffer(measurement, &owned)?;
+        }
+
+        self.write_seq.fetch_add(datapoints.len() as u64, std::sync::atomic::Ordering::Release);
+
         let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| {
             tracing::warn!("Mutex poisoned in write_batch, recovering: {}", e);
             e.into_inner()
@@ -217,7 +301,32 @@ impl ArrowStorageEngine {
         Ok(())
     }
 
-    /// 范围读取数据点 (先刷盘, 再读取)
+    fn write_batch_bypass_wal(&self, datapoints: &[DataPoint]) -> Result<()> {
+        let mut by_measurement: HashMap<&str, Vec<&DataPoint>> = HashMap::new();
+        for dp in datapoints {
+            by_measurement
+                .entry(&dp.measurement)
+                .or_default()
+                .push(dp);
+        }
+
+        for (measurement, dps) in by_measurement {
+            let owned: Vec<DataPoint> = dps.into_iter().cloned().collect();
+            self.write_batch_to_buffer(measurement, &owned)?;
+        }
+
+        self.write_seq.fetch_add(datapoints.len() as u64, std::sync::atomic::Ordering::Release);
+
+        let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in write_batch_bypass_wal, recovering: {}", e);
+            e.into_inner()
+        });
+        for dp in datapoints {
+            measurements.insert(dp.measurement.clone());
+        }
+        Ok(())
+    }
+
     pub fn read_range(
         &self,
         measurement: &str,
@@ -225,7 +334,7 @@ impl ArrowStorageEngine {
         start_micros: i64,
         end_micros: i64,
     ) -> Result<Vec<DataPoint>> {
-        self.async_writer.flush()?;
+        self.ensure_data_visible()?;
         let points = self
             .reader
             .read_range(measurement, tags, start_micros, end_micros)?;
@@ -238,7 +347,7 @@ impl ArrowStorageEngine {
         tags: &Tags,
         timestamp: i64,
     ) -> Result<Option<DataPoint>> {
-        self.async_writer.flush()?;
+        self.ensure_data_visible()?;
         let point = self.reader.get_point(measurement, tags, timestamp)?;
         Ok(point)
     }
@@ -250,21 +359,20 @@ impl ArrowStorageEngine {
         end_micros: i64,
         projection: Option<&[String]>,
     ) -> Result<Vec<arrow::record_batch::RecordBatch>> {
-        self.async_writer.flush()?;
-        let batches =
-            self.reader
-                .read_range_arrow(measurement, start_micros, end_micros, projection)?;
+        self.ensure_data_visible()?;
+        let batches = self
+            .reader
+            .read_range_arrow(measurement, start_micros, end_micros, projection)?;
         Ok(batches)
     }
 
-    /// 执行 SQL 查询
     pub async fn execute_sql(
         &self,
         sql: &str,
         measurement: &str,
         datapoints: &[DataPoint],
     ) -> Result<tsdb_datafusion::engine::QueryResult> {
-        self.async_writer.flush()?;
+        self.ensure_data_visible()?;
 
         self.query_engine
             .register_from_datapoints(measurement, datapoints)?;
@@ -273,38 +381,134 @@ impl ArrowStorageEngine {
         Ok(result)
     }
 
-    /// 刷盘 (缓冲区 + WAL)
-    ///
-    /// 将内存缓冲区数据写入 Parquet 文件, 然后截断 WAL 防止重复回放。
     pub fn flush(&self) -> Result<()> {
-        self.async_writer.flush()?;
+        let writers = self
+            .async_writers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        let mut all_flushed = true;
+        for (measurement, writer) in writers.iter() {
+            if let Err(e) = writer.flush() {
+                tracing::warn!("failed to flush writer for {}: {}", measurement, e);
+                all_flushed = false;
+            }
+        }
+
         if let Some(ref wal) = self.wal {
             wal.sync()?;
-            wal.truncate()?;
+            if all_flushed {
+                wal.truncate()?;
+            }
+        }
+
+        if all_flushed {
+            let current = self.write_seq.load(std::sync::atomic::Ordering::Acquire);
+            self.last_flush_seq.store(current, std::sync::atomic::Ordering::Release);
+            *self.last_flush_time.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
+        }
+
+        if !all_flushed {
+            return Err(TsdbStorageArrowError::Storage(
+                "one or more writers failed to flush".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn ensure_data_visible(&self) -> Result<()> {
+        let current = self.write_seq.load(std::sync::atomic::Ordering::Acquire);
+        let flushed = self.last_flush_seq.load(std::sync::atomic::Ordering::Acquire);
+        if current > flushed {
+            let should_flush = {
+                let last = self.last_flush_time.lock().unwrap_or_else(|e| e.into_inner());
+                last.elapsed() >= std::time::Duration::from_secs(1)
+            };
+            if should_flush {
+                self.flush()?;
+            }
         }
         Ok(())
     }
 
-    /// 清理过期分区
     pub fn cleanup(&self) -> Result<Vec<String>> {
+        self.flush()?;
         let dropped = self.partition_manager.cleanup_expired()?;
+
+        let active_measurements = self.partition_manager.list_measurements();
+        let writer_keys: Vec<String> = {
+            let writers = self
+                .async_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            writers.keys().cloned().collect()
+        };
+        let stale: Vec<String> = writer_keys
+            .iter()
+            .filter(|m| !active_measurements.contains(m))
+            .cloned()
+            .collect();
+
+        if !stale.is_empty() {
+            let mut writers = self
+                .async_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for m in &stale {
+                if let Some(mut writer) = writers.remove(m) {
+                    if let Err(e) = writer.stop() {
+                        tracing::warn!("failed to stop stale writer for {}: {}", m, e);
+                    }
+                }
+            }
+        }
+
+        if !dropped.is_empty() {
+            let mut known = self.known_measurements.lock().unwrap_or_else(|e| e.into_inner());
+            for m in &stale {
+                known.remove(m);
+            }
+        }
+
         Ok(dropped)
     }
 
-    /// 执行 Compaction (合并今天的分区)
     pub fn compact(&self) -> Result<()> {
-        let today = chrono::Utc::now().date_naive();
-        self.compactor.compact_date(today)?;
+        self.compactor.compact_all_levels()?;
+        Ok(())
+    }
+
+    pub fn refresh_partitions(&self) -> Result<()> {
+        self.partition_manager.refresh()?;
+        let discovered = self.partition_manager.list_measurements();
+        let mut known = self.known_measurements.lock().unwrap_or_else(|e| {
+            tracing::warn!("Mutex poisoned in refresh_partitions, recovering: {}", e);
+            e.into_inner()
+        });
+        for m in discovered {
+            known.insert(m);
+        }
         Ok(())
     }
 }
 
 impl Drop for ArrowStorageEngine {
     fn drop(&mut self) {
-        if let Err(e) = self.async_writer.stop() {
-            tracing::warn!("failed to stop async writer during drop: {}", e);
+        if let Err(e) = self.flush() {
+            tracing::warn!("failed to flush during drop: {}", e);
         }
-        let _ = self.flush();
+        {
+            let mut writers = self
+                .async_writers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for (_measurement, writer) in writers.iter_mut() {
+                if let Err(e) = writer.stop() {
+                    tracing::warn!("failed to stop async writer during drop: {}", e);
+                }
+            }
+        }
     }
 }
 
@@ -610,7 +814,10 @@ mod tests {
         engine.flush().unwrap();
 
         let entries_after = TsdbWAL::recover(&wal_path).unwrap();
-        assert!(entries_after.is_empty(), "WAL should be truncated after flush");
+        assert!(
+            entries_after.is_empty(),
+            "WAL should be truncated after flush"
+        );
     }
 
     #[test]
@@ -643,5 +850,97 @@ mod tests {
         let mem_result = engine.read_range("mem", &tags, 0, 2_000_000).unwrap();
         assert!(!cpu_result.is_empty());
         assert!(!mem_result.is_empty());
+
+        for dp in &cpu_result {
+            assert_eq!(dp.measurement, "cpu");
+        }
+        for dp in &mem_result {
+            assert_eq!(dp.measurement, "mem");
+        }
+    }
+
+    #[test]
+    fn test_engine_measurement_isolation_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
+
+        let cpu_dps: Vec<DataPoint> = (0..3)
+            .map(|i| {
+                DataPoint::new("cpu", 1_000_000 + i as i64 * 1_000)
+                    .with_tag("host", "s1")
+                    .with_field("usage", FieldValue::Float(0.5))
+            })
+            .collect();
+
+        let mem_dps: Vec<DataPoint> = (0..3)
+            .map(|i| {
+                DataPoint::new("mem", 1_000_000 + i as i64 * 1_000)
+                    .with_tag("host", "s1")
+                    .with_field("used", FieldValue::Float(1024.0))
+            })
+            .collect();
+
+        engine.write_batch(&cpu_dps).unwrap();
+        engine.write_batch(&mem_dps).unwrap();
+        engine.flush().unwrap();
+
+        let date = tsdb_parquet::partition::micros_to_date(1_000_000).unwrap();
+        let cpu_files = engine
+            .partition_manager
+            .list_measurement_parquet_files(date, "cpu")
+            .unwrap();
+        let mem_files = engine
+            .partition_manager
+            .list_measurement_parquet_files(date, "mem")
+            .unwrap();
+
+        assert!(!cpu_files.is_empty(), "cpu should have files in its subdirectory");
+        assert!(!mem_files.is_empty(), "mem should have files in its subdirectory");
+
+        for f in &cpu_files {
+            assert!(f.to_string_lossy().contains("/cpu/"));
+        }
+        for f in &mem_files {
+            assert!(f.to_string_lossy().contains("/mem/"));
+        }
+    }
+
+    #[test]
+    fn test_engine_mixed_batch_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = ArrowStorageEngine::open(dir.path(), make_config(false)).unwrap();
+
+        let mut mixed_dps = Vec::new();
+        for i in 0..5 {
+            mixed_dps.push(
+                DataPoint::new("cpu", 1_000_000 + i as i64 * 1_000)
+                    .with_tag("host", "s1")
+                    .with_field("usage", FieldValue::Float(i as f64)),
+            );
+            mixed_dps.push(
+                DataPoint::new("mem", 1_000_000 + i as i64 * 1_000)
+                    .with_tag("host", "s1")
+                    .with_field("percent", FieldValue::Float(i as f64 * 10.0)),
+            );
+        }
+
+        engine.write_batch(&mixed_dps).unwrap();
+        engine.flush().unwrap();
+
+        let tags = Tags::new();
+        let cpu_result = engine.read_range("cpu", &tags, 0, 2_000_000).unwrap();
+        let mem_result = engine.read_range("mem", &tags, 0, 2_000_000).unwrap();
+
+        assert_eq!(cpu_result.len(), 5, "cpu should have 5 data points");
+        assert_eq!(mem_result.len(), 5, "mem should have 5 data points");
+
+        for dp in &cpu_result {
+            assert_eq!(dp.measurement, "cpu");
+            assert!(dp.fields.contains_key("usage"));
+        }
+        for dp in &mem_result {
+            assert_eq!(dp.measurement, "mem");
+            assert!(dp.fields.contains_key("percent"));
+        }
     }
 }

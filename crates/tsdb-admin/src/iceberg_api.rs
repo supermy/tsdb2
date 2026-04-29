@@ -621,6 +621,8 @@ pub struct FieldDefinition {
     pub name: String,
     pub field_type: String,
     pub required: bool,
+    #[serde(default)]
+    pub role: Option<String>,
 }
 
 impl SchemaDefinition {
@@ -640,7 +642,12 @@ impl SchemaDefinition {
         col_id += 1;
 
         for fd in &self.fields {
-            if fd.name.starts_with("tag_") {
+            let is_tag = fd
+                .role
+                .as_ref()
+                .map(|r| r == "tag")
+                .unwrap_or_else(|| fd.name.starts_with("tag_"));
+            if is_tag {
                 fields.push(Field {
                     id: col_id,
                     name: fd.name.clone(),
@@ -660,7 +667,7 @@ impl SchemaDefinition {
                     "timestamp" | "timestamptz" => IcebergType::Timestamptz,
                     _ => IcebergType::String,
                 };
-                let id = if col_id < 1000 && !fd.name.starts_with("tag_") {
+                let id = if col_id < 1000 && !is_tag {
                     let id = 1000;
                     col_id = 1001;
                     id

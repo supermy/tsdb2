@@ -19,7 +19,8 @@ impl DataArchiver {
         let meta_cf = db.db().cf_handle("_series_meta");
         let iter = db.db().iterator_cf(&data_cf, rocksdb::IteratorMode::Start);
 
-        let mut file = std::fs::File::create(output_path)?;
+        let tmp_path = output_path.with_extension("jsonl.tmp");
+        let mut file = std::fs::File::create(&tmp_path)?;
         let mut count = 0usize;
 
         for item in iter {
@@ -62,6 +63,9 @@ impl DataArchiver {
             count += 1;
         }
 
+        drop(file);
+        std::fs::rename(&tmp_path, output_path)?;
+
         Ok(count)
     }
 
@@ -95,7 +99,9 @@ impl DataArchiver {
                     if marker_path.exists() {
                         if output_path.exists() {
                             db.drop_cf(cf_name)?;
-                            let _ = std::fs::remove_file(&marker_path);
+                            if let Err(e) = std::fs::remove_file(&marker_path) {
+                                tracing::warn!("failed to remove marker file {}: {}", marker_path.display(), e);
+                            }
                             archived_count += 1;
                             tracing::info!(
                                 "completed previously interrupted archive for CF {}",
@@ -106,10 +112,14 @@ impl DataArchiver {
                     }
 
                     let count = Self::export_cf_to_json(db, cf_name, &output_path)?;
-                    std::fs::write(&marker_path, format!("{}", count))?;
+                    let tmp_marker = marker_path.with_extension("archived.tmp");
+                    std::fs::write(&tmp_marker, format!("{}", count))?;
+                    std::fs::rename(&tmp_marker, &marker_path)?;
                     total_points += count;
                     db.drop_cf(cf_name)?;
-                    let _ = std::fs::remove_file(&marker_path);
+                    if let Err(e) = std::fs::remove_file(&marker_path) {
+                        tracing::warn!("failed to remove marker file {}: {}", marker_path.display(), e);
+                    }
                     archived_count += 1;
                 }
             }
@@ -206,7 +216,12 @@ impl DataArchiver {
             buffer.push(dp);
 
             if buffer.len() >= batch_size {
-                let s = schema.clone().unwrap();
+                let s = schema.as_ref().ok_or_else(|| {
+                    crate::error::TsdbRocksDbError::Io(std::io::Error::other(
+                        "schema not initialized: no valid datapoints to infer schema",
+                    ))
+                })?;
+                let s = s.clone();
                 Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s, compression)?;
                 total += buffer.len();
                 buffer.clear();
@@ -215,7 +230,12 @@ impl DataArchiver {
         }
 
         if !buffer.is_empty() {
-            let s = schema.clone().unwrap();
+            let s = schema.as_ref().ok_or_else(|| {
+                crate::error::TsdbRocksDbError::Io(std::io::Error::other(
+                    "schema not initialized: no valid datapoints to infer schema",
+                ))
+            })?;
+            let s = s.clone();
             Self::write_parquet_chunk(output_dir, file_idx, &buffer, &s, compression)?;
             total += buffer.len();
         }
@@ -232,14 +252,15 @@ impl DataArchiver {
     ) -> Result<()> {
         let mut sorted_chunk = chunk.to_vec();
         sorted_chunk.sort_by(|a, b| {
-            let ha = tsdb_arrow::converter::compute_tags_hash(&a.tags);
-            let hb = tsdb_arrow::converter::compute_tags_hash(&b.tags);
+            let ha = crate::key::compute_tags_hash(&a.tags);
+            let hb = crate::key::compute_tags_hash(&b.tags);
             ha.cmp(&hb).then_with(|| a.timestamp.cmp(&b.timestamp))
         });
 
         let batch = datapoints_to_record_batch(&sorted_chunk, schema.clone())?;
         let file_path = output_dir.join(format!("part-{:08}.parquet", file_idx));
-        let file = std::fs::File::create(&file_path)?;
+        let tmp_path = output_dir.join(format!("part-{:08}.parquet.tmp", file_idx));
+        let file = std::fs::File::create(&tmp_path)?;
 
         let mut props_builder = parquet::file::properties::WriterProperties::builder()
             .set_compression(compression)
@@ -270,6 +291,8 @@ impl DataArchiver {
         writer.close().map_err(|e| {
             crate::error::TsdbRocksDbError::Io(std::io::Error::other(e.to_string()))
         })?;
+
+        std::fs::rename(&tmp_path, &file_path)?;
         Ok(())
     }
 }

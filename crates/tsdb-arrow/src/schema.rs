@@ -68,11 +68,17 @@ pub fn compact_tsdb_schema(
     ];
 
     for key in tag_keys {
-        fields.push(Field::new(format!("tag_{}", key), DataType::Utf8, true));
+        let mut field_meta = HashMap::new();
+        field_meta.insert("tsdb_role".to_string(), "tag".to_string());
+        fields.push(
+            Field::new(format!("tag_{}", key), DataType::Utf8, true).with_metadata(field_meta),
+        );
     }
 
     for (name, dtype) in field_types {
-        fields.push(Field::new(name.clone(), dtype.clone(), true));
+        let mut field_meta = HashMap::new();
+        field_meta.insert("tsdb_role".to_string(), "field".to_string());
+        fields.push(Field::new(name.clone(), dtype.clone(), true).with_metadata(field_meta));
     }
 
     let mut metadata = HashMap::new();
@@ -193,7 +199,39 @@ pub fn field_value_to_data_type(value: &FieldValue) -> DataType {
         FieldValue::Integer(_) => DataType::Int64,
         FieldValue::String(_) => DataType::Utf8,
         FieldValue::Boolean(_) => DataType::Boolean,
+        FieldValue::Null => DataType::Null,
     }
+}
+
+fn is_structural_column(name: &str) -> bool {
+    matches!(
+        name,
+        "timestamp" | "tags_hash" | "measurement" | "tag_keys" | "tag_values"
+    )
+}
+
+pub fn is_tag_field(field: &arrow::datatypes::Field) -> bool {
+    field
+        .metadata()
+        .get("tsdb_role")
+        .map(|r| r == "tag")
+        .unwrap_or_else(|| {
+            let name = field.name();
+            !is_structural_column(name)
+                && name.starts_with("tag_")
+                && field.data_type() == &DataType::Utf8
+        })
+}
+
+pub fn is_field_field(field: &arrow::datatypes::Field) -> bool {
+    field
+        .metadata()
+        .get("tsdb_role")
+        .map(|r| r == "field")
+        .unwrap_or_else(|| {
+            let name = field.name();
+            !is_structural_column(name) && !is_tag_field(field)
+        })
 }
 
 use std::collections::BTreeMap;
@@ -388,6 +426,7 @@ pub enum FieldValue {
     Integer(i64),
     String(String),
     Boolean(bool),
+    Null,
 }
 
 impl<'de> serde::Deserialize<'de> for FieldValue {
@@ -547,10 +586,10 @@ impl DataPoint {
         let mut parts: Vec<String> = self
             .tags
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
+            .map(|(k, v)| format!("{}={}", escape_tag_value(k), escape_tag_value(v)))
             .collect();
         parts.sort();
-        format!("{},{}", self.measurement, parts.join(","))
+        format!("{},{}", escape_tag_value(&self.measurement), parts.join(","))
     }
 
     /// 验证数据点的完整性
@@ -565,6 +604,16 @@ impl DataPoint {
         if self.measurement.is_empty() || self.measurement.trim().is_empty() {
             return Err(DataPointError::EmptyMeasurement);
         }
+        if !is_safe_name(&self.measurement) {
+            return Err(DataPointError::InvalidMeasurementName {
+                name: self.measurement.clone(),
+            });
+        }
+        if self.timestamp <= 0 {
+            return Err(DataPointError::InvalidTimestamp {
+                timestamp: self.timestamp,
+            });
+        }
         if self.fields.is_empty() {
             return Err(DataPointError::NoFields);
         }
@@ -572,10 +621,22 @@ impl DataPoint {
             if key.is_empty() {
                 return Err(DataPointError::EmptyTagKey);
             }
+            if !is_safe_name(key) {
+                return Err(DataPointError::InvalidTagKey {
+                    key: key.clone(),
+                });
+            }
         }
         for (key, value) in &self.fields {
             if key.is_empty() {
                 return Err(DataPointError::EmptyFieldKey);
+            }
+            for (tk, _) in &self.tags {
+                if key == tk {
+                    return Err(DataPointError::FieldTagConflict {
+                        key: key.clone(),
+                    });
+                }
             }
             if let FieldValue::Float(f) = value {
                 if f.is_nan() || f.is_infinite() {
@@ -590,25 +651,65 @@ impl DataPoint {
     }
 }
 
+fn is_safe_name(name: &str) -> bool {
+    !name.contains("..")
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+fn escape_tag_value(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            ',' => result.push_str("\\,"),
+            '=' => result.push_str("\\="),
+            ' ' => result.push_str("\\ "),
+            '\\' => result.push_str("\\\\"),
+            _ => result.push(c),
+        }
+    }
+    result
+}
+
 /// 数据点验证错误
 #[derive(Debug, Clone, PartialEq)]
 pub enum DataPointError {
     EmptyMeasurement,
+    InvalidMeasurementName { name: String },
     NoFields,
     EmptyTagKey,
+    InvalidTagKey { key: String },
+    FieldTagConflict { key: String },
     EmptyFieldKey,
     InvalidFloatValue { field: String, value: f64 },
+    InvalidTimestamp { timestamp: i64 },
 }
 
 impl std::fmt::Display for DataPointError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             DataPointError::EmptyMeasurement => write!(f, "measurement name cannot be empty"),
+            DataPointError::InvalidMeasurementName { name } => {
+                write!(f, "measurement name '{}' contains invalid characters (must be alphanumeric, dash, underscore, or dot; no path separators or '..')", name)
+            }
             DataPointError::NoFields => write!(f, "data point must have at least one field"),
             DataPointError::EmptyTagKey => write!(f, "tag key cannot be empty string"),
+            DataPointError::InvalidTagKey { key } => {
+                write!(f, "tag key '{}' contains invalid characters", key)
+            }
+            DataPointError::FieldTagConflict { key } => {
+                write!(f, "field key '{}' conflicts with a tag key", key)
+            }
             DataPointError::EmptyFieldKey => write!(f, "field key cannot be empty string"),
             DataPointError::InvalidFloatValue { field, value } => {
                 write!(f, "field '{}' has invalid float value: {}", field, value)
+            }
+            DataPointError::InvalidTimestamp { timestamp } => {
+                write!(f, "invalid timestamp: {}", timestamp)
             }
         }
     }
@@ -632,6 +733,7 @@ impl From<&FieldValue> for FieldType {
             FieldValue::Integer(_) => FieldType::Integer,
             FieldValue::String(_) => FieldType::String,
             FieldValue::Boolean(_) => FieldType::Boolean,
+            FieldValue::Null => FieldType::String,
         }
     }
 }

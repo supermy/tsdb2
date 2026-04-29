@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { Card, Row, Col, Select, Button, Typography, Table, Tag, InputNumber, Space } from 'antd';
+import { Card, Row, Col, Select, Button, Typography, Table, Tag, InputNumber, Space, message } from 'antd';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 import { api, useWebSocket, type MetricsSnapshot, type CollectorStatus } from '../api';
 import { fmtBytes } from '../utils';
@@ -34,7 +34,9 @@ const DataQuery: React.FC = () => {
       const status = await api.collector.status();
       setCollectorStatus(status);
       setIntervalSecs(status.interval_secs);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      message.warning(e instanceof Error ? e.message : '获取采集器状态失败');
+    }
   }, []);
 
   const fetchTimeseries = useCallback(async (secs?: number) => {
@@ -42,7 +44,9 @@ const DataQuery: React.FC = () => {
     try {
       const ts = await api.metrics.timeseries('default', 'all', secs ?? rangeSecs);
       setTimeseries(ts);
-    } catch (e) { console.error(e); }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '加载时序数据失败');
+    }
     finally { setLoading(false); }
   }, []);
 
@@ -90,18 +94,33 @@ const DataQuery: React.FC = () => {
   ];
 
   const handleStart = async () => {
-    await api.collector.start();
-    fetchCollectorStatus();
+    try {
+      await api.collector.start();
+      message.success('采集器已启动');
+      fetchCollectorStatus();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '启动采集器失败');
+    }
   };
 
   const handleStop = async () => {
-    await api.collector.stop();
-    fetchCollectorStatus();
+    try {
+      await api.collector.stop();
+      message.success('采集器已停止');
+      fetchCollectorStatus();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '停止采集器失败');
+    }
   };
 
   const handleConfigure = async () => {
-    await api.collector.configure(intervalSecs, true);
-    fetchCollectorStatus();
+    try {
+      await api.collector.configure(intervalSecs, true);
+      message.success('采集间隔已更新');
+      fetchCollectorStatus();
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '配置采集器失败');
+    }
   };
 
   return (

@@ -29,23 +29,28 @@ mod tests {
 
     fn write_datapoints_to_parquet(dir: &std::path::Path, dps: &[DataPoint]) {
         let pm = PartitionManager::new(dir, PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default());
+        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), &dps[0].measurement);
         writer.write_batch(dps).unwrap();
         writer.flush_all().unwrap();
     }
 
     fn make_schema() -> Arc<Schema> {
+        let mut tag_meta = std::collections::HashMap::new();
+        tag_meta.insert("tsdb_role".to_string(), "tag".to_string());
+        let mut field_meta = std::collections::HashMap::new();
+        field_meta.insert("tsdb_role".to_string(), "field".to_string());
         Arc::new(Schema::new(vec![
             Field::new(
                 "timestamp",
                 DataType::Timestamp(TimeUnit::Microsecond, None),
                 false,
             ),
-            Field::new("tag_host", DataType::Utf8, true),
-            Field::new("tag_region", DataType::Utf8, true),
-            Field::new("usage", DataType::Float64, true),
-            Field::new("idle", DataType::Float64, true),
-            Field::new("count", DataType::Int64, true),
+            Field::new("tags_hash", DataType::UInt64, false),
+            Field::new("tag_host", DataType::Utf8, true).with_metadata(tag_meta.clone()),
+            Field::new("tag_region", DataType::Utf8, true).with_metadata(tag_meta.clone()),
+            Field::new("usage", DataType::Float64, true).with_metadata(field_meta.clone()),
+            Field::new("idle", DataType::Float64, true).with_metadata(field_meta.clone()),
+            Field::new("count", DataType::Int64, true).with_metadata(field_meta.clone()),
         ]))
     }
 
@@ -324,7 +329,7 @@ mod tests {
 
         let batch = datapoints_to_record_batch(&dps, schema).unwrap();
 
-        let projected = batch.project(&[0, 3]).unwrap();
+        let projected = batch.project(&[0, 4]).unwrap();
         assert_eq!(projected.num_columns(), 2);
         assert_eq!(projected.schema().field(0).name(), "timestamp");
         assert_eq!(projected.schema().field(1).name(), "usage");

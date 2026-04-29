@@ -31,19 +31,28 @@ impl WriteBuffer {
 
     /// 写入单个数据点, 返回是否达到刷盘阈值
     pub fn write(&mut self, dp: &DataPoint) -> bool {
-        let date = micros_to_date(dp.timestamp);
-        self.buffers.entry(date).or_default().push(dp.clone());
-        self.total_rows += 1;
+        if let Ok(date) = micros_to_date(dp.timestamp) {
+            self.buffers.entry(date).or_default().push(dp.clone());
+            self.total_rows += 1;
+        } else {
+            tracing::warn!("dropping datapoint with invalid timestamp: {}", dp.timestamp);
+        }
         self.total_rows >= self.max_buffer_rows
     }
 
-    /// 批量写入数据点, 返回是否达到刷盘阈值
     pub fn write_batch(&mut self, datapoints: &[DataPoint]) -> bool {
+        let mut dropped = 0usize;
         for dp in datapoints {
-            let date = micros_to_date(dp.timestamp);
-            self.buffers.entry(date).or_default().push(dp.clone());
+            if let Ok(date) = micros_to_date(dp.timestamp) {
+                self.buffers.entry(date).or_default().push(dp.clone());
+                self.total_rows += 1;
+            } else {
+                dropped += 1;
+            }
         }
-        self.total_rows += datapoints.len();
+        if dropped > 0 {
+            tracing::warn!("dropped {} datapoints with invalid timestamps in batch", dropped);
+        }
         self.total_rows >= self.max_buffer_rows
     }
 
@@ -113,11 +122,15 @@ impl AsyncWriteBuffer {
         let handle = std::thread::Builder::new()
             .name("tsdb2-async-writer".to_string())
             .spawn(move || {
-                while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                while !stop_clone.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(std::time::Duration::from_millis(flush_interval_ms));
-                    Self::do_flush(&inner_clone, &writer_clone);
+                    if let Err(e) = Self::do_flush(&inner_clone, &writer_clone) {
+                        tracing::error!("background flush failed: {}", e);
+                    }
                 }
-                Self::do_flush(&inner_clone, &writer_clone);
+                if let Err(e) = Self::do_flush(&inner_clone, &writer_clone) {
+                    tracing::error!("final flush on shutdown failed: {}", e);
+                }
             })
             .expect("failed to spawn async writer thread");
 
@@ -152,18 +165,18 @@ impl AsyncWriteBuffer {
     /// 先排空缓冲区并写入 Parquet, 再获取 writer 锁确保后台线程的写入也完成。
     /// 这保证了 flush 返回时所有数据已持久化。
     pub fn flush(&self) -> Result<usize> {
-        Self::do_flush(&self.inner, &self.writer);
+        let result = Self::do_flush(&self.inner, &self.writer);
         {
             let _writer_guard = self.writer.lock().unwrap_or_else(|e| {
                 tracing::warn!("Mutex poisoned in flush wait, recovering: {}", e);
                 e.into_inner()
             });
         }
-        Ok(0)
+        result
     }
 
     /// 执行刷盘: 排空缓冲区 → 写入 Parquet → flush_all
-    fn do_flush(buffer: &Arc<Mutex<WriteBuffer>>, writer: &Arc<Mutex<TsdbParquetWriter>>) {
+    fn do_flush(buffer: &Arc<Mutex<WriteBuffer>>, writer: &Arc<Mutex<TsdbParquetWriter>>) -> Result<usize> {
         let drained = {
             let mut guard = buffer.lock().unwrap_or_else(|e| {
                 tracing::warn!("Mutex poisoned in do_flush drain, recovering: {}", e);
@@ -173,8 +186,10 @@ impl AsyncWriteBuffer {
         };
 
         if drained.is_empty() {
-            return;
+            return Ok(0);
         }
+
+        let total_rows: usize = drained.iter().map(|(_, dps)| dps.len()).sum();
 
         let mut writer_guard = writer.lock().unwrap_or_else(|e| {
             tracing::warn!("Mutex poisoned in do_flush writer, recovering: {}", e);
@@ -192,6 +207,17 @@ impl AsyncWriteBuffer {
 
         if let Err(e) = writer_guard.flush_all() {
             tracing::error!("async flush flush_all failed: {}", e);
+            {
+                let mut guard = buffer.lock().unwrap_or_else(|e| {
+                    tracing::warn!("Mutex poisoned in do_flush reinsert, recovering: {}", e);
+                    e.into_inner()
+                });
+                guard.reinsert(failed);
+            }
+            return Err(TsdbStorageArrowError::Io(std::io::Error::other(format!(
+                "flush_all failed: {}",
+                e
+            ))));
         }
 
         if !failed.is_empty() {
@@ -201,14 +227,17 @@ impl AsyncWriteBuffer {
                     "dropping {} failed datapoints after persistent flush errors",
                     total_failed
                 );
-                return;
+                return Ok(total_rows - total_failed);
             }
             let mut guard = buffer.lock().unwrap_or_else(|e| {
                 tracing::warn!("Mutex poisoned in do_flush reinsert, recovering: {}", e);
                 e.into_inner()
             });
             guard.reinsert(failed);
+            return Ok(total_rows - total_failed);
         }
+
+        Ok(total_rows)
     }
 
     pub fn buffer_count(&self) -> usize {
@@ -222,7 +251,7 @@ impl AsyncWriteBuffer {
     /// 停止后台刷盘线程
     pub fn stop(&mut self) -> Result<()> {
         self.stop_flag
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Some(handle) = self.handle.take() {
             handle
                 .join()
@@ -283,7 +312,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
         let writer_config = WriteBufferConfig::default();
-        let writer = TsdbParquetWriter::new(Arc::new(pm), writer_config);
+        let writer = TsdbParquetWriter::new(Arc::new(pm), writer_config, "cpu");
 
         let buffer = Mutex::new(WriteBuffer::new(100));
         let mut async_buf = AsyncWriteBuffer::new(buffer, writer, 100);
@@ -418,5 +447,43 @@ mod tests {
         assert_eq!(buffer.buffer_count(), 2);
         let drained = buffer.drain();
         assert_eq!(drained.len(), 2);
+    }
+
+    #[test]
+    fn test_write_buffer_invalid_timestamp_dropped() {
+        let mut buffer = WriteBuffer::new(100);
+
+        let valid_dp = DataPoint::new("cpu", 1_000_000)
+            .with_tag("host", "s1")
+            .with_field("usage", FieldValue::Float(0.5));
+        let invalid_dp = DataPoint::new("cpu", i64::MIN)
+            .with_tag("host", "s1")
+            .with_field("usage", FieldValue::Float(0.5));
+
+        buffer.write(&valid_dp);
+        assert_eq!(buffer.total_rows(), 1);
+
+        buffer.write(&invalid_dp);
+        assert_eq!(buffer.total_rows(), 1, "invalid timestamp should be dropped, total_rows should not increase");
+    }
+
+    #[test]
+    fn test_write_buffer_batch_invalid_timestamps_dropped() {
+        let mut buffer = WriteBuffer::new(100);
+
+        let dps = vec![
+            DataPoint::new("cpu", 1_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.5)),
+            DataPoint::new("cpu", i64::MIN)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.6)),
+            DataPoint::new("cpu", 2_000_000)
+                .with_tag("host", "s1")
+                .with_field("usage", FieldValue::Float(0.7)),
+        ];
+
+        buffer.write_batch(&dps);
+        assert_eq!(buffer.total_rows(), 2, "only valid timestamps should be buffered, invalid ones dropped");
     }
 }

@@ -1,6 +1,6 @@
 # TSDB2
 
-高性能时序数据库，双引擎架构（RocksDB + Parquet/Iceberg），支持 Flight SQL、Web 管理界面、数据生命周期管理和 Parquet 查询剪枝。
+高性能时序数据库，双引擎架构（RocksDB + Arrow/Parquet），支持 Flight SQL、Web 管理界面、数据生命周期管理和 Parquet 查询剪枝。
 
 ## 架构
 
@@ -25,17 +25,64 @@
                       │
 ┌─────────────────────▼───────────────────────────────────────┐
 │  Flight gRPC Server (:50051) + Storage Engine               │
-│  RocksDB (热数据) │ Parquet/Iceberg (冷数据)                │
+│  ┌──────────────────┐  ┌──────────────────────────────────┐ │
+│  │  RocksDB Engine  │  │  Arrow Storage Engine             │ │
+│  │  (热数据 KV)     │  │  WAL → AsyncBuffer → Parquet      │ │
+│  │                  │  │  Measurement Isolation             │ │
+│  │                  │  │  Schema Evolution (deferred)       │ │
+│  └──────────────────┘  └──────────────────────────────────┘ │
+│         │                          │                         │
+│         └──────────┬───────────────┘                         │
+│                    ▼                                         │
+│  Parquet/Iceberg (温/冷数据归档)                             │
 └─────────────────────────────────────────────────────────────┘
+```
+
+## Arrow 存储引擎数据流
+
+```
+写入路径:
+  Client → DataPoint.validate() [路径安全检查]
+         → WAL.append() [段文件轮转, 64MB/段]
+         → write_to_buffer() [单次锁获取, 无TOCTOU竞态]
+         → write_seq++ [原子计数器]
+         → AsyncWriteBuffer [后台定时flush]
+         → TsdbParquetWriter [schema evolution延迟flush]
+         → Parquet文件 [临时文件+fsync+原子rename]
+
+读取路径:
+  Client → ensure_data_visible() [仅write_seq>flush_seq时flush]
+         → TsdbParquetReader [measurement子目录隔离]
+         → 行组裁剪 [时间范围统计信息]
+         → 标签行过滤 [Parquet RowFilter下推]
+  get_point() [精确时间戳+标签匹配+提前退出]
+
+压缩路径:
+  compact_all_levels() → 读取L0文件 → 合并+去重+排序
+  → write_compacted() [临时文件+目录fsync+原子rename]
+  → deduplicate_batches() [反向遍历, "last write wins"]
+  → align_batches_to_merged_schema() [缺失列填充null]
+
+WAL路径:
+  append() [write→flush→sync_all三步]
+  rotate_if_needed() [64MB自动轮转到新段文件]
+  recover() [扫描目录所有wal-*.log段文件]
+  truncate() [清理当前段+删除旧段文件]
+
+生命周期:
+  cleanup_expired() [flush后删除, 避免竞态]
+  demote_to_warm/cold/archive [hot→warm→cold→archive目录移动]
+  status_arrow() [扫描hot/warm/cold/archive全部分布]
 ```
 
 ## 功能特性
 
-- **双引擎存储**: RocksDB 热数据 + Parquet/Iceberg 冷数据归档
+- **双引擎存储**: RocksDB 热数据 + Arrow/Parquet 引擎（WAL + Measurement 隔离 + Schema Evolution）
+- **Arrow 存储引擎**: WAL 持久化、段文件轮转、异步写入缓冲、延迟 Schema Evolution、Measurement 目录隔离
 - **Flight SQL**: Arrow Flight gRPC 协议，支持 SQL 查询和流式写入
 - **Web SQL 控制台**: 浏览器内直接执行 SQL，自动合并 RocksDB + Parquet 数据
 - **Parquet 查询剪枝**: 时间分区 + 标签排序 + 文件/Row Group 级统计信息剪枝
-- **数据生命周期**: 热数据(RocksDB) → 温数据(Parquet SNAPPY) → 冷数据(Parquet ZSTD)
+- **数据生命周期**: 热数据 → 温数据(Parquet SNAPPY) → 冷数据(Parquet ZSTD) → 归档
 - **Iceberg 表管理**: 创建/扫描/快照/回滚/压缩/过期清理
 - **Parquet 数据查看**: 文件列表、元数据、数据预览
 - **实时监控**: CPU/内存/磁盘/网络/温度采集，WebSocket 实时推送
@@ -61,17 +108,32 @@ make help
 # 完整构建
 make build
 
-# 开发模式（前后端热更新）
+# 开发模式 - RocksDB 引擎
 make dev
 
-# 生产启动
+# 开发模式 - Arrow 引擎
+make dev-arrow
+
+# 生产启动 - RocksDB
 make start
+
+# 生产启动 - Arrow 引擎
+make start-arrow
 
 # 运行测试
 make test
 
+# TDD 模式 (watch + test)
+make tdd
+
+# Arrow 引擎 TDD 模式
+make tdd-arrow
+
 # 代码质量检查
 make check
+
+# 安全审计
+make security
 
 # Docker 构建
 make docker-build
@@ -91,15 +153,21 @@ cp -r tsdb-dashboard/dist target/release/dashboard/
 ### 启动
 
 ```bash
-# 生产模式
+# 生产模式 - RocksDB
 make start
 
-# 开发模式
-make dev
+# 生产模式 - Arrow
+make start-arrow
 
-# 手动启动
+# 手动启动 - RocksDB
 tsdb-cli serve --data-dir ./data --parquet-dir ./data_parquet \
     --storage-engine rocksdb --config default \
+    --host 0.0.0.0 --flight-port 50051 \
+    --admin-port 8080 --http-port 3000
+
+# 手动启动 - Arrow
+tsdb-cli serve --data-dir ./data --parquet-dir ./data_parquet \
+    --storage-engine arrow --config default \
     --host 0.0.0.0 --flight-port 50051 \
     --admin-port 8080 --http-port 3000
 ```
@@ -116,7 +184,7 @@ tsdb-cli serve --data-dir ./data --parquet-dir ./data_parquet \
 | `TSDB_FLIGHT_PORT` | `50051` | Flight gRPC 端口 |
 | `TSDB_ADMIN_PORT` | `8080` | NNG Admin 端口 |
 | `TSDB_HTTP_PORT` | `3000` | HTTP Dashboard 端口 |
-| `TSDB_ENGINE` | `rocksdb` | 存储引擎 |
+| `TSDB_ENGINE` | `rocksdb` | 存储引擎 (`rocksdb` 或 `arrow`) |
 | `TSDB_CONFIG` | `default` | 配置名称 |
 
 ## CLI 命令
@@ -245,30 +313,114 @@ tsdb-cli doctor
 
 ## 数据生命周期
 
-TSDB2 实现了基于存储引擎的数据分层策略：
+TSDB2 实现了基于存储引擎的数据分层策略，双引擎均支持完整的生命周期管理：
 
 ```
-┌──────────────────────────────────────────────────┐
-│ 热数据 (RocksDB)                                  │
-│   所有在 RocksDB 中的 CF                          │
-│   demote_eligible:                                │
-│     none  → age≤3天, 不可降级                     │
-│     warm  → age 4-14天, 可降级为温数据             │
-│     cold  → age>14天, 可降级为冷数据               │
-└─────────────┬───────────────────┬────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ 热数据 (Hot)                                                  │
+│   RocksDB: 所有在 RocksDB 中的 CF                             │
+│   Arrow:   data_YYYYMMDD/measurement/ 目录中的 Parquet 文件   │
+│   demote_eligible:                                            │
+│     none  → age≤3天, 不可降级                                 │
+│     warm  → age 4-14天, 可降级为温数据                         │
+│     cold  → age>14天, 可降级为冷数据                           │
+└─────────────┬───────────────────┬────────────────────────────┘
               │ demote_to_warm    │ demote_to_cold
               │ (SNAPPY 压缩)     │ (ZSTD 压缩)
               ▼                   ▼
-┌──────────────────┐  ┌──────────────────┐
-│ 温数据 (Parquet)  │  │ 冷数据 (Parquet)  │
-│ SNAPPY 压缩      │  │ ZSTD 压缩        │
-│ 可继续降级为冷数据 │  │ 长期存储         │
-└──────────────────┘  └──────────────────┘
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│ 温数据 (Warm)     │  │ 冷数据 (Cold)     │  │ 归档 (Archive)    │
+│ SNAPPY 压缩      │  │ ZSTD 压缩        │  │ ZSTD 最高压缩     │
+│ 可继续降级为冷数据 │  │ 可归档           │  │ 长期存储          │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
 ```
 
-**核心原则**：RocksDB 中的所有 CF 都是热数据，不论其年龄。只有已降级到 Parquet 的数据才被分类为温/冷数据。
+**核心原则**：
+- RocksDB 中的所有 CF 都是热数据，不论其年龄
+- Arrow 引擎中 `data_YYYYMMDD/` 目录下的数据是热数据
+- 只有已降级到 `warm/`/`cold/` 目录的数据才被分类为温/冷数据
+- `archive/` 目录用于长期归档，使用最高压缩比
 
 详细文档见 [docs/data-lifecycle.md](docs/data-lifecycle.md)。
+
+## TDD 测试策略
+
+### 测试金字塔
+
+```
+         ┌──────────┐
+         │ E2E Test │  ← make test-integration / make test-arrow-e2e
+         │  102 tests│
+        ┌┴──────────┴┐
+        │Integration  │  ← make test-arrow
+        │  122 tests  │
+       ┌┴────────────┴┐
+       │  Unit Tests   │  ← make test-unit / make tdd
+       │  584 tests    │
+      ┌┴──────────────┴┐
+      │  Stress/Bench   │  ← make test-stress / make bench
+      │   27 tests      │
+      └─────────────────┘
+```
+
+### 测试统计
+
+| Crate | #[test] | #[tokio::test] | Total |
+|-------|---------|----------------|--------|
+| tsdb-rocksdb | 145 | 0 | 145 |
+| tsdb-integration-tests | 74 | 28 | 102 |
+| tsdb-iceberg | 99 | 0 | 99 |
+| tsdb-parquet | 58 | 0 | 58 |
+| tsdb-admin | 47 | 0 | 47 |
+| tsdb-arrow | 40 | 0 | 40 |
+| tsdb-storage-arrow | 23 | 1 | 24 |
+| tsdb-stress-rocksdb | 22 | 0 | 22 |
+| tsdb-datafusion | 12 | 8 | 20 |
+| tsdb-flight | 3 | 12 | 15 |
+| tsdb-cli | 7 | 0 | 7 |
+| tsdb-stress | 5 | 0 | 5 |
+| **Total** | **535** | **49** | **584** |
+
+### TDD 工作流
+
+```bash
+# 1. Red - 写一个失败的测试
+make tdd-arrow          # watch 模式，自动重跑 Arrow 相关测试
+
+# 2. Green - 写最少的代码让测试通过
+make test-arrow         # 验证测试通过
+
+# 3. Refactor - 重构代码
+make lint               # 确保代码质量
+make test-all           # 确保没有破坏其他测试
+
+# 4. 完整验证
+make check              # 完整质量门禁 (lint + test + build)
+```
+
+### CI/CD 流水线
+
+```
+Push/PR → ┌─────────┐ ┌──────────┐ ┌────────────┐ ┌──────────┐
+          │  Check   │ │  Lint    │ │ Test (TDD) │ │ Frontend │
+          │  3 OS    │ │ clippy   │ │ unit+arrow │ │  build   │
+          │  +MSRV   │ │ fmt      │ │ +integ     │ │          │
+          └─────────┘ └──────────┘ └────────────┘ └──────────┘
+                              │
+              ┌───────────────┼───────────────┐
+              ▼               ▼               ▼
+        ┌──────────┐  ┌────────────┐  ┌────────────┐
+        │ Security │  │   E2E      │  │   E2E      │
+        │ audit    │  │ (RocksDB)  │  │  (Arrow)   │
+        │ deny     │  │            │  │            │
+        └──────────┘  └────────────┘  └────────────┘
+                              │
+                              ▼
+                    ┌──────────────────┐
+                    │  Release Build   │  ← 仅 tags/v*
+                    │  4 平台交叉编译   │
+                    └──────────────────┘
+```
 
 ## Dashboard 页面
 
@@ -309,7 +461,10 @@ tsdb2/
 ├── scripts/                # 运维脚本
 ├── docs/                   # 文档
 ├── Makefile                # 构建与开发命令
-└── Dockerfile              # Docker 镜像构建
+├── Dockerfile              # Docker 镜像构建
+├── rustfmt.toml            # Rust 格式化配置
+├── deny.toml               # 依赖安全策略
+└── .nextest.toml           # 测试运行器配置
 ```
 
 ## Makefile 命令
@@ -317,14 +472,25 @@ tsdb2/
 | 命令 | 说明 |
 |------|------|
 | `make build` | 完整构建 (release) |
-| `make dev` | 开发模式 (热更新) |
-| `make start` | 生产启动 |
+| `make dev` | 开发模式 - RocksDB + Vite |
+| `make dev-arrow` | 开发模式 - Arrow + Vite |
+| `make start` | 生产启动 (RocksDB) |
+| `make start-arrow` | 生产启动 (Arrow) |
 | `make stop` | 停止服务 |
 | `make test` | 运行测试 + lint |
+| `make test-all` | 运行所有测试 (含 Arrow) |
+| `make test-arrow` | Arrow 引擎测试 |
+| `make test-arrow-e2e` | Arrow 引擎 E2E 测试 |
+| `make tdd` | TDD watch 模式 (全部) |
+| `make tdd-arrow` | TDD watch 模式 (Arrow) |
 | `make check` | 完整质量检查 |
 | `make lint` | Clippy + 格式检查 |
+| `make security` | 安全审计 (cargo-deny) |
+| `make coverage` | 代码覆盖率 |
+| `make coverage-arrow` | Arrow 引擎覆盖率 |
+| `make bench` | 运行性能基准 (RocksDB) |
+| `make bench-arrow` | Arrow 引擎性能基准 |
 | `make docker-build` | 构建 Docker 镜像 |
-| `make bench` | 运行性能基准 |
 | `make help` | 查看所有命令 |
 
 ## 配置文件
@@ -350,6 +516,15 @@ make test
 
 # 完整质量检查
 make check
+
+# TDD 模式
+make tdd
+
+# Arrow 引擎测试
+make test-arrow
+
+# 安全审计
+make security
 
 # 手动
 cargo clippy --workspace -- -D warnings
