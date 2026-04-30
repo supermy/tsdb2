@@ -236,11 +236,11 @@ fn manifest_predicate_check(
         Predicate::And(left, right) => {
             manifest_predicate_check(summaries, left, partition_spec)
                 && manifest_predicate_check(summaries, right, partition_spec)
-        }
+        },
         Predicate::Or(left, right) => {
             manifest_predicate_check(summaries, left, partition_spec)
                 || manifest_predicate_check(summaries, right, partition_spec)
-        }
+        },
         Predicate::Not(inner) => !manifest_predicate_check(summaries, inner, partition_spec),
         Predicate::Gt(field_id, val) => {
             if let Some(idx) = partition_spec.field_index(*field_id) {
@@ -254,7 +254,7 @@ fn manifest_predicate_check(
                 }
             }
             true
-        }
+        },
         Predicate::GtEq(field_id, val) => {
             if let Some(idx) = partition_spec.field_index(*field_id) {
                 if idx < summaries.len() {
@@ -267,7 +267,7 @@ fn manifest_predicate_check(
                 }
             }
             true
-        }
+        },
         Predicate::Lt(field_id, val) => {
             if let Some(idx) = partition_spec.field_index(*field_id) {
                 if idx < summaries.len() {
@@ -280,7 +280,7 @@ fn manifest_predicate_check(
                 }
             }
             true
-        }
+        },
         Predicate::LtEq(field_id, val) => {
             if let Some(idx) = partition_spec.field_index(*field_id) {
                 if idx < summaries.len() {
@@ -293,7 +293,7 @@ fn manifest_predicate_check(
                 }
             }
             true
-        }
+        },
         Predicate::Eq(field_id, val) => {
             if let Some(idx) = partition_spec.field_index(*field_id) {
                 if idx < summaries.len() {
@@ -310,7 +310,7 @@ fn manifest_predicate_check(
                 }
             }
             true
-        }
+        },
         Predicate::NotEq(_, _) => true,
         Predicate::InList(_, _) => true,
         Predicate::IsNull(_) => true,
@@ -367,10 +367,10 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
         Predicate::AlwaysTrue => true,
         Predicate::And(left, right) => {
             file_matches_predicate(df, left) && file_matches_predicate(df, right)
-        }
+        },
         Predicate::Or(left, right) => {
             file_matches_predicate(df, left) || file_matches_predicate(df, right)
-        }
+        },
         Predicate::Not(inner) => !file_matches_predicate(df, inner),
         Predicate::Gt(field_id, val) => {
             if let PredicateValue::Long(v) = val {
@@ -384,7 +384,7 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
                 }
             }
             true
-        }
+        },
         Predicate::GtEq(field_id, val) => {
             if let PredicateValue::Long(v) = val {
                 if let Some(upper) = df.upper_bound_i64(*field_id) {
@@ -397,7 +397,7 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
                 }
             }
             true
-        }
+        },
         Predicate::Lt(field_id, val) => {
             if let PredicateValue::Long(v) = val {
                 if let Some(lower) = df.lower_bound_i64(*field_id) {
@@ -410,7 +410,7 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
                 }
             }
             true
-        }
+        },
         Predicate::LtEq(field_id, val) => {
             if let PredicateValue::Long(v) = val {
                 if let Some(lower) = df.lower_bound_i64(*field_id) {
@@ -423,7 +423,7 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
                 }
             }
             true
-        }
+        },
         Predicate::Eq(field_id, val) => {
             if let PredicateValue::Long(v) = val {
                 let lower = df.lower_bound_i64(*field_id);
@@ -447,7 +447,7 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
                 }
             }
             true
-        }
+        },
         Predicate::NotEq(_, _) => true,
         Predicate::InList(field_id, values) => {
             for v in values {
@@ -456,7 +456,7 @@ fn file_matches_predicate(df: &DataFile, pred: &Predicate) -> bool {
                 }
             }
             false
-        }
+        },
         Predicate::IsNull(_) => true,
         Predicate::IsNotNull(_) => true,
     }
@@ -488,50 +488,50 @@ fn evaluate_predicate(
             let l = evaluate_predicate(batch, left, schema)?;
             let r = evaluate_predicate(batch, right, schema)?;
             Some(boolean_and(&l, &r))
-        }
+        },
         Predicate::Or(left, right) => {
             let l = evaluate_predicate(batch, left, schema)?;
             let r = evaluate_predicate(batch, right, schema)?;
             Some(boolean_or(&l, &r))
-        }
+        },
         Predicate::Not(inner) => {
             let inner_mask = evaluate_predicate(batch, inner, schema)?;
             arrow_not(&inner_mask).ok()
-        }
+        },
         Predicate::Eq(field_id, val) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             compare_eq(batch.column(col_idx), val)
-        }
+        },
         Predicate::NotEq(field_id, val) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             let eq_mask = compare_eq(batch.column(col_idx), val)?;
             arrow_not(&eq_mask).ok()
-        }
+        },
         Predicate::Gt(field_id, val) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             compare_gt(batch.column(col_idx), val)
-        }
+        },
         Predicate::GtEq(field_id, val) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             compare_gteq(batch.column(col_idx), val)
-        }
+        },
         Predicate::Lt(field_id, val) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             compare_lt(batch.column(col_idx), val)
-        }
+        },
         Predicate::LtEq(field_id, val) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             compare_lteq(batch.column(col_idx), val)
-        }
+        },
         Predicate::IsNull(field_id) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             is_null_mask(batch.column(col_idx))
-        }
+        },
         Predicate::IsNotNull(field_id) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             let null_mask = is_null_mask(batch.column(col_idx))?;
             arrow_not(&null_mask).ok()
-        }
+        },
         Predicate::InList(field_id, values) => {
             let col_idx = find_column_index(batch, schema, *field_id)?;
             let mut combined = BooleanArray::from(vec![false; batch.num_rows()]);
@@ -541,7 +541,7 @@ fn evaluate_predicate(
                 }
             }
             Some(combined)
-        }
+        },
     }
 }
 
@@ -577,11 +577,11 @@ fn extract_i64_values(col: &ArrayRef) -> Option<Vec<Option<i64>>> {
         DataType::Int64 => {
             let arr = col.as_any().downcast_ref::<Int64Array>()?;
             Some(arr.iter().collect())
-        }
+        },
         DataType::Int32 => {
             let arr = col.as_any().downcast_ref::<Int32Array>()?;
             Some(arr.iter().map(|v| v.map(|x| x as i64)).collect())
-        }
+        },
         DataType::Timestamp(_, _) => {
             let arr = col.as_primitive::<TimestampMicrosecondType>();
             Some(
@@ -595,11 +595,11 @@ fn extract_i64_values(col: &ArrayRef) -> Option<Vec<Option<i64>>> {
                     })
                     .collect(),
             )
-        }
+        },
         DataType::Date32 => {
             let arr = col.as_any().downcast_ref::<Int32Array>()?;
             Some(arr.iter().map(|v| v.map(|x| x as i64)).collect())
-        }
+        },
         _ => None,
     }
 }
@@ -609,11 +609,11 @@ fn extract_f64_values(col: &ArrayRef) -> Option<Vec<Option<f64>>> {
         DataType::Float64 => {
             let arr = col.as_any().downcast_ref::<Float64Array>()?;
             Some(arr.iter().collect())
-        }
+        },
         DataType::Float32 => {
             let arr = col.as_any().downcast_ref::<Float32Array>()?;
             Some(arr.iter().map(|v| v.map(|x| x as f64)).collect())
-        }
+        },
         _ => None,
     }
 }
@@ -628,7 +628,7 @@ fn compare_eq(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
                     .map(|x| x.map(|x| x == *v))
                     .collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::Double(v) => {
             let values = extract_f64_values(col)?;
             Some(BooleanArray::from(
@@ -637,15 +637,15 @@ fn compare_eq(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
                     .map(|x| x.map(|x| x == *v))
                     .collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::String(v) => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             Some(arr.iter().map(|x| x.map(|x| x == v.as_str())).collect())
-        }
+        },
         PredicateValue::Boolean(v) => {
             let arr = col.as_any().downcast_ref::<BooleanArray>()?;
             Some(arr.iter().map(|x| x.map(|x| x == *v)).collect())
-        }
+        },
     }
 }
 
@@ -656,17 +656,17 @@ fn compare_gt(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
             Some(BooleanArray::from(
                 values.iter().map(|x| x.map(|x| x > *v)).collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::Double(v) => {
             let values = extract_f64_values(col)?;
             Some(BooleanArray::from(
                 values.iter().map(|x| x.map(|x| x > *v)).collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::String(v) => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             Some(arr.iter().map(|x| x.map(|x| x > v.as_str())).collect())
-        }
+        },
         PredicateValue::Boolean(_) => None,
     }
 }
@@ -681,7 +681,7 @@ fn compare_gteq(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
                     .map(|x| x.map(|x| x >= *v))
                     .collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::Double(v) => {
             let values = extract_f64_values(col)?;
             Some(BooleanArray::from(
@@ -690,11 +690,11 @@ fn compare_gteq(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
                     .map(|x| x.map(|x| x >= *v))
                     .collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::String(v) => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             Some(arr.iter().map(|x| x.map(|x| x >= v.as_str())).collect())
-        }
+        },
         PredicateValue::Boolean(_) => None,
     }
 }
@@ -706,17 +706,17 @@ fn compare_lt(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
             Some(BooleanArray::from(
                 values.iter().map(|x| x.map(|x| x < *v)).collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::Double(v) => {
             let values = extract_f64_values(col)?;
             Some(BooleanArray::from(
                 values.iter().map(|x| x.map(|x| x < *v)).collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::String(v) => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             Some(arr.iter().map(|x| x.map(|x| x < v.as_str())).collect())
-        }
+        },
         PredicateValue::Boolean(_) => None,
     }
 }
@@ -731,7 +731,7 @@ fn compare_lteq(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
                     .map(|x| x.map(|x| x <= *v))
                     .collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::Double(v) => {
             let values = extract_f64_values(col)?;
             Some(BooleanArray::from(
@@ -740,11 +740,11 @@ fn compare_lteq(col: &ArrayRef, val: &PredicateValue) -> Option<BooleanArray> {
                     .map(|x| x.map(|x| x <= *v))
                     .collect::<Vec<_>>(),
             ))
-        }
+        },
         PredicateValue::String(v) => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             Some(arr.iter().map(|x| x.map(|x| x <= v.as_str())).collect())
-        }
+        },
         PredicateValue::Boolean(_) => None,
     }
 }
@@ -800,19 +800,19 @@ fn expr_to_predicate(expr: &datafusion::logical_expr::Expr, schema: &Schema) -> 
                     let left_p = expr_to_predicate(left, schema)?;
                     let right_p = expr_to_predicate(right, schema)?;
                     Some(Predicate::And(Box::new(left_p), Box::new(right_p)))
-                }
+                },
                 Operator::Or => {
                     let left_p = expr_to_predicate(left, schema)?;
                     let right_p = expr_to_predicate(right, schema)?;
                     Some(Predicate::Or(Box::new(left_p), Box::new(right_p)))
-                }
+                },
                 _ => None,
             }
-        }
+        },
         Expr::Not(inner) => {
             let p = expr_to_predicate(inner, schema)?;
             Some(Predicate::Not(Box::new(p)))
-        }
+        },
         _ => None,
     }
 }
@@ -829,12 +829,12 @@ fn extract_field_and_value(
             let field_id = column_name_to_field_id(schema, &col.name)?;
             let val = scalar_to_predicate_value(scalar)?;
             Some((field_id, val))
-        }
+        },
         (Expr::Literal(scalar), Expr::Column(col)) => {
             let field_id = column_name_to_field_id(schema, &col.name)?;
             let val = scalar_to_predicate_value(scalar)?;
             Some((field_id, val))
-        }
+        },
         _ => None,
     }
 }

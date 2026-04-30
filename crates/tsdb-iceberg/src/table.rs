@@ -470,7 +470,8 @@ impl IcebergTable {
             if let Err(e) = self.catalog.delete_snapshot_data(&self.name, *snap_id) {
                 tracing::warn!(
                     "failed to delete snapshot data for snapshot {}: {}",
-                    snap_id, e
+                    snap_id,
+                    e
                 );
             }
         }

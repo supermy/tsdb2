@@ -1,6 +1,6 @@
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::PartitionManager;
-use arrow::array::{Array, UInt32Array, UInt64Array, TimestampMicrosecondArray};
+use arrow::array::{Array, TimestampMicrosecondArray, UInt32Array, UInt64Array};
 use arrow::compute::take;
 use arrow::record_batch::RecordBatch;
 use chrono::NaiveDate;
@@ -184,7 +184,9 @@ impl ParquetCompactor {
     }
 
     fn compact_measurement_l0_to_l1(&self, date: NaiveDate, measurement: &str) -> Result<()> {
-        let files = self.partition_manager.list_measurement_parquet_files(date, measurement)?;
+        let files = self
+            .partition_manager
+            .list_measurement_parquet_files(date, measurement)?;
         let l0_files: Vec<PathBuf> = files
             .iter()
             .filter(|p| {
@@ -214,8 +216,18 @@ impl ParquetCompactor {
             .partition_manager
             .ensure_measurement_partition(date, measurement)?;
         let uid = &uuid_short();
-        let tmp_path = dir.join(format!(".tmp-L1-{}-{}-{}", measurement, date.format("%Y%m%d"), uid));
-        let final_path = dir.join(format!("L1-{}-{}-{}.parquet", measurement, date.format("%Y%m%d"), uid));
+        let tmp_path = dir.join(format!(
+            ".tmp-L1-{}-{}-{}",
+            measurement,
+            date.format("%Y%m%d"),
+            uid
+        ));
+        let final_path = dir.join(format!(
+            "L1-{}-{}-{}.parquet",
+            measurement,
+            date.format("%Y%m%d"),
+            uid
+        ));
 
         self.write_compacted(&deduped, &tmp_path, &final_path, CompactionLevel::L1)?;
 
@@ -225,7 +237,9 @@ impl ParquetCompactor {
     }
 
     fn compact_measurement_l1_to_l2(&self, date: NaiveDate, measurement: &str) -> Result<()> {
-        let files = self.partition_manager.list_measurement_parquet_files(date, measurement)?;
+        let files = self
+            .partition_manager
+            .list_measurement_parquet_files(date, measurement)?;
         let l1_files: Vec<PathBuf> = files
             .iter()
             .filter(|p| {
@@ -255,8 +269,18 @@ impl ParquetCompactor {
             .partition_manager
             .ensure_measurement_partition(date, measurement)?;
         let uid = &uuid_short();
-        let tmp_path = dir.join(format!(".tmp-L2-{}-{}-{}", measurement, date.format("%Y%m%d"), uid));
-        let final_path = dir.join(format!("L2-{}-{}-{}.parquet", measurement, date.format("%Y%m%d"), uid));
+        let tmp_path = dir.join(format!(
+            ".tmp-L2-{}-{}-{}",
+            measurement,
+            date.format("%Y%m%d"),
+            uid
+        ));
+        let final_path = dir.join(format!(
+            "L2-{}-{}-{}.parquet",
+            measurement,
+            date.format("%Y%m%d"),
+            uid
+        ));
 
         self.write_compacted(&deduped, &tmp_path, &final_path, CompactionLevel::L2)?;
 
@@ -269,10 +293,20 @@ impl ParquetCompactor {
         let mut delete_errors = Vec::new();
         for path in old_files {
             if let Err(e) = std::fs::remove_file(path) {
-                tracing::warn!("failed to remove {} file {:?}: {}, retrying...", level_label, path, e);
+                tracing::warn!(
+                    "failed to remove {} file {:?}: {}, retrying...",
+                    level_label,
+                    path,
+                    e
+                );
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 if let Err(e2) = std::fs::remove_file(path) {
-                    tracing::error!("failed to remove {} file {:?} after retry: {}", level_label, path, e2);
+                    tracing::error!(
+                        "failed to remove {} file {:?} after retry: {}",
+                        level_label,
+                        path,
+                        e2
+                    );
                     delete_errors.push((path.clone(), e2.to_string()));
                 }
             }
@@ -327,19 +361,17 @@ impl ParquetCompactor {
         writer.close().map_err(TsdbParquetError::Parquet)?;
 
         {
-            let dir_fd = std::fs::File::open(tmp_path.parent().unwrap_or(tmp_path)).map_err(|e| {
-                let _ = std::fs::remove_file(tmp_path);
-                TsdbParquetError::Io(std::io::Error::other(format!(
-                    "failed to open dir for fsync: {}",
-                    e
-                )))
-            })?;
+            let dir_fd =
+                std::fs::File::open(tmp_path.parent().unwrap_or(tmp_path)).map_err(|e| {
+                    let _ = std::fs::remove_file(tmp_path);
+                    TsdbParquetError::Io(std::io::Error::other(format!(
+                        "failed to open dir for fsync: {}",
+                        e
+                    )))
+                })?;
             dir_fd.sync_all().map_err(|e| {
                 let _ = std::fs::remove_file(tmp_path);
-                TsdbParquetError::Io(std::io::Error::other(format!(
-                    "fsync dir failed: {}",
-                    e
-                )))
+                TsdbParquetError::Io(std::io::Error::other(format!("fsync dir failed: {}", e)))
             })?;
         }
 
@@ -364,12 +396,19 @@ impl ParquetCompactor {
 
         let mut removed = Vec::new();
         for partition in partitions {
-            if partition.date < cutoff && self.partition_manager.remove_partition(partition.date).is_ok() {
+            if partition.date < cutoff
+                && self
+                    .partition_manager
+                    .remove_partition(partition.date)
+                    .is_ok()
+            {
                 removed.push(partition.date);
             }
         }
 
-        let tier_dropped = self.partition_manager.cleanup_expired_with_retention(self.config.retention_days)?;
+        let tier_dropped = self
+            .partition_manager
+            .cleanup_expired_with_retention(self.config.retention_days)?;
         for path_str in &tier_dropped {
             let path = std::path::Path::new(path_str);
             if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
@@ -397,7 +436,9 @@ impl ParquetCompactor {
             .get_partitions_in_range(cutoff, today);
 
         for partition in partitions {
-            let measurements = self.partition_manager.list_measurements_for_date(partition.date)?;
+            let measurements = self
+                .partition_manager
+                .list_measurements_for_date(partition.date)?;
             if measurements.is_empty() {
                 let files = self.partition_manager.list_parquet_files(partition.date)?;
                 let l0_count = files
@@ -440,7 +481,8 @@ impl ParquetCompactor {
                         })
                         .count();
 
-                    if l0_count >= self.config.l0_max_files || l1_count >= self.config.l1_max_files {
+                    if l0_count >= self.config.l0_max_files || l1_count >= self.config.l1_max_files
+                    {
                         needs_compact = true;
                         break;
                     }
@@ -554,7 +596,7 @@ fn build_compaction_writer_props(
             } else {
                 parquet::basic::Compression::ZSTD(parquet::basic::ZstdLevel::default())
             }
-        }
+        },
     };
 
     let max_row_group_size = match level {
@@ -590,8 +632,11 @@ fn align_batches_to_merged_schema(batches: Vec<RecordBatch>) -> Vec<RecordBatch>
         return batches;
     }
 
-    let mut merged_fields: Vec<arrow::datatypes::Field> =
-        first_schema.fields().iter().map(|f| f.as_ref().clone()).collect();
+    let mut merged_fields: Vec<arrow::datatypes::Field> = first_schema
+        .fields()
+        .iter()
+        .map(|f| f.as_ref().clone())
+        .collect();
     for batch in &batches[1..] {
         for field in batch.schema().fields() {
             if !merged_fields.iter().any(|f| f.name() == field.name()) {
@@ -616,7 +661,8 @@ fn align_batches_to_merged_schema(batches: Vec<RecordBatch>) -> Vec<RecordBatch>
             }
         }
     }
-    let merged_schema = Arc::new(arrow::datatypes::Schema::new(merged_fields).with_metadata(merged_metadata));
+    let merged_schema =
+        Arc::new(arrow::datatypes::Schema::new(merged_fields).with_metadata(merged_metadata));
 
     batches
         .into_iter()
@@ -710,9 +756,7 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
             } else {
                 for &tag_idx in &tag_column_indices {
                     let tag_col = batch.column(tag_idx);
-                    if let Some(arr) = tag_col
-                        .as_any()
-                        .downcast_ref::<arrow::array::StringArray>()
+                    if let Some(arr) = tag_col.as_any().downcast_ref::<arrow::array::StringArray>()
                     {
                         if row_idx < arr.len() {
                             if arr.is_null(row_idx) {
@@ -724,7 +768,8 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
                         }
                     } else if let Some(arr) = tag_col
                         .as_any()
-                        .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int32Type>>()
+                        .downcast_ref::<arrow::array::DictionaryArray<arrow::datatypes::Int32Type>>(
+                        )
                     {
                         if row_idx < arr.len() {
                             if arr.is_null(row_idx) {
@@ -732,9 +777,15 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
                             } else {
                                 key_bytes.push(1u8);
                                 let key = arr.keys().value(row_idx);
-                                if let Some(values) = arr.values().as_any().downcast_ref::<arrow::array::StringArray>() {
+                                if let Some(values) = arr
+                                    .values()
+                                    .as_any()
+                                    .downcast_ref::<arrow::array::StringArray>()
+                                {
                                     if key >= 0 && (key as usize) < values.len() {
-                                        key_bytes.extend_from_slice(values.value(key as usize).as_bytes());
+                                        key_bytes.extend_from_slice(
+                                            values.value(key as usize).as_bytes(),
+                                        );
                                     }
                                 }
                             }
@@ -819,8 +870,8 @@ fn deduplicate_batches(batches: &[RecordBatch]) -> Result<Vec<RecordBatch>> {
                         .map_err(|e| TsdbParquetError::Conversion(format!("take failed: {}", e)))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let new_batch =
-                RecordBatch::try_new(schema.clone(), new_cols).map_err(|e| TsdbParquetError::Conversion(e.to_string()))?;
+            let new_batch = RecordBatch::try_new(schema.clone(), new_cols)
+                .map_err(|e| TsdbParquetError::Conversion(e.to_string()))?;
             deduped_batches.push(new_batch);
         }
     }
@@ -1067,7 +1118,10 @@ mod tests {
             Arc::new(schema),
             vec![
                 Arc::new(arrow::array::UInt64Array::from(vec![
-                    Some(1u64), None, Some(2u64), None,
+                    Some(1u64),
+                    None,
+                    Some(2u64),
+                    None,
                 ])),
                 Arc::new(arrow::array::Int64Array::from(vec![
                     100i64, 200i64, 300i64, 400i64,
@@ -1078,7 +1132,11 @@ mod tests {
         .unwrap();
 
         let result = deduplicate_batches(&[batch]).unwrap();
-        assert_eq!(result[0].num_rows(), 4, "null tags_hash rows should not be incorrectly deduplicated");
+        assert_eq!(
+            result[0].num_rows(),
+            4,
+            "null tags_hash rows should not be incorrectly deduplicated"
+        );
     }
 
     #[test]
@@ -1105,7 +1163,11 @@ mod tests {
         .unwrap();
 
         let result = deduplicate_batches(&[batch]).unwrap();
-        assert_eq!(result[0].num_rows(), 3, "TimestampSecond should be handled correctly in dedup");
+        assert_eq!(
+            result[0].num_rows(),
+            3,
+            "TimestampSecond should be handled correctly in dedup"
+        );
     }
 
     #[test]
@@ -1132,7 +1194,11 @@ mod tests {
         .unwrap();
 
         let result = deduplicate_batches(&[batch]).unwrap();
-        assert_eq!(result[0].num_rows(), 3, "TimestampNanosecond should be handled correctly in dedup");
+        assert_eq!(
+            result[0].num_rows(),
+            3,
+            "TimestampNanosecond should be handled correctly in dedup"
+        );
     }
 
     #[test]
@@ -1140,8 +1206,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pm = Arc::new(PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap());
 
-        let mut cpu_writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
-        let mut mem_writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "mem");
+        let mut cpu_writer =
+            TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
+        let mut mem_writer =
+            TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "mem");
 
         let today = chrono::Utc::now().date_naive();
         let base_ts = today
@@ -1182,14 +1250,26 @@ mod tests {
         let cpu_files = pm.list_measurement_parquet_files(today, "cpu").unwrap();
         let mem_files = pm.list_measurement_parquet_files(today, "mem").unwrap();
 
-        assert!(!cpu_files.is_empty(), "cpu should still have files after compaction");
-        assert!(!mem_files.is_empty(), "mem should still have files after compaction");
+        assert!(
+            !cpu_files.is_empty(),
+            "cpu should still have files after compaction"
+        );
+        assert!(
+            !mem_files.is_empty(),
+            "mem should still have files after compaction"
+        );
 
         for f in &cpu_files {
-            assert!(f.to_string_lossy().contains("/cpu/"), "cpu compacted file should be in cpu subdirectory");
+            assert!(
+                f.to_string_lossy().contains("/cpu/"),
+                "cpu compacted file should be in cpu subdirectory"
+            );
         }
         for f in &mem_files {
-            assert!(f.to_string_lossy().contains("/mem/"), "mem compacted file should be in mem subdirectory");
+            assert!(
+                f.to_string_lossy().contains("/mem/"),
+                "mem compacted file should be in mem subdirectory"
+            );
         }
     }
 }

@@ -19,7 +19,11 @@ pub struct TestRunner {
 }
 
 impl TestRunner {
-    pub fn new(engine: Arc<dyn StorageEngine>, parquet_dir: std::path::PathBuf, data_dir: std::path::PathBuf) -> Self {
+    pub fn new(
+        engine: Arc<dyn StorageEngine>,
+        parquet_dir: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
+    ) -> Self {
         Self {
             engine,
             parquet_dir,
@@ -145,7 +149,7 @@ impl TestRunner {
                         Ok(results) => {
                             demoted_warm = results;
                             tracing::info!("auto-demoted {} CFs to warm", warm_cfs.len());
-                        }
+                        },
                         Err(e) => tracing::warn!("auto demote to warm failed: {}", e),
                     }
                 }
@@ -160,7 +164,7 @@ impl TestRunner {
                         Ok(results) => {
                             demoted_cold = results;
                             tracing::info!("auto-demoted {} CFs to cold", cold_cfs.len());
-                        }
+                        },
                         Err(e) => tracing::warn!("auto demote to cold failed: {}", e),
                     }
                 }
@@ -540,7 +544,7 @@ impl TestRunner {
                 Err(e) => Err(crate::error::AdminError::Storage(e.to_string())),
                 Ok(b) => {
                     Ok::<usize, crate::error::AdminError>(b.iter().map(|b| b.num_rows()).sum())
-                }
+                },
             },
         };
         let elapsed = start.elapsed();

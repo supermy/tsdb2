@@ -1,6 +1,6 @@
 use crate::error::{Result, TsdbParquetError};
-use parquet::file::metadata::ParquetMetaData;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+use parquet::file::metadata::ParquetMetaData;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
@@ -50,15 +50,15 @@ pub fn extract_file_stats(
         .map(|f| f.name().clone())
         .collect();
     let metadata = builder.metadata();
-    let stats = extract_stats_from_metadata(metadata, file_path, measurement, date, tier, &tag_columns);
+    let stats =
+        extract_stats_from_metadata(metadata, file_path, measurement, date, tier, &tag_columns);
     Ok(stats)
 }
 
 pub fn write_stats_file(parquet_path: &Path, stats: &FileStats) -> Result<PathBuf> {
     let stats_path = parquet_path.with_extension("stats.json");
     let tmp_path = parquet_path.with_extension("stats.json.tmp");
-    let json = serde_json::to_string_pretty(stats)
-        .map_err(TsdbParquetError::Serde)?;
+    let json = serde_json::to_string_pretty(stats).map_err(TsdbParquetError::Serde)?;
     std::fs::write(&tmp_path, &json)?;
     std::fs::rename(&tmp_path, &stats_path)?;
     Ok(stats_path)
@@ -114,7 +114,7 @@ pub fn extract_stats_from_metadata(
                                 found_ts = true;
                             }
                         }
-                    }
+                    },
                     "tags_hash" => {
                         if let Some(min_bs) = min_opt {
                             if min_bs.len() == 8 {
@@ -130,12 +130,14 @@ pub fn extract_stats_from_metadata(
                                 found_th = true;
                             }
                         }
-                    }
+                    },
                     _ => {
                         if tag_columns.contains(&col_path) {
                             let tag_key = col_path.strip_prefix("tag_").unwrap_or(&col_path);
-                            let min_val = min_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
-                            let max_val = max_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
+                            let min_val =
+                                min_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
+                            let max_val =
+                                max_opt.and_then(|bs| String::from_utf8(bs.to_vec()).ok());
                             let null_count = stats.null_count_opt().unwrap_or(0);
 
                             tag_values
@@ -143,13 +145,13 @@ pub fn extract_stats_from_metadata(
                                 .and_modify(|existing| {
                                     if let Some(ref min) = min_val {
                                         match &existing.min {
-                                            Some(ex_min) if min >= ex_min => {}
+                                            Some(ex_min) if min >= ex_min => {},
                                             _ => existing.min = Some(min.clone()),
                                         }
                                     }
                                     if let Some(ref max) = max_val {
                                         match &existing.max {
-                                            Some(ex_max) if max <= ex_max => {}
+                                            Some(ex_max) if max <= ex_max => {},
                                             _ => existing.max = Some(max.clone()),
                                         }
                                     }
@@ -161,7 +163,7 @@ pub fn extract_stats_from_metadata(
                                     null_count,
                                 });
                         }
-                    }
+                    },
                 }
             }
         }
@@ -235,11 +237,14 @@ mod tests {
             tags_hash_max: Some(200),
             tag_values: {
                 let mut m = HashMap::new();
-                m.insert("host".to_string(), ValueStats {
-                    min: Some("server01".to_string()),
-                    max: Some("server99".to_string()),
-                    null_count: 0,
-                });
+                m.insert(
+                    "host".to_string(),
+                    ValueStats {
+                        min: Some("server01".to_string()),
+                        max: Some("server99".to_string()),
+                        null_count: 0,
+                    },
+                );
                 m
             },
         };

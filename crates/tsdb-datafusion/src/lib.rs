@@ -19,5 +19,5 @@ pub mod udf;
 
 pub use engine::DataFusionQueryEngine;
 pub use error::{Result, TsdbDatafusionError};
-pub use predicate::{ExtractedFilters, extract_filters, extract_filters_with_schema};
+pub use predicate::{extract_filters, extract_filters_with_schema, ExtractedFilters};
 pub use table_provider::TsdbTableProvider;

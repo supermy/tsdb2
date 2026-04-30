@@ -61,7 +61,7 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .min()?;
             Some(min.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Int => {
             let arr = col.as_any().downcast_ref::<Int32Array>()?;
             let min = (0..arr.len())
@@ -69,7 +69,7 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .min()?;
             Some(min.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Double => {
             let arr = col.as_any().downcast_ref::<Float64Array>()?;
             let min = (0..arr.len())
@@ -77,7 +77,7 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .reduce(f64::min)?;
             Some(min.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Float => {
             let arr = col.as_any().downcast_ref::<Float32Array>()?;
             let min = (0..arr.len())
@@ -85,12 +85,12 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .reduce(f32::min)?;
             Some(min.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Boolean => {
             let arr = col.as_any().downcast_ref::<BooleanArray>()?;
             let has_false = (0..arr.len()).any(|i| !arr.is_null(i) && !arr.value(i));
             Some(if has_false { vec![0] } else { vec![1] })
-        }
+        },
         crate::schema::IcebergType::String => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             let min = (0..arr.len())
@@ -98,7 +98,7 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .min()?;
             Some(min.as_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Timestamp => {
             let arr = col.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
             let min = (0..arr.len())
@@ -106,7 +106,7 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .min()?;
             Some(min.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Timestamptz => {
             let arr = col.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
             let min = (0..arr.len())
@@ -114,7 +114,7 @@ fn compute_lower_bound(
                 .map(|i| arr.value(i))
                 .min()?;
             Some(min.to_be_bytes().to_vec())
-        }
+        },
         _ => None,
     }
 }
@@ -134,7 +134,7 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .max()?;
             Some(max.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Int => {
             let arr = col.as_any().downcast_ref::<Int32Array>()?;
             let max = (0..arr.len())
@@ -142,7 +142,7 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .max()?;
             Some(max.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Double => {
             let arr = col.as_any().downcast_ref::<Float64Array>()?;
             let max = (0..arr.len())
@@ -150,7 +150,7 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .reduce(f64::max)?;
             Some(max.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Float => {
             let arr = col.as_any().downcast_ref::<Float32Array>()?;
             let max = (0..arr.len())
@@ -158,12 +158,12 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .reduce(f32::max)?;
             Some(max.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Boolean => {
             let arr = col.as_any().downcast_ref::<BooleanArray>()?;
             let has_true = (0..arr.len()).any(|i| !arr.is_null(i) && arr.value(i));
             Some(if has_true { vec![1] } else { vec![0] })
-        }
+        },
         crate::schema::IcebergType::String => {
             let arr = col.as_any().downcast_ref::<StringArray>()?;
             let max = (0..arr.len())
@@ -171,7 +171,7 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .max()?;
             Some(max.as_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Timestamp => {
             let arr = col.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
             let max = (0..arr.len())
@@ -179,7 +179,7 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .max()?;
             Some(max.to_be_bytes().to_vec())
-        }
+        },
         crate::schema::IcebergType::Timestamptz => {
             let arr = col.as_any().downcast_ref::<TimestampMicrosecondArray>()?;
             let max = (0..arr.len())
@@ -187,7 +187,7 @@ fn compute_upper_bound(
                 .map(|i| arr.value(i))
                 .max()?;
             Some(max.to_be_bytes().to_vec())
-        }
+        },
         _ => None,
     }
 }
@@ -225,12 +225,12 @@ pub fn merge_column_stats(base: &mut ColumnStats, other: &ColumnStats) {
         match base.lower_bounds.entry(field_id) {
             Entry::Vacant(e) => {
                 e.insert(lb.clone());
-            }
+            },
             Entry::Occupied(mut e) => {
                 if compare_bounds(lb.as_slice(), e.get().as_slice(), false) {
                     *e.get_mut() = lb.clone();
                 }
-            }
+            },
         }
     }
     for (&field_id, ub) in &other.upper_bounds {
@@ -238,12 +238,12 @@ pub fn merge_column_stats(base: &mut ColumnStats, other: &ColumnStats) {
         match base.upper_bounds.entry(field_id) {
             Entry::Vacant(e) => {
                 e.insert(ub.clone());
-            }
+            },
             Entry::Occupied(mut e) => {
                 if compare_bounds(ub.as_slice(), e.get().as_slice(), true) {
                     *e.get_mut() = ub.clone();
                 }
-            }
+            },
         }
     }
 }
@@ -263,8 +263,12 @@ fn compare_bounds(a: &[u8], b: &[u8], is_upper: bool) -> bool {
             } else {
                 vb ^ 0x8000_0000_0000_0000
             };
-            if is_upper { va > vb } else { va < vb }
-        }
+            if is_upper {
+                va > vb
+            } else {
+                va < vb
+            }
+        },
         4 => {
             let va = u32::from_be_bytes(a.try_into().unwrap_or([0; 4]));
             let vb = u32::from_be_bytes(b.try_into().unwrap_or([0; 4]));
@@ -278,11 +282,19 @@ fn compare_bounds(a: &[u8], b: &[u8], is_upper: bool) -> bool {
             } else {
                 vb ^ 0x8000_0000
             };
-            if is_upper { va > vb } else { va < vb }
-        }
+            if is_upper {
+                va > vb
+            } else {
+                va < vb
+            }
+        },
         _ => {
-            if is_upper { a > b } else { a < b }
-        }
+            if is_upper {
+                a > b
+            } else {
+                a < b
+            }
+        },
     }
 }
 

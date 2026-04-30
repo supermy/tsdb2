@@ -83,7 +83,7 @@ fn build_column_array(
             } else {
                 build_field_column_array(name, dtype, datapoints)
             }
-        }
+        },
     }
 }
 
@@ -180,7 +180,7 @@ fn build_field_column_array(
                 }
             }
             Ok(Arc::new(builder.finish()))
-        }
+        },
         DataType::Int64 => {
             let mut builder = Int64Builder::new();
             for dp in datapoints {
@@ -189,15 +189,16 @@ fn build_field_column_array(
                     Some(FieldValue::Float(v)) => {
                         tracing::warn!(
                             "field '{}' expected Int64 but got Float({}), truncating",
-                            field_name, v
+                            field_name,
+                            v
                         );
                         builder.append_value(*v as i64)
-                    }
+                    },
                     _ => builder.append_null(),
                 }
             }
             Ok(Arc::new(builder.finish()))
-        }
+        },
         DataType::Utf8 => {
             let mut builder = StringBuilder::new();
             for dp in datapoints {
@@ -207,7 +208,7 @@ fn build_field_column_array(
                 }
             }
             Ok(Arc::new(builder.finish()))
-        }
+        },
         DataType::Boolean => {
             let mut builder = BooleanBuilder::new();
             for dp in datapoints {
@@ -217,7 +218,7 @@ fn build_field_column_array(
                 }
             }
             Ok(Arc::new(builder.finish()))
-        }
+        },
         other => Err(TsdbArrowError::Conversion(format!(
             "unsupported field type for column '{}': {:?}",
             field_name, other
@@ -328,28 +329,28 @@ fn extract_field_value(col: &Arc<dyn Array>, index: usize, dtype: &DataType) -> 
                 .downcast_ref::<Float64Array>()
                 .ok_or_else(|| TsdbArrowError::Conversion("failed to downcast Float64".into()))?;
             Ok(FieldValue::Float(arr.value(index)))
-        }
+        },
         DataType::Int64 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<Int64Array>()
                 .ok_or_else(|| TsdbArrowError::Conversion("failed to downcast Int64".into()))?;
             Ok(FieldValue::Integer(arr.value(index)))
-        }
+        },
         DataType::Utf8 => {
             let arr = col
                 .as_any()
                 .downcast_ref::<StringArray>()
                 .ok_or_else(|| TsdbArrowError::Conversion("failed to downcast Utf8".into()))?;
             Ok(FieldValue::String(arr.value(index).to_string()))
-        }
+        },
         DataType::Boolean => {
             let arr = col
                 .as_any()
                 .downcast_ref::<BooleanArray>()
                 .ok_or_else(|| TsdbArrowError::Conversion("failed to downcast Boolean".into()))?;
             Ok(FieldValue::Boolean(arr.value(index)))
-        }
+        },
         _ => Err(TsdbArrowError::Conversion(format!(
             "unsupported data type: {:?}",
             dtype

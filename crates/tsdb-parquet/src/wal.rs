@@ -129,7 +129,8 @@ const DEFAULT_MAX_WAL_FILE_SIZE: u64 = 64 * 1024 * 1024;
 impl TsdbWAL {
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let dir = path.parent()
+        let dir = path
+            .parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| path.clone());
         if let Some(parent) = path.parent() {
@@ -169,7 +170,10 @@ impl TsdbWAL {
             return Ok(());
         }
 
-        let new_seq = self.segment_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let new_seq = self
+            .segment_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         let new_path = self.dir.join(format!("wal-{:06}.log", new_seq));
 
         let file = std::fs::OpenOptions::new()
@@ -184,7 +188,8 @@ impl TsdbWAL {
             *writer = BufWriter::new(file);
         }
 
-        self.current_size.store(0, std::sync::atomic::Ordering::Release);
+        self.current_size
+            .store(0, std::sync::atomic::Ordering::Release);
         {
             let mut path = self.current_path.write().unwrap_or_else(|e| e.into_inner());
             *path = new_path;
@@ -226,7 +231,8 @@ impl TsdbWAL {
             .sync_all()
             .map_err(|e| TsdbParquetError::Wal(format!("WAL sync failed: {}", e)))?;
 
-        self.current_size.fetch_add(encoded_len, std::sync::atomic::Ordering::Release);
+        self.current_size
+            .fetch_add(encoded_len, std::sync::atomic::Ordering::Release);
 
         Ok(seq)
     }
@@ -250,30 +256,38 @@ impl TsdbWAL {
     pub fn truncate(&self) -> Result<()> {
         {
             let mut writer = self.writer.lock().unwrap_or_else(|e| e.into_inner());
-            writer
-                .flush()
-                .map_err(|e| TsdbParquetError::Wal(format!("WAL flush before truncate failed: {}", e)))?;
-            writer
-                .get_ref()
-                .sync_all()
-                .map_err(|e| TsdbParquetError::Wal(format!("WAL fsync before truncate failed: {}", e)))?;
+            writer.flush().map_err(|e| {
+                TsdbParquetError::Wal(format!("WAL flush before truncate failed: {}", e))
+            })?;
+            writer.get_ref().sync_all().map_err(|e| {
+                TsdbParquetError::Wal(format!("WAL fsync before truncate failed: {}", e))
+            })?;
             let file = writer.get_mut();
             file.set_len(0)
                 .map_err(|e| TsdbParquetError::Wal(format!("WAL truncate failed: {}", e)))?;
             file.rewind()
                 .map_err(|e| TsdbParquetError::Wal(format!("WAL rewind failed: {}", e)))?;
-            file.sync_all()
-                .map_err(|e| TsdbParquetError::Wal(format!("WAL sync after truncate failed: {}", e)))?;
+            file.sync_all().map_err(|e| {
+                TsdbParquetError::Wal(format!("WAL sync after truncate failed: {}", e))
+            })?;
         }
 
-        self.current_size.store(0, std::sync::atomic::Ordering::Release);
+        self.current_size
+            .store(0, std::sync::atomic::Ordering::Release);
         self.sequence.store(0, std::sync::atomic::Ordering::SeqCst);
 
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                let name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                if name.starts_with("wal-") && name.ends_with(".log") && path != *self.current_path.read().unwrap_or_else(|e| e.into_inner()) {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                if name.starts_with("wal-")
+                    && name.ends_with(".log")
+                    && path != *self.current_path.read().unwrap_or_else(|e| e.into_inner())
+                {
                     if let Err(e) = std::fs::remove_file(&path) {
                         tracing::warn!("failed to remove old WAL segment {:?}: {}", path, e);
                     }
@@ -302,7 +316,11 @@ impl TsdbWAL {
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| {
-                    let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let name = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     name.starts_with("wal-") && name.ends_with(".log") && p != path
                 })
                 .collect();
@@ -316,8 +334,9 @@ impl TsdbWAL {
 
         let mut all_entries = Vec::new();
         for wal_file in &wal_files {
-            let data = std::fs::read(wal_file)
-                .map_err(|e| TsdbParquetError::Wal(format!("failed to read WAL {:?}: {}", wal_file, e)))?;
+            let data = std::fs::read(wal_file).map_err(|e| {
+                TsdbParquetError::Wal(format!("failed to read WAL {:?}: {}", wal_file, e))
+            })?;
 
             if data.is_empty() {
                 continue;
@@ -345,7 +364,7 @@ impl TsdbWAL {
                     Ok(entry) => {
                         all_entries.push(entry);
                         offset += entry_len;
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!(
                             "WAL recovery: corrupt entry at offset {} in {:?}, stopping: {}",
@@ -354,7 +373,7 @@ impl TsdbWAL {
                             e
                         );
                         break;
-                    }
+                    },
                 }
             }
         }
@@ -364,7 +383,10 @@ impl TsdbWAL {
 
     /// 获取 WAL 文件路径
     pub fn path(&self) -> std::path::PathBuf {
-        self.current_path.read().unwrap_or_else(|e| e.into_inner()).clone()
+        self.current_path
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -469,7 +491,11 @@ mod tests {
         std::fs::write(&wal_path, &data).unwrap();
 
         let entries = TsdbWAL::recover(&wal_path).unwrap();
-        assert!(entries.len() < 2, "recovery should stop at first corrupt entry, got {} entries", entries.len());
+        assert!(
+            entries.len() < 2,
+            "recovery should stop at first corrupt entry, got {} entries",
+            entries.len()
+        );
     }
 
     #[test]

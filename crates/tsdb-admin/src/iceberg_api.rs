@@ -53,10 +53,10 @@ impl IcebergApi {
                             .and_then(|s| s.summary.total_data_files)
                             .unwrap_or(0),
                     });
-                }
+                },
                 Err(e) => {
                     tracing::warn!("load table {} failed: {}", name, e);
-                }
+                },
             }
         }
         Ok(tables)
@@ -97,7 +97,7 @@ impl IcebergApi {
                         transform: Transform::Identity,
                     }],
                 )
-            }
+            },
             _ => PartitionSpec::unpartitioned(0),
         };
 
@@ -196,7 +196,7 @@ impl IcebergApi {
                 Err(e) => {
                     tracing::warn!("collect_data_files for {}: {}", name, e);
                     Vec::new()
-                }
+                },
             }
         } else {
             Vec::new()
@@ -464,56 +464,56 @@ fn arrow_value_to_json(col: &arrow::array::ArrayRef, idx: usize) -> serde_json::
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Int32 => {
             if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
                 serde_json::json!(arr.value(idx))
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Int64 => {
             if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
                 serde_json::json!(arr.value(idx))
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Float32 => {
             if let Some(arr) = col.as_any().downcast_ref::<Float32Array>() {
                 serde_json::json!(arr.value(idx) as f64)
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Float64 => {
             if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
                 serde_json::json!(arr.value(idx))
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Utf8 => {
             if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
                 serde_json::json!(arr.value(idx))
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Timestamp(_, _) => {
             if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
                 serde_json::json!(arr.value(idx))
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         DataType::Date32 => {
             if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
                 serde_json::json!(arr.value(idx))
             } else {
                 serde_json::Value::Null
             }
-        }
+        },
         _ => serde_json::Value::Null,
     }
 }

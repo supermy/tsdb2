@@ -29,7 +29,11 @@ mod tests {
 
     fn write_datapoints_to_parquet(dir: &std::path::Path, dps: &[DataPoint]) {
         let pm = PartitionManager::new(dir, PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), &dps[0].measurement);
+        let mut writer = TsdbParquetWriter::new(
+            Arc::new(pm),
+            WriteBufferConfig::default(),
+            &dps[0].measurement,
+        );
         writer.write_batch(dps).unwrap();
         writer.flush_all().unwrap();
     }

@@ -3,9 +3,7 @@ use crate::partition::{micros_to_date, PartitionManager};
 use crate::pruning::prune_row_groups;
 use arrow::array::{BooleanArray, StringArray};
 use arrow::record_batch::RecordBatch;
-use parquet::arrow::arrow_reader::{
-    ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter,
-};
+use parquet::arrow::arrow_reader::{ArrowPredicateFn, ParquetRecordBatchReaderBuilder, RowFilter};
 use parquet::arrow::ProjectionMask;
 use std::collections::HashMap;
 use std::fs::File;
@@ -176,7 +174,8 @@ impl TsdbParquetReader {
         tags: &Tags,
         timestamp: i64,
     ) -> Result<Option<DataPoint>> {
-        let tag_filters: HashMap<String, String> = tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let tag_filters: HashMap<String, String> =
+            tags.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         let batches = self.read_range_arrow_with_filters(
             measurement,
             timestamp,
@@ -194,7 +193,8 @@ impl TsdbParquetReader {
                 }
             }
             for dp in points {
-                if dp.timestamp == timestamp && tags.iter().all(|(k, v)| dp.tags.get(k) == Some(v)) {
+                if dp.timestamp == timestamp && tags.iter().all(|(k, v)| dp.tags.get(k) == Some(v))
+                {
                     return Ok(Some(dp));
                 }
             }
@@ -288,7 +288,10 @@ impl TsdbParquetReader {
 
         let projection_mask = if let Some(cols) = projection {
             let parquet_schema = parquet_metadata.file_metadata().schema_descr();
-            Some(ProjectionMask::columns(parquet_schema, cols.iter().map(|s| s.as_str())))
+            Some(ProjectionMask::columns(
+                parquet_schema,
+                cols.iter().map(|s| s.as_str()),
+            ))
         } else {
             None
         };
@@ -321,10 +324,11 @@ impl TsdbParquetReader {
                     Err(e) => {
                         tracing::warn!(
                             "schema enrichment failed for batch in {:?}: {}, keeping original",
-                            path, e
+                            path,
+                            e
                         );
                         batches.push(batch);
-                    }
+                    },
                 }
             } else {
                 batches.push(batch);
@@ -428,9 +432,11 @@ fn build_tag_row_filter(
                 let predicate = ArrowPredicateFn::new(mask, move |_batch| {
                     Ok(BooleanArray::from(vec![false; _batch.num_rows()]))
                 });
-                filters.push(Box::new(predicate) as Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>);
+                filters
+                    .push(Box::new(predicate)
+                        as Box<dyn parquet::arrow::arrow_reader::ArrowPredicate>);
                 continue;
-            }
+            },
         };
 
         let mask = ProjectionMask::leaves(parquet_schema, [idx]);
@@ -439,7 +445,11 @@ fn build_tag_row_filter(
             let col = batch.column(0);
             let string_col = match col.as_any().downcast_ref::<StringArray>() {
                 Some(c) => c,
-                None => return Ok(BooleanArray::from_iter((0..batch.num_rows()).map(|_| Some(false)))),
+                None => {
+                    return Ok(BooleanArray::from_iter(
+                        (0..batch.num_rows()).map(|_| Some(false)),
+                    ))
+                },
             };
             let filtered: BooleanArray = string_col
                 .iter()
@@ -617,8 +627,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let pm = Arc::new(PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap());
 
-        let mut cpu_writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
-        let mut mem_writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "mem");
+        let mut cpu_writer =
+            TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
+        let mut mem_writer =
+            TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "mem");
 
         let base_ts = 1_000_000_000i64;
         let cpu_dps: Vec<DataPoint> = (0..5)

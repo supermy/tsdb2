@@ -41,7 +41,12 @@ impl PartitionManifest {
         Ok(manifest)
     }
 
-    pub fn read_or_create(partition_dir: &Path, measurement: &str, date: &str, tier: &str) -> Result<Self> {
+    pub fn read_or_create(
+        partition_dir: &Path,
+        measurement: &str,
+        date: &str,
+        tier: &str,
+    ) -> Result<Self> {
         let path = Self::manifest_path(partition_dir);
         if path.exists() {
             Self::read(partition_dir)
@@ -66,7 +71,11 @@ impl PartitionManifest {
     }
 
     pub fn add_file(&mut self, stats: FileStats) {
-        if let Some(existing) = self.files.iter_mut().find(|f| f.file_path == stats.file_path) {
+        if let Some(existing) = self
+            .files
+            .iter_mut()
+            .find(|f| f.file_path == stats.file_path)
+        {
             *existing = stats;
         } else {
             self.files.push(stats);
@@ -85,16 +94,15 @@ impl PartitionManifest {
     ) -> Result<Self> {
         let mut manifest = Self::new(measurement, date, tier);
 
-        let entries = std::fs::read_dir(partition_dir)
-            .map_err(TsdbParquetError::Io)?;
+        let entries = std::fs::read_dir(partition_dir).map_err(TsdbParquetError::Io)?;
 
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
             if path.extension().map(|e| e == "parquet").unwrap_or(false) {
-                if let Ok(stats) = crate::file_stats::extract_file_stats(
-                    &path, measurement, date, tier,
-                ) {
+                if let Ok(stats) =
+                    crate::file_stats::extract_file_stats(&path, measurement, date, tier)
+                {
                     manifest.files.push(stats);
                 }
             }
@@ -126,8 +134,7 @@ impl ManifestIndex {
                 continue;
             }
 
-            let measurement_entries = std::fs::read_dir(&tier_dir)
-                .map_err(TsdbParquetError::Io)?;
+            let measurement_entries = std::fs::read_dir(&tier_dir).map_err(TsdbParquetError::Io)?;
 
             for measurement_entry in measurement_entries {
                 let measurement_entry = measurement_entry?;
@@ -136,8 +143,8 @@ impl ManifestIndex {
                     continue;
                 }
 
-                let date_entries = std::fs::read_dir(&measurement_path)
-                    .map_err(TsdbParquetError::Io)?;
+                let date_entries =
+                    std::fs::read_dir(&measurement_path).map_err(TsdbParquetError::Io)?;
 
                 for date_entry in date_entries {
                     let date_entry = date_entry?;
@@ -173,7 +180,12 @@ impl ManifestIndex {
         Ok(index)
     }
 
-    pub fn get_manifest(&self, tier: &str, measurement: &str, date: &str) -> Option<&PartitionManifest> {
+    pub fn get_manifest(
+        &self,
+        tier: &str,
+        measurement: &str,
+        date: &str,
+    ) -> Option<&PartitionManifest> {
         let key = format!("{}_{}_{}", tier, measurement, date);
         self.manifests.get(&key)
     }

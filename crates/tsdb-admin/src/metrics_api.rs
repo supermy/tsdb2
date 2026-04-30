@@ -556,7 +556,7 @@ impl MetricsCollector {
                         value_size: val_vec.len(),
                         decoded,
                     });
-                }
+                },
                 Err(_) => break,
             }
         }
@@ -604,7 +604,7 @@ impl MetricsCollector {
                     value_size: val_vec.len(),
                     decoded,
                 })
-            }
+            },
             None => Err("key not found".to_string()),
         }
     }
@@ -697,7 +697,7 @@ impl MetricsCollector {
                         fields.insert(name, serde_json::json!(v));
                         offset += 8;
                     }
-                }
+                },
                 0x01 => {
                     if offset + 8 <= value.len() {
                         let v = i64::from_be_bytes(
@@ -706,7 +706,7 @@ impl MetricsCollector {
                         fields.insert(name, serde_json::json!(v));
                         offset += 8;
                     }
-                }
+                },
                 0x02 => {
                     if offset + 2 <= value.len() {
                         let str_len =
@@ -719,21 +719,21 @@ impl MetricsCollector {
                             offset += str_len;
                         }
                     }
-                }
+                },
                 0x03 => {
                     if offset < value.len() {
                         let b = value[offset] != 0;
                         fields.insert(name, serde_json::json!(b));
                         offset += 1;
                     }
-                }
+                },
                 _ => {
                     fields.insert(
                         name,
                         serde_json::Value::String(format!("<unknown type 0x{:02x}>", type_tag)),
                     );
                     break;
-                }
+                },
             }
         }
         result.insert("fields".to_string(), serde_json::Value::Object(fields));
@@ -789,7 +789,7 @@ impl MetricsCollector {
                                     });
                                 }
                             }
-                        }
+                        },
                         Err(_) => break,
                     }
                 }
@@ -839,13 +839,13 @@ impl MetricsCollector {
                                                         as usize;
                                                     offset += 2 + sl;
                                                 }
-                                            }
+                                            },
                                             0x03 => offset += 1,
                                             _ => break,
                                         }
                                     }
                                 }
-                            }
+                            },
                             Err(_) => break,
                         }
                     }
@@ -993,11 +993,11 @@ impl MetricsCollector {
                 } else {
                     0.0
                 }
-            }
+            },
             _ => {
                 state.prev_cpu = current;
                 0.0
-            }
+            },
         }
     }
 
@@ -1033,7 +1033,7 @@ impl MetricsCollector {
                 let total = m.total * 1024;
                 let used = total.saturating_sub(m.avail * 1024);
                 (total, used)
-            }
+            },
             Err(_) => (0, 0),
         }
     }
@@ -1054,7 +1054,7 @@ impl MetricsCollector {
                 let total = d.total * 1024;
                 let used = total.saturating_sub(d.free * 1024);
                 (total, used)
-            }
+            },
             Err(_) => (0, 0),
         }
     }

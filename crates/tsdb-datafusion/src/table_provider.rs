@@ -103,7 +103,7 @@ impl TsdbTableProvider {
         let batches = match &proj_columns {
             Some(cols) => {
                 reader.read_range_arrow(&self.measurement, start, end, Some(cols.as_slice()))?
-            }
+            },
             None => reader.read_range_arrow(&self.measurement, start, end, None)?,
         };
 
@@ -154,7 +154,9 @@ impl TableProvider for TsdbTableProvider {
         });
 
         let start = time_range.map(|(s, _)| s).unwrap_or(0i64);
-        let end = time_range.map(|(_, e)| e).unwrap_or(4_102_444_800_000_000i64);
+        let end = time_range
+            .map(|(_, e)| e)
+            .unwrap_or(4_102_444_800_000_000i64);
 
         let tag_filters_ref = if tag_filters.is_empty() {
             None
@@ -174,25 +176,23 @@ impl TableProvider for TsdbTableProvider {
             .map_err(|e| DataFusionError::Execution(format!("parquet scan: {}", e)))?;
 
         let projected_batches: Vec<arrow::record_batch::RecordBatch> = match projection {
-            Some(proj) => {
-                batches
-                    .into_iter()
-                    .map(|batch| {
-                        let indices: Vec<usize> = proj
-                            .iter()
-                            .filter_map(|&idx| {
-                                batch.schema().index_of(self.schema.field(idx).name()).ok()
-                            })
-                            .collect();
-                        if indices.is_empty() {
-                            Ok(batch)
-                        } else {
-                            batch.project(&indices)
-                        }
-                    })
-                    .collect::<std::result::Result<Vec<_>, _>>()
-                    .map_err(|e| DataFusionError::Execution(format!("projection: {}", e)))?
-            }
+            Some(proj) => batches
+                .into_iter()
+                .map(|batch| {
+                    let indices: Vec<usize> = proj
+                        .iter()
+                        .filter_map(|&idx| {
+                            batch.schema().index_of(self.schema.field(idx).name()).ok()
+                        })
+                        .collect();
+                    if indices.is_empty() {
+                        Ok(batch)
+                    } else {
+                        batch.project(&indices)
+                    }
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| DataFusionError::Execution(format!("projection: {}", e)))?,
             None => batches,
         };
 

@@ -106,7 +106,8 @@ pub fn prune_row_groups(
                     if let Some(stats) = col.statistics() {
                         if let Some(max_val) = stats.max_bytes_opt() {
                             if max_val.len() == 8 {
-                                let max_ts = i64::from_le_bytes(max_val.try_into().unwrap_or([0; 8]));
+                                let max_ts =
+                                    i64::from_le_bytes(max_val.try_into().unwrap_or([0; 8]));
                                 if max_ts < start {
                                     include = false;
                                 }
@@ -114,7 +115,8 @@ pub fn prune_row_groups(
                         }
                         if let Some(min_val) = stats.min_bytes_opt() {
                             if min_val.len() == 8 {
-                                let min_ts = i64::from_le_bytes(min_val.try_into().unwrap_or([0; 8]));
+                                let min_ts =
+                                    i64::from_le_bytes(min_val.try_into().unwrap_or([0; 8]));
                                 if min_ts > end {
                                     include = false;
                                 }

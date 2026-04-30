@@ -1,6 +1,6 @@
 use crate::error::{Result, TsdbParquetError};
 use crate::partition::{micros_to_date, PartitionManager};
-use arrow::array::{UInt32Array, UInt64Array, TimestampMicrosecondArray};
+use arrow::array::{TimestampMicrosecondArray, UInt32Array, UInt64Array};
 use arrow::compute::take;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
@@ -106,9 +106,10 @@ impl TsdbParquetWriter {
             for dp in &dps {
                 self.get_or_create_schema(dp)?;
             }
-            let schema = self.schema.clone().ok_or_else(|| {
-                TsdbParquetError::Conversion("schema not initialized".into())
-            })?;
+            let schema = self
+                .schema
+                .clone()
+                .ok_or_else(|| TsdbParquetError::Conversion("schema not initialized".into()))?;
             let dp_owned: Vec<DataPoint> = dps.into_iter().cloned().collect();
             let batch = datapoints_to_record_batch(&dp_owned, schema)?;
 
@@ -141,11 +142,11 @@ impl TsdbParquetWriter {
                     Ok(written) => {
                         self.buffers.remove(date);
                         paths.extend(written);
-                    }
+                    },
                     Err(e) => {
                         tracing::error!("flush_buffer failed for date {}: {}", date, e);
                         last_error = Some(e);
-                    }
+                    },
                 }
             }
         }
@@ -253,16 +254,17 @@ impl TsdbParquetWriter {
                     FieldValue::Integer(_) => builder = builder.with_int_field(name),
                     FieldValue::String(_) => builder = builder.with_string_field(name),
                     FieldValue::Boolean(_) => builder = builder.with_bool_field(name),
-                    FieldValue::Null => {}
+                    FieldValue::Null => {},
                 }
             }
 
             self.schema = Some(builder.build());
         }
 
-        let schema = self.schema.clone().ok_or_else(|| {
-            TsdbParquetError::Conversion("schema not initialized".into())
-        })?;
+        let schema = self
+            .schema
+            .clone()
+            .ok_or_else(|| TsdbParquetError::Conversion("schema not initialized".into()))?;
         let needs_update = {
             let schema_fields: std::collections::HashSet<&str> =
                 schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -279,10 +281,7 @@ impl TsdbParquetWriter {
                             FieldValue::Null => DataType::Null,
                         };
                         if expected != &actual
-                            && !matches!(
-                                (expected, &actual),
-                                (DataType::Int64, DataType::Float64)
-                            )
+                            && !matches!((expected, &actual), (DataType::Int64, DataType::Float64))
                         {
                             return Err(TsdbParquetError::Conversion(format!(
                                 "field '{}' type conflict: expected {:?}, got {:?}",
@@ -343,7 +342,7 @@ impl TsdbParquetWriter {
                     FieldValue::Integer(_) => builder = builder.with_int_field(field_name),
                     FieldValue::String(_) => builder = builder.with_string_field(field_name),
                     FieldValue::Boolean(_) => builder = builder.with_bool_field(field_name),
-                    FieldValue::Null => {}
+                    FieldValue::Null => {},
                 }
             }
 
@@ -403,17 +402,18 @@ fn align_batch_to_schema(
     target_schema: &arrow::datatypes::SchemaRef,
 ) -> Result<RecordBatch> {
     let source_schema = batch.schema();
-    let mut columns: Vec<std::sync::Arc<dyn arrow::array::Array>> = Vec::with_capacity(target_schema.fields().len());
+    let mut columns: Vec<std::sync::Arc<dyn arrow::array::Array>> =
+        Vec::with_capacity(target_schema.fields().len());
 
     for field in target_schema.fields() {
         match source_schema.index_of(field.name()) {
             Ok(idx) => {
                 columns.push(batch.column(idx).clone());
-            }
+            },
             Err(_) => {
                 let null_array = arrow::array::new_null_array(field.data_type(), batch.num_rows());
                 columns.push(null_array);
-            }
+            },
         }
     }
 
@@ -440,9 +440,7 @@ fn sort_batch_by_tags_hash_timestamp(batch: &RecordBatch) -> Result<RecordBatch>
         .column(tags_hash_idx)
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            TsdbParquetError::Conversion("tags_hash column is not UInt64".into())
-        })?;
+        .ok_or_else(|| TsdbParquetError::Conversion("tags_hash column is not UInt64".into()))?;
     let ts_col = batch
         .column(ts_idx)
         .as_any()
@@ -586,7 +584,8 @@ mod tests {
         let pm = Arc::new(PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap());
 
         {
-            let mut writer = TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
+            let mut writer =
+                TsdbParquetWriter::new(pm.clone(), WriteBufferConfig::default(), "cpu");
             let dps = make_test_datapoints(5);
             for dp in &dps {
                 writer.write(dp).unwrap();
@@ -679,8 +678,14 @@ mod tests {
         let cpu_files = pm.list_measurement_parquet_files(date, "cpu").unwrap();
         let mem_files = pm.list_measurement_parquet_files(date, "mem").unwrap();
 
-        assert!(!cpu_files.is_empty(), "cpu should have its own parquet files");
-        assert!(!mem_files.is_empty(), "mem should have its own parquet files");
+        assert!(
+            !cpu_files.is_empty(),
+            "cpu should have its own parquet files"
+        );
+        assert!(
+            !mem_files.is_empty(),
+            "mem should have its own parquet files"
+        );
 
         for f in &cpu_files {
             assert!(

@@ -172,7 +172,7 @@ fn iceberg_type_to_arrow(itype: &IcebergType) -> Result<DataType> {
         IcebergType::Double => Ok(DataType::Float64),
         IcebergType::Decimal { precision, scale } => {
             Ok(DataType::Decimal128(*precision, *scale as i8))
-        }
+        },
         IcebergType::Date => Ok(DataType::Date32),
         IcebergType::Time => Ok(DataType::Time64(TimeUnit::Microsecond)),
         IcebergType::Timestamp => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
@@ -192,7 +192,7 @@ fn iceberg_type_to_arrow(itype: &IcebergType) -> Result<DataType> {
                 })
                 .collect::<Result<Vec<_>>>()?;
             Ok(DataType::Struct(arrow_fields.into()))
-        }
+        },
         IcebergType::List {
             element_id: _,
             element_required,
@@ -204,7 +204,7 @@ fn iceberg_type_to_arrow(itype: &IcebergType) -> Result<DataType> {
                 dt,
                 !element_required,
             ))))
-        }
+        },
         IcebergType::Map {
             key_id: _,
             key,
@@ -228,7 +228,7 @@ fn iceberg_type_to_arrow(itype: &IcebergType) -> Result<DataType> {
                 )),
                 false,
             ))
-        }
+        },
         IcebergType::Deleted => Ok(DataType::Null),
     }
 }
@@ -282,17 +282,17 @@ impl Schema {
                     initial_default: None,
                     write_default,
                 });
-            }
+            },
             SchemaChange::DeleteField { field_id } => {
                 if let Some(f) = new_fields.iter_mut().find(|f| f.id == field_id) {
                     f.field_type = IcebergType::Deleted;
                 }
-            }
+            },
             SchemaChange::RenameField { field_id, new_name } => {
                 if let Some(f) = new_fields.iter_mut().find(|f| f.id == field_id) {
                     f.name = new_name;
                 }
-            }
+            },
             SchemaChange::PromoteType { field_id, new_type } => {
                 if let Some(f) = new_fields.iter_mut().find(|f| f.id == field_id) {
                     match (&f.field_type, &new_type) {
@@ -303,10 +303,10 @@ impl Schema {
                                 "cannot promote {:?} to {:?}",
                                 f.field_type, new_type
                             )))
-                        }
+                        },
                     }
                 }
-            }
+            },
             SchemaChange::MoveField {
                 field_id,
                 new_position,
@@ -316,7 +316,7 @@ impl Schema {
                     let pos = new_position.min(new_fields.len());
                     new_fields.insert(pos, field);
                 }
-            }
+            },
         }
         Ok(Schema {
             schema_id: self.schema_id + 1,

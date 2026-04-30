@@ -35,7 +35,10 @@ impl WriteBuffer {
             self.buffers.entry(date).or_default().push(dp.clone());
             self.total_rows += 1;
         } else {
-            tracing::warn!("dropping datapoint with invalid timestamp: {}", dp.timestamp);
+            tracing::warn!(
+                "dropping datapoint with invalid timestamp: {}",
+                dp.timestamp
+            );
         }
         self.total_rows >= self.max_buffer_rows
     }
@@ -51,7 +54,10 @@ impl WriteBuffer {
             }
         }
         if dropped > 0 {
-            tracing::warn!("dropped {} datapoints with invalid timestamps in batch", dropped);
+            tracing::warn!(
+                "dropped {} datapoints with invalid timestamps in batch",
+                dropped
+            );
         }
         self.total_rows >= self.max_buffer_rows
     }
@@ -176,7 +182,10 @@ impl AsyncWriteBuffer {
     }
 
     /// 执行刷盘: 排空缓冲区 → 写入 Parquet → flush_all
-    fn do_flush(buffer: &Arc<Mutex<WriteBuffer>>, writer: &Arc<Mutex<TsdbParquetWriter>>) -> Result<usize> {
+    fn do_flush(
+        buffer: &Arc<Mutex<WriteBuffer>>,
+        writer: &Arc<Mutex<TsdbParquetWriter>>,
+    ) -> Result<usize> {
         let drained = {
             let mut guard = buffer.lock().unwrap_or_else(|e| {
                 tracing::warn!("Mutex poisoned in do_flush drain, recovering: {}", e);
@@ -464,7 +473,11 @@ mod tests {
         assert_eq!(buffer.total_rows(), 1);
 
         buffer.write(&invalid_dp);
-        assert_eq!(buffer.total_rows(), 1, "invalid timestamp should be dropped, total_rows should not increase");
+        assert_eq!(
+            buffer.total_rows(),
+            1,
+            "invalid timestamp should be dropped, total_rows should not increase"
+        );
     }
 
     #[test]
@@ -484,6 +497,10 @@ mod tests {
         ];
 
         buffer.write_batch(&dps);
-        assert_eq!(buffer.total_rows(), 2, "only valid timestamps should be buffered, invalid ones dropped");
+        assert_eq!(
+            buffer.total_rows(),
+            2,
+            "only valid timestamps should be buffered, invalid ones dropped"
+        );
     }
 }

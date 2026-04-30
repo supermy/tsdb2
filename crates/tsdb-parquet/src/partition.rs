@@ -89,7 +89,12 @@ impl PartitionManager {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str == "warm" || name_str == "cold" || name_str == "archive" || name_str == "wal" || name_str == METADATA_DIR {
+                if name_str == "warm"
+                    || name_str == "cold"
+                    || name_str == "archive"
+                    || name_str == "wal"
+                    || name_str == METADATA_DIR
+                {
                     continue;
                 }
                 if let Some(date_str) = name_str.strip_prefix(CF_PREFIX) {
@@ -219,11 +224,7 @@ impl PartitionManager {
             .map(|i| i.dir.clone())
     }
 
-    pub fn get_partitions_in_range(
-        &self,
-        start: NaiveDate,
-        end: NaiveDate,
-    ) -> Vec<PartitionInfo> {
+    pub fn get_partitions_in_range(&self, start: NaiveDate, end: NaiveDate) -> Vec<PartitionInfo> {
         self.known_partitions
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -271,11 +272,7 @@ impl PartitionManager {
                 info!("dropping expired partition: {}", info.dir.display());
                 if info.dir.exists() {
                     if let Err(e) = fs::remove_dir_all(&info.dir) {
-                        tracing::error!(
-                            "failed to remove partition {}: {}",
-                            info.dir.display(),
-                            e
-                        );
+                        tracing::error!("failed to remove partition {}: {}", info.dir.display(), e);
                         errors.push(format!("{}: {}", info.dir.display(), e));
                         continue;
                     }
@@ -385,7 +382,8 @@ impl PartitionManager {
                             if let Ok(sub_entries) = fs::read_dir(&date_dir) {
                                 for sub_entry in sub_entries.flatten() {
                                     if sub_entry.path().is_dir() {
-                                        let m_name = sub_entry.file_name().to_string_lossy().to_string();
+                                        let m_name =
+                                            sub_entry.file_name().to_string_lossy().to_string();
                                         let sub_path = sub_entry.path();
                                         if has_parquet_files(&sub_path) {
                                             measurements.insert(m_name);
@@ -398,7 +396,11 @@ impl PartitionManager {
                                 if let Ok(files) = fs::read_dir(&date_dir) {
                                     for file_entry in files.flatten() {
                                         let file_path = file_entry.path();
-                                        if file_path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                                        if file_path
+                                            .extension()
+                                            .map(|e| e == "parquet")
+                                            .unwrap_or(false)
+                                        {
                                             if let Ok(file) = std::fs::File::open(&file_path) {
                                                 if let Ok(builder) = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file) {
                                                     let arrow_schema = builder.schema();
@@ -652,7 +654,9 @@ mod tests {
         let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
 
         let today = chrono::Utc::now().date_naive();
-        let files = pm.list_measurement_parquet_files(today, "nonexistent").unwrap();
+        let files = pm
+            .list_measurement_parquet_files(today, "nonexistent")
+            .unwrap();
         assert!(files.is_empty());
     }
 
@@ -664,7 +668,10 @@ mod tests {
         let today = chrono::Utc::now().date_naive();
         let active_dir = pm.ensure_partition(today).unwrap();
 
-        let warm_dir_path = dir.path().join("warm").join(format!("data_{}", today.format("%Y%m%d")));
+        let warm_dir_path = dir
+            .path()
+            .join("warm")
+            .join(format!("data_{}", today.format("%Y%m%d")));
         std::fs::create_dir_all(&warm_dir_path).unwrap();
         let warm_cpu_dir = warm_dir_path.join("cpu");
         std::fs::create_dir_all(&warm_cpu_dir).unwrap();
@@ -673,7 +680,11 @@ mod tests {
         pm.refresh().unwrap();
 
         let partitions = pm.get_partitions_in_range(today, today);
-        assert_eq!(partitions.len(), 2, "should have both active and warm partitions for the same date");
+        assert_eq!(
+            partitions.len(),
+            2,
+            "should have both active and warm partitions for the same date"
+        );
 
         let active_partition = partitions.iter().find(|p| p.tier == TIER_ACTIVE);
         let warm_partition = partitions.iter().find(|p| p.tier == TIER_WARM);
@@ -694,7 +705,10 @@ mod tests {
         let _active_dir = pm.ensure_partition(old_date).unwrap();
 
         for tier in &["warm", "cold"] {
-            let tier_dir_path = dir.path().join(tier).join(format!("data_{}", old_date.format("%Y%m%d")));
+            let tier_dir_path = dir
+                .path()
+                .join(tier)
+                .join(format!("data_{}", old_date.format("%Y%m%d")));
             std::fs::create_dir_all(&tier_dir_path).unwrap();
             let m_dir = tier_dir_path.join("mem");
             std::fs::create_dir_all(&m_dir).unwrap();
@@ -704,7 +718,11 @@ mod tests {
         pm.refresh().unwrap();
 
         let partitions = pm.get_partitions_in_range(old_date, old_date);
-        assert_eq!(partitions.len(), 3, "should have active + warm + cold partitions for the same date");
+        assert_eq!(
+            partitions.len(),
+            3,
+            "should have active + warm + cold partitions for the same date"
+        );
 
         let tiers: Vec<&str> = partitions.iter().map(|p| p.tier.as_str()).collect();
         assert!(tiers.contains(&TIER_ACTIVE));

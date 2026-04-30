@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
 #[command(name = "tsdb-server", version, about = "TSDB2 时序数据库服务端")]
@@ -45,7 +45,11 @@ struct Cli {
     #[arg(long, help = "日志文件目录 (默认: ./logs)")]
     log_dir: Option<String>,
 
-    #[arg(long, default_value = "info", help = "日志级别: trace|debug|info|warn|error")]
+    #[arg(
+        long,
+        default_value = "info",
+        help = "日志级别: trace|debug|info|warn|error"
+    )]
     log_level: String,
 
     #[arg(long, default_value_t = 10, help = "保留的日志文件轮转数量")]
@@ -73,11 +77,15 @@ fn init_logging(cli: &Cli) -> LogGuards {
     let log_dir = cli.log_dir.as_deref().unwrap_or("logs");
     let log_dir_path = std::path::Path::new(log_dir);
     if let Err(e) = std::fs::create_dir_all(log_dir_path) {
-        eprintln!("WARNING: cannot create log dir {}: {}", log_dir_path.display(), e);
+        eprintln!(
+            "WARNING: cannot create log dir {}: {}",
+            log_dir_path.display(),
+            e
+        );
     }
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cli.log_level));
 
     let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -86,7 +94,10 @@ fn init_logging(cli: &Cli) -> LogGuards {
         .max_log_files(cli.log_max_files)
         .build(log_dir_path)
         .unwrap_or_else(|e| {
-            eprintln!("WARNING: cannot create RollingFileAppender: {}, falling back to daily", e);
+            eprintln!(
+                "WARNING: cannot create RollingFileAppender: {}, falling back to daily",
+                e
+            );
             tracing_appender::rolling::daily(log_dir_path, "tsdb-server.log")
         });
 
@@ -113,7 +124,11 @@ fn init_logging(cli: &Cli) -> LogGuards {
         tracing::info!("日志文件输出: {}/tsdb-server.*.log", log_dir_path.display());
     }
 
-    tracing::info!("日志初始化完成: level={}, max_files={}", cli.log_level, cli.log_max_files);
+    tracing::info!(
+        "日志初始化完成: level={}, max_files={}",
+        cli.log_level,
+        cli.log_max_files
+    );
 
     LogGuards {
         _file_guard: Some(guard),
@@ -155,7 +170,9 @@ fn daemonize(cli: &Cli) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
 
-            unsafe { libc::close(0); }
+            unsafe {
+                libc::close(0);
+            }
 
             let _guards = init_logging(cli);
 
@@ -179,12 +196,12 @@ fn daemonize(cli: &Cli) -> anyhow::Result<()> {
 
             tracing::info!("tsdb-server daemon stopped");
             let _ = std::fs::remove_file(&pid_file);
-        }
+        },
         pid => {
             std::fs::write(&pid_file, pid.to_string())?;
             println!("  PID:      {}", pid);
             println!("Server started in background mode.");
-        }
+        },
     }
 
     Ok(())
@@ -197,28 +214,57 @@ fn is_process_running(pid: i32) -> bool {
 fn run_server(cli: &Cli) -> anyhow::Result<()> {
     let engine = open_engine(&cli.data_dir, &cli.storage_engine, &cli.config)?;
 
-    let iceberg_dir_path = cli
-        .iceberg_dir
-        .as_deref()
-        .map(PathBuf::from)
-        .or_else(|| Some(PathBuf::from(format!("{}/iceberg", cli.data_dir.trim_end_matches('/')))));
+    let iceberg_dir_path = cli.iceberg_dir.as_deref().map(PathBuf::from).or_else(|| {
+        Some(PathBuf::from(format!(
+            "{}/iceberg",
+            cli.data_dir.trim_end_matches('/')
+        )))
+    });
 
     if !cli.background {
         println!("╔══════════════════════════════════════════════╗");
         println!("║       TSDB2 Server Starting                 ║");
         println!("╠══════════════════════════════════════════════╣");
-        println!("║  Flight gRPC:  grpc://{}:{}     ", cli.host, cli.flight_port);
-        println!("║  Admin nng:    tcp://{}:{}       ", cli.host, cli.admin_port);
-        println!("║  Admin pub:    tcp://{}:{}       ", cli.host, cli.admin_port + 1);
-        println!("║  Dashboard:    http://{}:{}     ", cli.host, cli.http_port);
+        println!(
+            "║  Flight gRPC:  grpc://{}:{}     ",
+            cli.host, cli.flight_port
+        );
+        println!(
+            "║  Admin nng:    tcp://{}:{}       ",
+            cli.host, cli.admin_port
+        );
+        println!(
+            "║  Admin pub:    tcp://{}:{}       ",
+            cli.host,
+            cli.admin_port + 1
+        );
+        println!(
+            "║  Dashboard:    http://{}:{}     ",
+            cli.host, cli.http_port
+        );
         println!("║  Config:       {}                          ", cli.config);
-        println!("║  Data Dir:     {}                           ", cli.data_dir);
-        println!("║  Parquet Dir:  {}                           ", cli.parquet_dir);
+        println!(
+            "║  Data Dir:     {}                           ",
+            cli.data_dir
+        );
+        println!(
+            "║  Parquet Dir:  {}                           ",
+            cli.parquet_dir
+        );
         if let Some(ref id) = iceberg_dir_path {
-            println!("║  Iceberg Dir:  {}                           ", id.display());
+            println!(
+                "║  Iceberg Dir:  {}                           ",
+                id.display()
+            );
         }
-        println!("║  Engine:       {}                           ", cli.storage_engine);
-        println!("║  Retention:    {} days                      ", cli.retention_days);
+        println!(
+            "║  Engine:       {}                           ",
+            cli.storage_engine
+        );
+        println!(
+            "║  Retention:    {} days                      ",
+            cli.retention_days
+        );
         println!("╚══════════════════════════════════════════════╝");
     }
 
@@ -265,7 +311,14 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
         let service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
         let flight_addr = format!("{}:{}", cli.host, cli.flight_port)
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid flight address {}:{}: {}", cli.host, cli.flight_port, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid flight address {}:{}: {}",
+                    cli.host,
+                    cli.flight_port,
+                    e
+                )
+            })?;
         let flight_server = tonic::transport::Server::builder()
             .add_service(service)
             .serve(flight_addr);
@@ -285,7 +338,10 @@ fn run_server(cli: &Cli) -> anyhow::Result<()> {
         });
 
         if !cli.background {
-            println!("\n  Dashboard available at http://{}:{}", cli.host, cli.http_port);
+            println!(
+                "\n  Dashboard available at http://{}:{}",
+                cli.host, cli.http_port
+            );
         }
         tracing::info!("tsdb-server ready: http://{}:{}", cli.host, cli.http_port);
 
@@ -335,12 +391,12 @@ fn open_engine(
             let config = load_rocksdb_config(config_name)?;
             let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, config)?;
             Ok(std::sync::Arc::new(db))
-        }
+        },
         "arrow" | "parquet" => {
             let config = tsdb_storage_arrow::config::ArrowStorageConfig::default();
             let engine = tsdb_storage_arrow::engine::ArrowStorageEngine::open(data_dir, config)?;
             Ok(std::sync::Arc::new(engine))
-        }
+        },
         _ => anyhow::bail!(
             "Unknown storage engine: {}. Use 'rocksdb' or 'arrow'.",
             engine_type

@@ -11,12 +11,18 @@ pub struct ParquetApi {
 
 impl ParquetApi {
     pub fn new(_engine: Arc<dyn StorageEngine>, parquet_dir: PathBuf, data_dir: PathBuf) -> Self {
-        Self { parquet_dir, data_dir }
+        Self {
+            parquet_dir,
+            data_dir,
+        }
     }
 
     #[cfg(test)]
     pub fn new_for_test(parquet_dir: PathBuf, data_dir: PathBuf) -> Self {
-        Self { parquet_dir, data_dir }
+        Self {
+            parquet_dir,
+            data_dir,
+        }
     }
 
     pub fn list_parquet_files(&self) -> Vec<ParquetFileInfo> {
@@ -43,16 +49,16 @@ impl ParquetApi {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    if dir_name == "warm" || dir_name == "cold" || dir_name == "archive" || dir_name == "wal" || dir_name == "metadata" {
+                    if dir_name == "warm"
+                        || dir_name == "cold"
+                        || dir_name == "archive"
+                        || dir_name == "wal"
+                        || dir_name == "metadata"
+                    {
                         continue;
                     }
                     if dir_name.starts_with("data_") {
-                        Self::scan_parquet_dir_recursive(
-                            &partition_dir,
-                            "active",
-                            &mut files,
-                            0,
-                        );
+                        Self::scan_parquet_dir_recursive(&partition_dir, "active", &mut files, 0);
                     }
                 }
             }
@@ -70,16 +76,16 @@ impl ParquetApi {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    if dir_name == "warm" || dir_name == "cold" || dir_name == "archive" || dir_name == "wal" || dir_name == "metadata" {
+                    if dir_name == "warm"
+                        || dir_name == "cold"
+                        || dir_name == "archive"
+                        || dir_name == "wal"
+                        || dir_name == "metadata"
+                    {
                         continue;
                     }
                     if dir_name.starts_with("data_") {
-                        Self::scan_parquet_dir_recursive(
-                            &partition_dir,
-                            "active",
-                            &mut files,
-                            0,
-                        );
+                        Self::scan_parquet_dir_recursive(&partition_dir, "active", &mut files, 0);
                     }
                 }
             }
@@ -210,7 +216,12 @@ impl ParquetApi {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    if dir_name == "warm" || dir_name == "cold" || dir_name == "archive" || dir_name == "wal" || dir_name == "metadata" {
+                    if dir_name == "warm"
+                        || dir_name == "cold"
+                        || dir_name == "archive"
+                        || dir_name == "wal"
+                        || dir_name == "metadata"
+                    {
                         continue;
                     }
                     if !dir_name.starts_with("data_") {
@@ -243,7 +254,12 @@ impl ParquetApi {
                         .unwrap_or_default()
                         .to_string_lossy()
                         .to_string();
-                    if dir_name == "warm" || dir_name == "cold" || dir_name == "archive" || dir_name == "wal" || dir_name == "metadata" {
+                    if dir_name == "warm"
+                        || dir_name == "cold"
+                        || dir_name == "archive"
+                        || dir_name == "wal"
+                        || dir_name == "metadata"
+                    {
                         continue;
                     }
                     if !dir_name.starts_with("data_") {
@@ -309,11 +325,11 @@ impl ParquetApi {
                         "warm" | "cold" | "archive" if found_tier.is_none() => {
                             found_tier = Some(s.to_string());
                             after_tier = true;
-                        }
+                        },
                         _ if after_tier && s.starts_with("data_") => {
                             return found_tier.unwrap();
-                        }
-                        _ => {}
+                        },
+                        _ => {},
                     }
                 }
             }
@@ -505,7 +521,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_real_parquet(dir: &std::path::Path, name: &str) -> PathBuf {
-        use arrow::array::{StringArray, Float64Array, TimestampMicrosecondArray};
+        use arrow::array::{Float64Array, StringArray, TimestampMicrosecondArray};
         use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
         use arrow::record_batch::RecordBatch;
         use parquet::arrow::ArrowWriter;
@@ -516,7 +532,11 @@ mod tests {
         let file = std::fs::File::create(&path).unwrap();
 
         let schema = Arc::new(Schema::new(vec![
-            Field::new("timestamp", DataType::Timestamp(TimeUnit::Microsecond, None), false),
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Microsecond, None),
+                false,
+            ),
             Field::new("measurement", DataType::Utf8, false),
             Field::new("value", DataType::Float64, false),
         ]));
@@ -524,11 +544,14 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
-                Arc::new(TimestampMicrosecondArray::from(vec![1000000i64, 2000000i64])),
+                Arc::new(TimestampMicrosecondArray::from(vec![
+                    1000000i64, 2000000i64,
+                ])),
                 Arc::new(StringArray::from(vec!["cpu", "cpu"])),
                 Arc::new(Float64Array::from(vec![1.0, 2.0])),
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         let mut writer = ArrowWriter::try_new(file, schema, None).unwrap();
         writer.write(&batch).unwrap();

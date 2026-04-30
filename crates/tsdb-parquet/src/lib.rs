@@ -30,10 +30,12 @@ pub mod writer;
 pub use compaction::{CompactionConfig, ParquetCompactor};
 pub use encoding::{cold_writer_props, default_writer_props, hot_writer_props};
 pub use error::{Result, TsdbParquetError};
-pub use file_stats::{FileStats, ValueStats, extract_file_stats, write_stats_file, read_stats_file};
-pub use manifest::{PartitionManifest, ManifestIndex};
+pub use file_stats::{
+    extract_file_stats, read_stats_file, write_stats_file, FileStats, ValueStats,
+};
+pub use manifest::{ManifestIndex, PartitionManifest};
 pub use partition::{PartitionConfig, PartitionManager};
-pub use pruning::{prune_files, prune_files_by_time_range, prune_files_by_tags, prune_row_groups};
+pub use pruning::{prune_files, prune_files_by_tags, prune_files_by_time_range, prune_row_groups};
 pub use reader::TsdbParquetReader;
 pub use wal::{TsdbWAL, WALEntry, WALEntryType};
 pub use writer::{TsdbParquetWriter, WriteBufferConfig};

@@ -107,7 +107,7 @@ mod tests {
                 let err: TsdbRocksDbError = utf8_err.into();
                 let msg = format!("{}", err);
                 assert!(msg.contains("UTF-8 error"));
-            }
+            },
             Ok(_) => panic!("expected UTF-8 error"),
         }
     }

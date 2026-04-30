@@ -15,7 +15,7 @@ pub fn tsdb_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
     let a_hash = &a[..TAGS_HASH_SIZE];
     let b_hash = &b[..TAGS_HASH_SIZE];
     match a_hash.cmp(b_hash) {
-        std::cmp::Ordering::Equal => {}
+        std::cmp::Ordering::Equal => {},
         ord => return ord,
     }
 

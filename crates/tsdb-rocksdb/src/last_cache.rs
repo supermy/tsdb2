@@ -74,10 +74,7 @@ impl LastCache {
         let mut by_measurement: std::collections::HashMap<&str, Vec<&DataPoint>> =
             std::collections::HashMap::new();
         for dp in datapoints {
-            by_measurement
-                .entry(&dp.measurement)
-                .or_default()
-                .push(dp);
+            by_measurement.entry(&dp.measurement).or_default().push(dp);
         }
 
         for (measurement, dps) in by_measurement {
@@ -95,8 +92,7 @@ impl LastCache {
                 }
             };
 
-            let mut measurement_cache =
-                measurement_lock.write().unwrap_or_else(|e| e.into_inner());
+            let mut measurement_cache = measurement_lock.write().unwrap_or_else(|e| e.into_inner());
             for dp in dps {
                 let series_key = dp.series_key();
 

@@ -199,7 +199,11 @@ mod tests {
         use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 
         let pm = PartitionManager::new(dir, PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), &dps[0].measurement);
+        let mut writer = TsdbParquetWriter::new(
+            Arc::new(pm),
+            WriteBufferConfig::default(),
+            &dps[0].measurement,
+        );
         writer.write_batch(dps).unwrap();
         writer.flush_all().unwrap();
     }
@@ -283,15 +287,13 @@ mod tests {
 
     #[test]
     fn test_extract_field_value_null_column() {
-        let schema = arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Float64, true),
-        ]);
+        let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+            "value",
+            arrow::datatypes::DataType::Float64,
+            true,
+        )]);
         let array = Float64Array::from(vec![Some(1.0), None, Some(3.0)]);
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(array)],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
 
         let col = batch.column(0);
         assert!(!col.is_null(0));
@@ -306,15 +308,13 @@ mod tests {
 
     #[test]
     fn test_extract_field_value_uint64_within_range() {
-        let schema = arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("val", arrow::datatypes::DataType::UInt64, false),
-        ]);
+        let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+            "val",
+            arrow::datatypes::DataType::UInt64,
+            false,
+        )]);
         let array = UInt64Array::from(vec![100u64, i64::MAX as u64]);
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(array)],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
 
         let col = batch.column(0);
         let fv = extract_field_value_from_array(col, 0, col.data_type()).unwrap();
@@ -326,22 +326,23 @@ mod tests {
 
     #[test]
     fn test_extract_field_value_uint64_overflow_to_string() {
-        let schema = arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("val", arrow::datatypes::DataType::UInt64, false),
-        ]);
+        let schema = arrow::datatypes::Schema::new(vec![arrow::datatypes::Field::new(
+            "val",
+            arrow::datatypes::DataType::UInt64,
+            false,
+        )]);
         let overflow_val = (i64::MAX as u64) + 1;
         let array = UInt64Array::from(vec![overflow_val]);
-        let batch = RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(array)],
-        )
-        .unwrap();
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap();
 
         let col = batch.column(0);
         let fv = extract_field_value_from_array(col, 0, col.data_type()).unwrap();
         match fv {
             FieldValue::String(s) => assert_eq!(s, overflow_val.to_string()),
-            other => panic!("expected FieldValue::String for overflow UInt64, got {:?}", other),
+            other => panic!(
+                "expected FieldValue::String for overflow UInt64, got {:?}",
+                other
+            ),
         }
     }
 
@@ -370,9 +371,13 @@ mod tests {
         let result = engine.execute("SELECT * FROM cpu").await.unwrap();
         assert!(!result.rows.is_empty());
 
-        let has_null = result.rows.iter().any(|row| {
-            row.iter().any(|fv| matches!(fv, FieldValue::Null))
-        });
-        assert!(has_null, "rows with missing fields should contain FieldValue::Null");
+        let has_null = result
+            .rows
+            .iter()
+            .any(|row| row.iter().any(|fv| matches!(fv, FieldValue::Null)));
+        assert!(
+            has_null,
+            "rows with missing fields should contain FieldValue::Null"
+        );
     }
 }

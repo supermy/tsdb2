@@ -57,24 +57,24 @@ fn encode_field_value(buf: &mut Vec<u8>, fv: &FieldValue) {
         FieldValue::Float(v) => {
             buf.push(FIELD_TYPE_FLOAT64);
             buf.extend_from_slice(&v.to_be_bytes());
-        }
+        },
         FieldValue::Integer(v) => {
             buf.push(FIELD_TYPE_INT64);
             buf.extend_from_slice(&v.to_be_bytes());
-        }
+        },
         FieldValue::String(v) => {
             buf.push(FIELD_TYPE_UTF8);
             encode_u16(buf, v.len() as u32 as u16);
             buf.extend_from_slice(v.as_bytes());
-        }
+        },
         FieldValue::Boolean(v) => {
             buf.push(FIELD_TYPE_BOOLEAN);
             buf.push(if *v { 1 } else { 0 });
-        }
+        },
         FieldValue::Null => {
             buf.push(FIELD_TYPE_UTF8);
             encode_u16(buf, 0);
-        }
+        },
     }
 }
 
@@ -99,7 +99,7 @@ fn decode_field_value(data: &[u8], cursor: &mut usize) -> Result<FieldValue> {
             );
             *cursor += 8;
             Ok(FieldValue::Float(val))
-        }
+        },
         FIELD_TYPE_INT64 => {
             if *cursor + 8 > data.len() {
                 return Err(TsdbRocksDbError::InvalidValue("truncated i64".to_string()));
@@ -111,11 +111,11 @@ fn decode_field_value(data: &[u8], cursor: &mut usize) -> Result<FieldValue> {
             );
             *cursor += 8;
             Ok(FieldValue::Integer(val))
-        }
+        },
         FIELD_TYPE_UTF8 => {
             let s = decode_str(data, cursor)?;
             Ok(FieldValue::String(s))
-        }
+        },
         FIELD_TYPE_BOOLEAN => {
             if *cursor >= data.len() {
                 return Err(TsdbRocksDbError::InvalidValue("truncated bool".to_string()));
@@ -123,7 +123,7 @@ fn decode_field_value(data: &[u8], cursor: &mut usize) -> Result<FieldValue> {
             let val = data[*cursor] != 0;
             *cursor += 1;
             Ok(FieldValue::Boolean(val))
-        }
+        },
         _ => Err(TsdbRocksDbError::InvalidValue(format!(
             "unknown field type: {}",
             field_type
@@ -198,20 +198,20 @@ fn skip_field_value(data: &[u8], cursor: &mut usize) -> Result<()> {
     match field_type {
         FIELD_TYPE_FLOAT64 | FIELD_TYPE_INT64 => {
             *cursor += 8;
-        }
+        },
         FIELD_TYPE_UTF8 => {
             let len = decode_u16(data, cursor)? as usize;
             *cursor += len;
-        }
+        },
         FIELD_TYPE_BOOLEAN => {
             *cursor += 1;
-        }
+        },
         _ => {
             return Err(TsdbRocksDbError::InvalidValue(format!(
                 "unknown field type: {}",
                 field_type
             )))
-        }
+        },
     }
     Ok(())
 }

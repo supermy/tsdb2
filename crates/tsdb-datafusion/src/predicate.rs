@@ -40,12 +40,8 @@ fn extract_from_expr(
             Operator::And => {
                 extract_from_expr(&binary.left, time_range, tag_filters, schema);
                 extract_from_expr(&binary.right, time_range, tag_filters, schema);
-            }
-            Operator::Gt
-            | Operator::GtEq
-            | Operator::Lt
-            | Operator::LtEq
-            | Operator::Eq => {
+            },
+            Operator::Gt | Operator::GtEq | Operator::Lt | Operator::LtEq | Operator::Eq => {
                 try_extract_comparison(
                     &binary.left,
                     &binary.right,
@@ -54,8 +50,8 @@ fn extract_from_expr(
                     tag_filters,
                     schema,
                 );
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 }
@@ -107,35 +103,35 @@ fn try_extract_comparison(
                         } else {
                             *time_range = Some((ts + 1, i64::MAX));
                         }
-                    }
+                    },
                     Operator::GtEq => {
                         if let Some((start, _)) = time_range {
                             *start = (*start).max(ts);
                         } else {
                             *time_range = Some((ts, i64::MAX));
                         }
-                    }
+                    },
                     Operator::Lt => {
                         if let Some((_, end)) = time_range {
                             *end = (*end).min(ts - 1);
                         } else {
                             *time_range = Some((0, ts - 1));
                         }
-                    }
+                    },
                     Operator::LtEq => {
                         if let Some((_, end)) = time_range {
                             *end = (*end).min(ts);
                         } else {
                             *time_range = Some((0, ts));
                         }
-                    }
+                    },
                     Operator::Eq => {
                         *time_range = Some((ts, ts));
-                    }
-                    _ => {}
+                    },
+                    _ => {},
                 }
             }
-        }
+        },
         name => {
             let is_tag = if let Some(s) = schema {
                 s.field_with_name(name)
@@ -144,7 +140,8 @@ fn try_extract_comparison(
                             .get("tsdb_role")
                             .map(|r| r == "tag")
                             .unwrap_or_else(|| {
-                                name.starts_with("tag_") && f.data_type() == &arrow::datatypes::DataType::Utf8
+                                name.starts_with("tag_")
+                                    && f.data_type() == &arrow::datatypes::DataType::Utf8
                             })
                     })
                     .unwrap_or(false)
@@ -159,7 +156,7 @@ fn try_extract_comparison(
                     }
                 }
             }
-        }
+        },
     }
 }
 
@@ -182,30 +179,34 @@ mod tests {
 
     #[test]
     fn test_extract_timestamp_range() {
-        let filters = vec![
-            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1000), None))),
-        ];
+        let filters =
+            vec![col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1000), None)))];
         let result = extract_filters(&filters);
         assert_eq!(result.time_range, Some((1000, i64::MAX)));
     }
 
     #[test]
     fn test_extract_tag_filter() {
-        let filters = vec![
-            col("tag_host").eq(lit("server01")),
-        ];
+        let filters = vec![col("tag_host").eq(lit("server01"))];
         let result = extract_filters(&filters);
-        assert_eq!(result.tag_filters.get("host"), Some(&"server01".to_string()));
+        assert_eq!(
+            result.tag_filters.get("host"),
+            Some(&"server01".to_string())
+        );
     }
 
     #[test]
     fn test_extract_combined() {
-        let ts_filter = col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1000), None)));
+        let ts_filter =
+            col("timestamp").gt_eq(lit(ScalarValue::TimestampMicrosecond(Some(1000), None)));
         let tag_filter = col("tag_host").eq(lit("server01"));
         let combined = ts_filter.and(tag_filter);
 
         let result = extract_filters(&[combined]);
         assert_eq!(result.time_range, Some((1000, i64::MAX)));
-        assert_eq!(result.tag_filters.get("host"), Some(&"server01".to_string()));
+        assert_eq!(
+            result.tag_filters.get("host"),
+            Some(&"server01".to_string())
+        );
     }
 }

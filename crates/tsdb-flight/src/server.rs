@@ -110,7 +110,7 @@ impl FlightService for TsdbFlightServer {
                 return Err(Status::invalid_argument(
                     "missing SQL in flight descriptor path",
                 ))
-            }
+            },
         };
 
         let plan = self
@@ -256,7 +256,7 @@ impl FlightService for TsdbFlightServer {
                 Ok(Response::new(Box::pin(futures::stream::iter(vec![Ok(
                     result,
                 )]))))
-            }
+            },
             _ => Err(Status::unimplemented(format!(
                 "action '{}' not supported",
                 action.r#type
@@ -291,7 +291,7 @@ impl FlightService for TsdbFlightServer {
                 return Err(Status::invalid_argument(
                     "missing SQL in flight descriptor path",
                 ))
-            }
+            },
         };
 
         let plan = self

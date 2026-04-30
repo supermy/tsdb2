@@ -27,13 +27,38 @@ impl LifecycleApi {
         struct MockEngine;
 
         impl tsdb_arrow::StorageEngine for MockEngine {
-            fn write(&self, _dp: &DataPoint) -> EngineResult<()> { Ok(()) }
-            fn write_batch(&self, _datapoints: &[DataPoint]) -> EngineResult<()> { Ok(()) }
-            fn read_range(&self, _measurement: &str, _tags: &Tags, _start: i64, _end: i64) -> EngineResult<Vec<DataPoint>> { Ok(vec![]) }
-            fn get_point(&self, _measurement: &str, _tags: &Tags, _timestamp: i64) -> EngineResult<Option<DataPoint>> { Ok(None) }
-            fn list_measurements(&self) -> Vec<String> { vec![] }
-            fn flush(&self) -> EngineResult<()> { Ok(()) }
-            fn as_any(&self) -> &dyn std::any::Any { self }
+            fn write(&self, _dp: &DataPoint) -> EngineResult<()> {
+                Ok(())
+            }
+            fn write_batch(&self, _datapoints: &[DataPoint]) -> EngineResult<()> {
+                Ok(())
+            }
+            fn read_range(
+                &self,
+                _measurement: &str,
+                _tags: &Tags,
+                _start: i64,
+                _end: i64,
+            ) -> EngineResult<Vec<DataPoint>> {
+                Ok(vec![])
+            }
+            fn get_point(
+                &self,
+                _measurement: &str,
+                _tags: &Tags,
+                _timestamp: i64,
+            ) -> EngineResult<Option<DataPoint>> {
+                Ok(None)
+            }
+            fn list_measurements(&self) -> Vec<String> {
+                vec![]
+            }
+            fn flush(&self) -> EngineResult<()> {
+                Ok(())
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
         }
 
         Self {
@@ -255,19 +280,33 @@ impl LifecycleApi {
                                 if let Ok(measurements) = std::fs::read_dir(&sub_path) {
                                     for m_entry in measurements.flatten() {
                                         let p = m_entry.path();
-                                        if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                                        if p.extension().and_then(|e| e.to_str()) == Some("parquet")
+                                        {
                                             if let Ok(meta) = p.metadata() {
                                                 total_size += meta.len();
                                             }
-                                            files.push(p.file_name().unwrap_or_default().to_string_lossy().to_string());
+                                            files.push(
+                                                p.file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy()
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                 }
-                            } else if sub_path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                            } else if sub_path.extension().and_then(|e| e.to_str())
+                                == Some("parquet")
+                            {
                                 if let Ok(meta) = sub_path.metadata() {
                                     total_size += meta.len();
                                 }
-                                files.push(sub_path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                                files.push(
+                                    sub_path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string(),
+                                );
                             }
                         }
                     }
@@ -298,7 +337,10 @@ impl LifecycleApi {
         }
     }
 
-    fn status_arrow(&self, _arrow_engine: &tsdb_storage_arrow::ArrowStorageEngine) -> LifecycleStatus {
+    fn status_arrow(
+        &self,
+        _arrow_engine: &tsdb_storage_arrow::ArrowStorageEngine,
+    ) -> LifecycleStatus {
         self.status_arrow_from_fs()
     }
 
@@ -319,7 +361,12 @@ impl LifecycleApi {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                if dir_name == "warm" || dir_name == "cold" || dir_name == "archive" || dir_name == "wal" || dir_name == "metadata" {
+                if dir_name == "warm"
+                    || dir_name == "cold"
+                    || dir_name == "archive"
+                    || dir_name == "wal"
+                    || dir_name == "metadata"
+                {
                     continue;
                 }
                 if !dir_name.starts_with("data_") {
@@ -362,9 +409,19 @@ impl LifecycleApi {
                                 tier: "active".to_string(),
                                 path: partition_dir.to_string_lossy().to_string(),
                                 storage: "parquet".to_string(),
-                                demote_eligible: if age_days > 14 { "cold".to_string() } else if age_days > 3 { "warm".to_string() } else { "none".to_string() },
+                                demote_eligible: if age_days > 14 {
+                                    "cold".to_string()
+                                } else if age_days > 3 {
+                                    "warm".to_string()
+                                } else {
+                                    "none".to_string()
+                                },
                             });
-                        } else if sub_path.extension().map(|e| e == "parquet").unwrap_or(false) {
+                        } else if sub_path
+                            .extension()
+                            .map(|e| e == "parquet")
+                            .unwrap_or(false)
+                        {
                             let mut file_size = 0u64;
                             let mut num_keys = 0u64;
                             if let Ok(meta) = sub_path.metadata() {
@@ -386,7 +443,13 @@ impl LifecycleApi {
                                 tier: "active".to_string(),
                                 path: sub_path.to_string_lossy().to_string(),
                                 storage: "parquet".to_string(),
-                                demote_eligible: if age_days > 14 { "cold".to_string() } else if age_days > 3 { "warm".to_string() } else { "none".to_string() },
+                                demote_eligible: if age_days > 14 {
+                                    "cold".to_string()
+                                } else if age_days > 3 {
+                                    "warm".to_string()
+                                } else {
+                                    "none".to_string()
+                                },
                             });
                         }
                     }
@@ -403,7 +466,11 @@ impl LifecycleApi {
                 if !partition_dir.is_dir() {
                     continue;
                 }
-                let dir_name = partition_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dir_name = partition_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !dir_name.starts_with("data_") {
                     continue;
                 }
@@ -460,7 +527,11 @@ impl LifecycleApi {
                 if !partition_dir.is_dir() {
                     continue;
                 }
-                let dir_name = partition_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dir_name = partition_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !dir_name.starts_with("data_") {
                     continue;
                 }
@@ -524,7 +595,11 @@ impl LifecycleApi {
                     if !partition_dir.is_dir() {
                         continue;
                     }
-                    let dir_name = partition_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                    let dir_name = partition_dir
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
                     if !dir_name.starts_with("data_") {
                         continue;
                     }
@@ -539,19 +614,33 @@ impl LifecycleApi {
                                 if let Ok(measurements) = std::fs::read_dir(&sub_path) {
                                     for m_entry in measurements.flatten() {
                                         let p = m_entry.path();
-                                        if p.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                                        if p.extension().and_then(|e| e.to_str()) == Some("parquet")
+                                        {
                                             if let Ok(meta) = p.metadata() {
                                                 total_size += meta.len();
                                             }
-                                            files.push(p.file_name().unwrap_or_default().to_string_lossy().to_string());
+                                            files.push(
+                                                p.file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy()
+                                                    .to_string(),
+                                            );
                                         }
                                     }
                                 }
-                            } else if sub_path.extension().and_then(|e| e.to_str()) == Some("parquet") {
+                            } else if sub_path.extension().and_then(|e| e.to_str())
+                                == Some("parquet")
+                            {
                                 if let Ok(meta) = sub_path.metadata() {
                                     total_size += meta.len();
                                 }
-                                files.push(sub_path.file_name().unwrap_or_default().to_string_lossy().to_string());
+                                files.push(
+                                    sub_path
+                                        .file_name()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string(),
+                                );
                             }
                         }
                     }
@@ -590,7 +679,9 @@ impl LifecycleApi {
 
         if let Some(rocksdb_engine) = any_ref.downcast_ref::<tsdb_rocksdb::TsdbRocksDb>() {
             self.demote_to_warm_rocksdb(rocksdb_engine, cf_names)
-        } else if let Some(arrow_engine) = any_ref.downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>() {
+        } else if let Some(arrow_engine) =
+            any_ref.downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>()
+        {
             let result = self.demote_to_warm_arrow(cf_names);
             if let Ok(ref demoted) = result {
                 if !demoted.is_empty() {
@@ -605,7 +696,11 @@ impl LifecycleApi {
         }
     }
 
-    fn demote_to_warm_rocksdb(&self, rocksdb_engine: &tsdb_rocksdb::TsdbRocksDb, cf_names: &[String]) -> Result<Vec<String>, String> {
+    fn demote_to_warm_rocksdb(
+        &self,
+        rocksdb_engine: &tsdb_rocksdb::TsdbRocksDb,
+        cf_names: &[String],
+    ) -> Result<Vec<String>, String> {
         let warm_dir = self.parquet_dir.join("warm");
 
         let mut demoted = Vec::new();
@@ -649,20 +744,20 @@ impl LifecycleApi {
                             let _ = std::fs::remove_file(&marker);
                             tracing::info!("dropped CF {} from RocksDB (demoted to warm)", cf_name);
                             demoted.push(format!("{} ({} points → warm Parquet)", cf_name, count));
-                        }
+                        },
                         Err(e) => {
                             tracing::warn!("drop CF {} failed: {}", cf_name, e);
                             demoted.push(format!(
                                 "{} ({} points → warm Parquet, but CF drop failed: {})",
                                 cf_name, count, e
                             ));
-                        }
+                        },
                     }
-                }
+                },
                 Err(e) => {
                     let _ = std::fs::remove_file(&marker);
                     tracing::warn!("export {} to warm parquet failed: {}", cf_name, e);
-                }
+                },
             }
         }
 
@@ -677,7 +772,10 @@ impl LifecycleApi {
         for cf_name in cf_names {
             let parts: Vec<&str> = cf_name.rsplitn(2, '_').collect();
             if parts.len() < 2 {
-                tracing::warn!("invalid cf_name format '{}', expected measurement_date", cf_name);
+                tracing::warn!(
+                    "invalid cf_name format '{}', expected measurement_date",
+                    cf_name
+                );
                 continue;
             }
             let date_str = parts[0];
@@ -696,7 +794,10 @@ impl LifecycleApi {
                 if marker.exists() && warm_measurement_dir.is_dir() {
                     tracing::info!("found demote marker for {}, hot partition already removed, cleaning up marker", cf_name);
                     let _ = std::fs::remove_file(&marker);
-                    demoted.push(format!("{} (recovered: completed demote after crash)", cf_name));
+                    demoted.push(format!(
+                        "{} (recovered: completed demote after crash)",
+                        cf_name
+                    ));
                 } else {
                     tracing::warn!("hot partition not found for {}", cf_name);
                 }
@@ -736,13 +837,18 @@ impl LifecycleApi {
             }
 
             let _ = std::fs::remove_file(&marker);
-            if std::fs::read_dir(&hot_measurement_dir).map(|mut d| d.next().is_none()).unwrap_or(true) {
+            if std::fs::read_dir(&hot_measurement_dir)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true)
+            {
                 let _ = std::fs::remove_dir(&hot_measurement_dir);
             }
 
             let hot_partition = self.data_dir.join(format!("data_{}", date_str));
             if hot_partition.is_dir()
-                && std::fs::read_dir(&hot_partition).map(|mut d| d.next().is_none()).unwrap_or(true)
+                && std::fs::read_dir(&hot_partition)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true)
             {
                 let _ = std::fs::remove_dir(&hot_partition);
             }
@@ -762,7 +868,9 @@ impl LifecycleApi {
 
         if let Some(rocksdb_engine) = any_ref.downcast_ref::<tsdb_rocksdb::TsdbRocksDb>() {
             self.demote_to_cold_rocksdb(rocksdb_engine, cf_names)
-        } else if let Some(arrow_engine) = any_ref.downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>() {
+        } else if let Some(arrow_engine) =
+            any_ref.downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>()
+        {
             let result = self.demote_to_cold_arrow(cf_names);
             if let Ok(ref demoted) = result {
                 if !demoted.is_empty() {
@@ -777,7 +885,11 @@ impl LifecycleApi {
         }
     }
 
-    fn demote_to_cold_rocksdb(&self, rocksdb_engine: &tsdb_rocksdb::TsdbRocksDb, cf_names: &[String]) -> Result<Vec<String>, String> {
+    fn demote_to_cold_rocksdb(
+        &self,
+        rocksdb_engine: &tsdb_rocksdb::TsdbRocksDb,
+        cf_names: &[String],
+    ) -> Result<Vec<String>, String> {
         let warm_dir = self.parquet_dir.join("warm");
         let cold_dir = self.parquet_dir.join("cold");
         std::fs::create_dir_all(&cold_dir).map_err(|e| format!("create cold dir: {}", e))?;
@@ -809,7 +921,7 @@ impl LifecycleApi {
                                 let _ = std::fs::remove_file(&marker);
                                 demoted
                                     .push(format!("{} ({} points → cold Parquet)", cf_name, count));
-                            }
+                            },
                             Err(e) => {
                                 tracing::warn!(
                                     "drop CF {} after cold export failed: {}",
@@ -820,13 +932,13 @@ impl LifecycleApi {
                                     "{} ({} points → cold Parquet, but CF drop failed: {})",
                                     cf_name, count, e
                                 ));
-                            }
+                            },
                         }
-                    }
+                    },
                     Err(e) => {
                         let _ = std::fs::remove_file(&marker);
                         tracing::warn!("export {} to cold parquet failed: {}", cf_name, e);
-                    }
+                    },
                 }
                 continue;
             }
@@ -893,7 +1005,10 @@ impl LifecycleApi {
         for cf_name in cf_names {
             let parts: Vec<&str> = cf_name.rsplitn(2, '_').collect();
             if parts.len() < 2 {
-                tracing::warn!("invalid cf_name format '{}', expected measurement_date", cf_name);
+                tracing::warn!(
+                    "invalid cf_name format '{}', expected measurement_date",
+                    cf_name
+                );
                 continue;
             }
             let date_str = parts[0];
@@ -904,20 +1019,30 @@ impl LifecycleApi {
             let cold_marker = cold_measurement.join(".demote_cold_marker");
 
             if cold_marker.exists() {
-                let warm_src = warm_dir.join(format!("data_{}", date_str)).join(measurement);
+                let warm_src = warm_dir
+                    .join(format!("data_{}", date_str))
+                    .join(measurement);
                 if !warm_src.is_dir() {
                     tracing::info!("found cold demote marker for {}, warm source already removed, cleaning up marker", cf_name);
                     let _ = std::fs::remove_file(&cold_marker);
                     if cold_measurement.is_dir()
-                        && std::fs::read_dir(&cold_measurement).map(|mut d| d.next().is_none()).unwrap_or(true)
+                        && std::fs::read_dir(&cold_measurement)
+                            .map(|mut d| d.next().is_none())
+                            .unwrap_or(true)
                     {
                         let _ = std::fs::remove_dir(&cold_measurement);
                     }
-                    demoted.push(format!("{} (recovered: completed cold demote after crash)", cf_name));
+                    demoted.push(format!(
+                        "{} (recovered: completed cold demote after crash)",
+                        cf_name
+                    ));
                     continue;
                 }
 
-                tracing::info!("found cold demote marker for {}, resuming warm→cold move", cf_name);
+                tracing::info!(
+                    "found cold demote marker for {}, resuming warm→cold move",
+                    cf_name
+                );
                 std::fs::create_dir_all(&cold_measurement)
                     .map_err(|e| format!("create cold measurement dir: {}", e))?;
                 let mut moved = 0u64;
@@ -934,15 +1059,24 @@ impl LifecycleApi {
                     }
                 }
                 let _ = std::fs::remove_file(&cold_marker);
-                if std::fs::read_dir(&warm_src).map(|mut d| d.next().is_none()).unwrap_or(true) {
+                if std::fs::read_dir(&warm_src)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true)
+                {
                     let _ = std::fs::remove_dir(&warm_src);
                 }
                 tracing::info!("resumed cold demote for {} ({} files)", cf_name, moved);
-                demoted.push(format!("{} ({} files warm → cold, resumed)", cf_name, moved));
+                demoted.push(format!(
+                    "{} ({} files warm → cold, resumed)",
+                    cf_name, moved
+                ));
                 continue;
             }
 
-            let hot_dir = self.data_dir.join(format!("data_{}", date_str)).join(measurement);
+            let hot_dir = self
+                .data_dir
+                .join(format!("data_{}", date_str))
+                .join(measurement);
             if hot_dir.is_dir() {
                 let warm_partition = warm_dir.join(format!("data_{}", date_str));
                 std::fs::create_dir_all(&warm_partition)
@@ -968,12 +1102,17 @@ impl LifecycleApi {
                     tracing::info!("moved {} from hot to warm ({} files)", cf_name, hot_moved);
                 }
 
-                if std::fs::read_dir(&hot_dir).map(|mut d| d.next().is_none()).unwrap_or(true) {
+                if std::fs::read_dir(&hot_dir)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true)
+                {
                     let _ = std::fs::remove_dir(&hot_dir);
                 }
             }
 
-            let src_dir = warm_dir.join(format!("data_{}", date_str)).join(measurement);
+            let src_dir = warm_dir
+                .join(format!("data_{}", date_str))
+                .join(measurement);
             if !src_dir.is_dir() {
                 tracing::warn!("{} not found in hot or warm, skip", cf_name);
                 continue;
@@ -1000,13 +1139,18 @@ impl LifecycleApi {
             }
 
             let _ = std::fs::remove_file(&cold_marker);
-            if std::fs::read_dir(&src_dir).map(|mut d| d.next().is_none()).unwrap_or(true) {
+            if std::fs::read_dir(&src_dir)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true)
+            {
                 let _ = std::fs::remove_dir(&src_dir);
             }
 
             let hot_partition = self.data_dir.join(format!("data_{}", date_str));
             if hot_partition.is_dir()
-                && std::fs::read_dir(&hot_partition).map(|mut d| d.next().is_none()).unwrap_or(true)
+                && std::fs::read_dir(&hot_partition)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(true)
             {
                 let _ = std::fs::remove_dir(&hot_partition);
             }
@@ -1023,7 +1167,9 @@ impl LifecycleApi {
 
         if let Some(rocksdb_engine) = any_ref.downcast_ref::<tsdb_rocksdb::TsdbRocksDb>() {
             self.archive_rocksdb(rocksdb_engine, older_than_days)
-        } else if let Some(arrow_engine) = any_ref.downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>() {
+        } else if let Some(arrow_engine) =
+            any_ref.downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>()
+        {
             let result = self.archive_arrow(older_than_days);
             if let Ok(ref archived) = result {
                 if !archived.is_empty() {
@@ -1038,7 +1184,11 @@ impl LifecycleApi {
         }
     }
 
-    fn archive_rocksdb(&self, rocksdb_engine: &tsdb_rocksdb::TsdbRocksDb, older_than_days: u64) -> Result<Vec<String>, String> {
+    fn archive_rocksdb(
+        &self,
+        rocksdb_engine: &tsdb_rocksdb::TsdbRocksDb,
+        older_than_days: u64,
+    ) -> Result<Vec<String>, String> {
         let archive_dir = self.parquet_dir.join("archive");
         std::fs::create_dir_all(&archive_dir).map_err(|e| format!("create archive dir: {}", e))?;
 
@@ -1074,7 +1224,7 @@ impl LifecycleApi {
                                             "{} ({} points → archive)",
                                             cf_name, count
                                         ));
-                                    }
+                                    },
                                     Err(e) => {
                                         tracing::warn!(
                                             "drop CF {} after archive failed: {}",
@@ -1085,12 +1235,12 @@ impl LifecycleApi {
                                             "{} ({} points → archive, but CF drop failed: {})",
                                             cf_name, count, e
                                         ));
-                                    }
+                                    },
                                 }
-                            }
+                            },
                             Err(e) => {
                                 tracing::warn!("archive {} failed: {}", cf_name, e);
-                            }
+                            },
                         }
                     }
                 }
@@ -1113,7 +1263,11 @@ impl LifecycleApi {
                 if !partition_dir.is_dir() {
                     continue;
                 }
-                let dir_name = partition_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dir_name = partition_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !dir_name.starts_with("data_") {
                     continue;
                 }
@@ -1150,7 +1304,9 @@ impl LifecycleApi {
                                 }
                             }
                             let _ = std::fs::remove_dir(&src_dir);
-                        } else if src.extension().and_then(|e| e.to_str()) == Some("parquet") && Self::safe_move_file(&src, &dst).is_ok() {
+                        } else if src.extension().and_then(|e| e.to_str()) == Some("parquet")
+                            && Self::safe_move_file(&src, &dst).is_ok()
+                        {
                             moved += 1;
                         }
                     }
@@ -1163,7 +1319,8 @@ impl LifecycleApi {
                     } else {
                         tracing::warn!(
                             "archive {} has {} remaining files after move, not deleting source",
-                            dir_name, remaining
+                            dir_name,
+                            remaining
                         );
                     }
                     tracing::info!("archived {} ({} files)", dir_name, moved);
@@ -1181,7 +1338,11 @@ impl LifecycleApi {
                 if !partition_dir.is_dir() {
                     continue;
                 }
-                let dir_name = partition_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dir_name = partition_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !dir_name.starts_with("data_") {
                     continue;
                 }
@@ -1237,7 +1398,10 @@ impl LifecycleApi {
                     tracing::info!("archived warm {} ({} files)", dir_name, moved);
                     archived.push(format!("{} ({} files warm → archive)", dir_name, moved));
                 } else {
-                    tracing::warn!("archive warm {} failed: 0 files moved, keeping source", dir_name);
+                    tracing::warn!(
+                        "archive warm {} failed: 0 files moved, keeping source",
+                        dir_name
+                    );
                 }
             }
         }
@@ -1249,7 +1413,11 @@ impl LifecycleApi {
                 if !partition_dir.is_dir() {
                     continue;
                 }
-                let dir_name = partition_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let dir_name = partition_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if !dir_name.starts_with("data_") {
                     continue;
                 }
@@ -1305,7 +1473,10 @@ impl LifecycleApi {
                     tracing::info!("archived cold {} ({} files)", dir_name, moved);
                     archived.push(format!("{} ({} files cold → archive)", dir_name, moved));
                 } else {
-                    tracing::warn!("archive cold {} failed: 0 files moved, keeping source", dir_name);
+                    tracing::warn!(
+                        "archive cold {} failed: 0 files moved, keeping source",
+                        dir_name
+                    );
                 }
             }
         }
@@ -1315,10 +1486,7 @@ impl LifecycleApi {
 
     fn safe_move_file(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
         if dst.exists() {
-            let stem = dst
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("part");
+            let stem = dst.file_stem().and_then(|s| s.to_str()).unwrap_or("part");
             let ext = dst
                 .extension()
                 .and_then(|s| s.to_str())
@@ -1357,7 +1525,8 @@ impl LifecycleApi {
 
     fn read_parquet_measurement(path: &std::path::Path) -> Option<String> {
         let file = std::fs::File::open(path).ok()?;
-        let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
+        let builder =
+            parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(file).ok()?;
         let arrow_schema = builder.schema();
         arrow_schema.metadata().get("measurement").cloned()
     }
@@ -1465,7 +1634,12 @@ mod tests {
         (data_dir.clone(), parquet_dir)
     }
 
-    fn create_arrow_active_partition(data_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
+    fn create_arrow_active_partition(
+        data_dir: &std::path::Path,
+        date: &str,
+        measurement: &str,
+        file_count: usize,
+    ) {
         let partition_dir = data_dir.join(format!("data_{}", date));
         let measurement_dir = partition_dir.join(measurement);
         std::fs::create_dir_all(&measurement_dir).unwrap();
@@ -1474,16 +1648,32 @@ mod tests {
         }
     }
 
-    fn create_warm_partition(base_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
-        let warm_dir = base_dir.join("warm").join(format!("data_{}", date)).join(measurement);
+    fn create_warm_partition(
+        base_dir: &std::path::Path,
+        date: &str,
+        measurement: &str,
+        file_count: usize,
+    ) {
+        let warm_dir = base_dir
+            .join("warm")
+            .join(format!("data_{}", date))
+            .join(measurement);
         std::fs::create_dir_all(&warm_dir).unwrap();
         for i in 0..file_count {
             create_fake_parquet(&warm_dir, &format!("warm_{}.parquet", i));
         }
     }
 
-    fn create_cold_partition(base_dir: &std::path::Path, date: &str, measurement: &str, file_count: usize) {
-        let cold_dir = base_dir.join("cold").join(format!("data_{}", date)).join(measurement);
+    fn create_cold_partition(
+        base_dir: &std::path::Path,
+        date: &str,
+        measurement: &str,
+        file_count: usize,
+    ) {
+        let cold_dir = base_dir
+            .join("cold")
+            .join(format!("data_{}", date))
+            .join(measurement);
         std::fs::create_dir_all(&cold_dir).unwrap();
         for i in 0..file_count {
             create_fake_parquet(&cold_dir, &format!("cold_{}.parquet", i));
@@ -1622,7 +1812,9 @@ mod tests {
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 3);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let result = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("3 files hot → warm"));
@@ -1651,7 +1843,9 @@ mod tests {
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
-        let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let result = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
         assert!(result.is_empty(), "nonexistent partition should be skipped");
     }
 
@@ -1664,10 +1858,9 @@ mod tests {
         create_arrow_active_partition(&data_dir, "20260401", "mem", 3);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let result = api.demote_to_warm_arrow(&[
-            "cpu_20260401".to_string(),
-            "mem_20260401".to_string(),
-        ]).unwrap();
+        let result = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string(), "mem_20260401".to_string()])
+            .unwrap();
 
         assert_eq!(result.len(), 2);
 
@@ -1685,7 +1878,9 @@ mod tests {
         create_warm_partition(&data_dir, "20260301", "cpu", 2);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let result = api.demote_to_cold_arrow(&["cpu_20260301".to_string()]).unwrap();
+        let result = api
+            .demote_to_cold_arrow(&["cpu_20260301".to_string()])
+            .unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(result[0].contains("warm → cold"));
@@ -1705,7 +1900,9 @@ mod tests {
         create_arrow_active_partition(&data_dir, "20260301", "cpu", 2);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let result = api.demote_to_cold_arrow(&["cpu_20260301".to_string()]).unwrap();
+        let result = api
+            .demote_to_cold_arrow(&["cpu_20260301".to_string()])
+            .unwrap();
 
         assert_eq!(result.len(), 1);
 
@@ -1722,7 +1919,9 @@ mod tests {
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
-        let result = api.demote_to_cold_arrow(&["cpu_20260301".to_string()]).unwrap();
+        let result = api
+            .demote_to_cold_arrow(&["cpu_20260301".to_string()])
+            .unwrap();
         assert!(result.is_empty());
     }
 
@@ -1753,13 +1952,19 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (data_dir, parquet_dir) = setup_arrow_dirs(&tmp);
 
-        let recent_date = chrono::Local::now().date_naive().format("%Y%m%d").to_string();
+        let recent_date = chrono::Local::now()
+            .date_naive()
+            .format("%Y%m%d")
+            .to_string();
         create_arrow_active_partition(&data_dir, &recent_date, "cpu", 2);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
         let result = api.archive_arrow(30).unwrap();
 
-        assert!(result.is_empty(), "recent partitions should not be archived");
+        assert!(
+            result.is_empty(),
+            "recent partitions should not be archived"
+        );
     }
 
     #[test]
@@ -1789,10 +1994,15 @@ mod tests {
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 1);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let _ = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let _ = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
 
         let marker = data_dir.join("warm/data_20260401/cpu/.demote_marker");
-        assert!(!marker.exists(), "demote marker should be cleaned up after successful demote");
+        assert!(
+            !marker.exists(),
+            "demote marker should be cleaned up after successful demote"
+        );
     }
 
     #[test]
@@ -1803,10 +2013,15 @@ mod tests {
         create_arrow_active_partition(&data_dir, "20260401", "cpu", 1);
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let _ = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let _ = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
 
         let hot_measurement_dir = data_dir.join("data_20260401/cpu");
-        assert!(!dir_exists(&hot_measurement_dir), "empty measurement dir should be cleaned up");
+        assert!(
+            !dir_exists(&hot_measurement_dir),
+            "empty measurement dir should be cleaned up"
+        );
     }
 
     #[test]
@@ -1843,9 +2058,21 @@ mod tests {
         let status = api.status_arrow_from_fs();
 
         assert_eq!(status.engine_type, "arrow");
-        assert!(status.total_archive_bytes > 0, "archive bytes should be counted");
-        assert!(!status.archive_files.is_empty(), "archive files should be listed");
-        assert!(status.parquet_partitions.iter().any(|p| p.tier == "archive"), "parquet_partitions should include archive");
+        assert!(
+            status.total_archive_bytes > 0,
+            "archive bytes should be counted"
+        );
+        assert!(
+            !status.archive_files.is_empty(),
+            "archive files should be listed"
+        );
+        assert!(
+            status
+                .parquet_partitions
+                .iter()
+                .any(|p| p.tier == "archive"),
+            "parquet_partitions should include archive"
+        );
     }
 
     #[test]
@@ -1859,11 +2086,19 @@ mod tests {
         std::fs::write(warm_measurement.join(".demote_marker"), "demoting_to_warm").unwrap();
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
-        let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let result = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
 
         assert!(!result.is_empty(), "should report crash recovery");
-        assert!(result[0].contains("recovered"), "should indicate crash recovery");
-        assert!(!warm_measurement.join(".demote_marker").exists(), "marker should be cleaned up");
+        assert!(
+            result[0].contains("recovered"),
+            "should indicate crash recovery"
+        );
+        assert!(
+            !warm_measurement.join(".demote_marker").exists(),
+            "marker should be cleaned up"
+        );
     }
 
     #[test]
@@ -1877,14 +2112,26 @@ mod tests {
 
         let cold_measurement = data_dir.join("cold/data_20260401/cpu");
         std::fs::create_dir_all(&cold_measurement).unwrap();
-        std::fs::write(cold_measurement.join(".demote_cold_marker"), "demoting_to_cold").unwrap();
+        std::fs::write(
+            cold_measurement.join(".demote_cold_marker"),
+            "demoting_to_cold",
+        )
+        .unwrap();
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir);
-        let result = api.demote_to_cold_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let result = api
+            .demote_to_cold_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
 
         assert!(!result.is_empty(), "should report crash recovery");
-        assert!(result[0].contains("resumed") || result[0].contains("recovered"), "should indicate crash recovery");
-        assert!(!cold_measurement.join(".demote_cold_marker").exists(), "marker should be cleaned up");
+        assert!(
+            result[0].contains("resumed") || result[0].contains("recovered"),
+            "should indicate crash recovery"
+        );
+        assert!(
+            !cold_measurement.join(".demote_cold_marker").exists(),
+            "marker should be cleaned up"
+        );
     }
 
     #[test]
@@ -1911,8 +2158,14 @@ mod tests {
 
         LifecycleApi::safe_move_file(&src, &existing).unwrap();
 
-        assert!(tmp.path().join("part_1.parquet").exists(), "should create part_1.parquet on conflict");
-        assert_eq!(std::fs::read(tmp.path().join("part_1.parquet")).unwrap(), b"new data");
+        assert!(
+            tmp.path().join("part_1.parquet").exists(),
+            "should create part_1.parquet on conflict"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("part_1.parquet")).unwrap(),
+            b"new data"
+        );
     }
 
     #[test]
@@ -1931,11 +2184,20 @@ mod tests {
         assert!(!result.is_empty(), "should archive warm data");
         assert!(result[0].contains("warm"), "should indicate warm → archive");
 
-        let warm_measurement = data_dir.join("warm").join(format!("data_{}", old_date)).join("cpu");
+        let warm_measurement = data_dir
+            .join("warm")
+            .join(format!("data_{}", old_date))
+            .join("cpu");
         assert!(!warm_measurement.exists(), "warm source should be removed");
 
-        let archive_measurement = data_dir.join("archive").join(format!("data_{}", old_date)).join("cpu");
-        assert!(archive_measurement.is_dir(), "archive destination should exist");
+        let archive_measurement = data_dir
+            .join("archive")
+            .join(format!("data_{}", old_date))
+            .join("cpu");
+        assert!(
+            archive_measurement.is_dir(),
+            "archive destination should exist"
+        );
         assert_eq!(count_parquet_in_dir(&archive_measurement), 2);
     }
 
@@ -1983,11 +2245,20 @@ mod tests {
         std::fs::write(partition_dir.join(".demote_marker"), "stale").unwrap();
 
         let api = LifecycleApi::new_for_test(parquet_dir, data_dir.clone());
-        let result = api.demote_to_warm_arrow(&["cpu_20260401".to_string()]).unwrap();
+        let result = api
+            .demote_to_warm_arrow(&["cpu_20260401".to_string()])
+            .unwrap();
 
         assert!(!result.is_empty());
         let warm_measurement = data_dir.join("warm/data_20260401/cpu");
-        assert_eq!(count_parquet_in_dir(&warm_measurement), 1, "only parquet files should be moved");
-        assert!(!warm_measurement.join("readme.txt").exists(), "non-parquet files should not be moved");
+        assert_eq!(
+            count_parquet_in_dir(&warm_measurement),
+            1,
+            "only parquet files should be moved"
+        );
+        assert!(
+            !warm_measurement.join("readme.txt").exists(),
+            "non-parquet files should not be moved"
+        );
     }
 }

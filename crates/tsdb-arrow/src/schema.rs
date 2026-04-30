@@ -589,7 +589,11 @@ impl DataPoint {
             .map(|(k, v)| format!("{}={}", escape_tag_value(k), escape_tag_value(v)))
             .collect();
         parts.sort();
-        format!("{},{}", escape_tag_value(&self.measurement), parts.join(","))
+        format!(
+            "{},{}",
+            escape_tag_value(&self.measurement),
+            parts.join(",")
+        )
     }
 
     /// 验证数据点的完整性
@@ -622,9 +626,7 @@ impl DataPoint {
                 return Err(DataPointError::EmptyTagKey);
             }
             if !is_safe_name(key) {
-                return Err(DataPointError::InvalidTagKey {
-                    key: key.clone(),
-                });
+                return Err(DataPointError::InvalidTagKey { key: key.clone() });
             }
         }
         for (key, value) in &self.fields {
@@ -633,9 +635,7 @@ impl DataPoint {
             }
             for (tk, _) in &self.tags {
                 if key == tk {
-                    return Err(DataPointError::FieldTagConflict {
-                        key: key.clone(),
-                    });
+                    return Err(DataPointError::FieldTagConflict { key: key.clone() });
                 }
             }
             if let FieldValue::Float(f) = value {
@@ -695,22 +695,22 @@ impl std::fmt::Display for DataPointError {
             DataPointError::EmptyMeasurement => write!(f, "measurement name cannot be empty"),
             DataPointError::InvalidMeasurementName { name } => {
                 write!(f, "measurement name '{}' contains invalid characters (must be alphanumeric, dash, underscore, or dot; no path separators or '..')", name)
-            }
+            },
             DataPointError::NoFields => write!(f, "data point must have at least one field"),
             DataPointError::EmptyTagKey => write!(f, "tag key cannot be empty string"),
             DataPointError::InvalidTagKey { key } => {
                 write!(f, "tag key '{}' contains invalid characters", key)
-            }
+            },
             DataPointError::FieldTagConflict { key } => {
                 write!(f, "field key '{}' conflicts with a tag key", key)
-            }
+            },
             DataPointError::EmptyFieldKey => write!(f, "field key cannot be empty string"),
             DataPointError::InvalidFloatValue { field, value } => {
                 write!(f, "field '{}' has invalid float value: {}", field, value)
-            }
+            },
             DataPointError::InvalidTimestamp { timestamp } => {
                 write!(f, "invalid timestamp: {}", timestamp)
-            }
+            },
         }
     }
 }

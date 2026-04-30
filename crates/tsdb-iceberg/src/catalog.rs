@@ -144,9 +144,9 @@ impl IcebergCatalog {
         let db = DB::open_cf_descriptors(&opts, &base_dir, cf_descriptors)?;
 
         let seq_counter = {
-            let seq_cf = db.cf_handle(SEQ_CF).ok_or_else(|| {
-                IcebergError::Catalog("seq column family not found".to_string())
-            })?;
+            let seq_cf = db
+                .cf_handle(SEQ_CF)
+                .ok_or_else(|| IcebergError::Catalog("seq column family not found".to_string()))?;
             let saved: u64 = db
                 .get_cf(&seq_cf, b"seq_counter")
                 .ok()
@@ -237,7 +237,11 @@ impl IcebergCatalog {
         let table_dir = self.base_dir.join("data").join(name);
         if table_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&table_dir) {
-                tracing::warn!("failed to remove table data directory {}: {}", table_dir.display(), e);
+                tracing::warn!(
+                    "failed to remove table data directory {}: {}",
+                    table_dir.display(),
+                    e
+                );
             }
         }
 
@@ -307,7 +311,9 @@ impl IcebergCatalog {
             if let Err(e) = std::fs::rename(&old_table_dir, &new_table_dir) {
                 tracing::warn!(
                     "failed to rename table data directory {:?} -> {:?}: {}",
-                    old_table_dir, new_table_dir, e
+                    old_table_dir,
+                    new_table_dir,
+                    e
                 );
             }
         }
@@ -815,10 +821,16 @@ mod tests {
         catalog.create_table("cpu", schema, spec).unwrap();
 
         let data_dir = catalog.data_dir("cpu").unwrap();
-        assert!(data_dir.exists(), "data directory should exist after create_table");
+        assert!(
+            data_dir.exists(),
+            "data directory should exist after create_table"
+        );
 
         catalog.drop_table("cpu").unwrap();
-        assert!(!data_dir.exists(), "data directory should be deleted after drop_table");
+        assert!(
+            !data_dir.exists(),
+            "data directory should be deleted after drop_table"
+        );
     }
 
     #[test]
@@ -853,12 +865,20 @@ mod tests {
             let catalog = IcebergCatalog::open(dir.path()).unwrap();
             let seq1 = catalog.next_sequence_number().unwrap();
             let seq2 = catalog.next_sequence_number().unwrap();
-            assert!(seq2 > seq1, "sequence numbers should be monotonically increasing");
+            assert!(
+                seq2 > seq1,
+                "sequence numbers should be monotonically increasing"
+            );
             seq2
         };
 
         let catalog2 = IcebergCatalog::open(dir.path()).unwrap();
         let seq3 = catalog2.next_sequence_number().unwrap();
-        assert!(seq3 > seq2, "sequence should persist across catalog reopen, got seq2={} seq3={}", seq2, seq3);
+        assert!(
+            seq3 > seq2,
+            "sequence should persist across catalog reopen, got seq2={} seq3={}",
+            seq2,
+            seq3
+        );
     }
 }

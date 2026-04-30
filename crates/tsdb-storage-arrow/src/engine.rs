@@ -70,19 +70,16 @@ impl ArrowStorageEngine {
                                 match serde_json::from_slice::<DataPoint>(&entry.payload) {
                                     Ok(dp) => wal_replay_datapoints.push(dp),
                                     Err(e) => {
-                                        tracing::warn!(
-                                            "WAL replay: skipping corrupt entry: {}",
-                                            e
-                                        );
-                                    }
+                                        tracing::warn!("WAL replay: skipping corrupt entry: {}", e);
+                                    },
                                 }
                             }
                         }
                         wal_replay_count = entries.len();
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!("WAL recovery failed: {}", e);
-                    }
+                    },
                 }
             }
 
@@ -183,19 +180,15 @@ impl ArrowStorageEngine {
     }
 
     fn write_to_buffer(&self, measurement: &str, dp: &DataPoint) -> Result<()> {
-        let mut writers = self
-            .async_writers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut writers = self.async_writers.lock().unwrap_or_else(|e| e.into_inner());
         if !writers.contains_key(measurement) {
             let writer = TsdbParquetWriter::new(
                 self.partition_manager.clone(),
                 self.writer_config.clone(),
                 measurement,
             );
-            let buffer = std::sync::Mutex::new(WriteBuffer::new(
-                self.writer_config.max_buffer_rows,
-            ));
+            let buffer =
+                std::sync::Mutex::new(WriteBuffer::new(self.writer_config.max_buffer_rows));
             let async_writer =
                 AsyncWriteBuffer::new(buffer, writer, self.writer_config.flush_interval_ms);
             writers.insert(measurement.to_string(), async_writer);
@@ -207,19 +200,15 @@ impl ArrowStorageEngine {
     }
 
     fn write_batch_to_buffer(&self, measurement: &str, datapoints: &[DataPoint]) -> Result<()> {
-        let mut writers = self
-            .async_writers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut writers = self.async_writers.lock().unwrap_or_else(|e| e.into_inner());
         if !writers.contains_key(measurement) {
             let writer = TsdbParquetWriter::new(
                 self.partition_manager.clone(),
                 self.writer_config.clone(),
                 measurement,
             );
-            let buffer = std::sync::Mutex::new(WriteBuffer::new(
-                self.writer_config.max_buffer_rows,
-            ));
+            let buffer =
+                std::sync::Mutex::new(WriteBuffer::new(self.writer_config.max_buffer_rows));
             let async_writer =
                 AsyncWriteBuffer::new(buffer, writer, self.writer_config.flush_interval_ms);
             writers.insert(measurement.to_string(), async_writer);
@@ -239,13 +228,13 @@ impl ArrowStorageEngine {
             )));
         }
         if let Some(ref wal) = self.wal {
-            let payload = serde_json::to_vec(dp).map_err(|e| {
-                TsdbStorageArrowError::Storage(format!("serialize error: {}", e))
-            })?;
+            let payload = serde_json::to_vec(dp)
+                .map_err(|e| TsdbStorageArrowError::Storage(format!("serialize error: {}", e)))?;
             wal.append(WALEntryType::Insert, &payload)?;
         }
         self.write_to_buffer(&dp.measurement, dp)?;
-        self.write_seq.fetch_add(1, std::sync::atomic::Ordering::Release);
+        self.write_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
         self.known_measurements
             .lock()
             .unwrap_or_else(|e| {
@@ -278,10 +267,7 @@ impl ArrowStorageEngine {
 
         let mut by_measurement: HashMap<&str, Vec<&DataPoint>> = HashMap::new();
         for dp in datapoints {
-            by_measurement
-                .entry(&dp.measurement)
-                .or_default()
-                .push(dp);
+            by_measurement.entry(&dp.measurement).or_default().push(dp);
         }
 
         for (measurement, dps) in by_measurement {
@@ -289,7 +275,10 @@ impl ArrowStorageEngine {
             self.write_batch_to_buffer(measurement, &owned)?;
         }
 
-        self.write_seq.fetch_add(datapoints.len() as u64, std::sync::atomic::Ordering::Release);
+        self.write_seq.fetch_add(
+            datapoints.len() as u64,
+            std::sync::atomic::Ordering::Release,
+        );
 
         let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| {
             tracing::warn!("Mutex poisoned in write_batch, recovering: {}", e);
@@ -304,10 +293,7 @@ impl ArrowStorageEngine {
     fn write_batch_bypass_wal(&self, datapoints: &[DataPoint]) -> Result<()> {
         let mut by_measurement: HashMap<&str, Vec<&DataPoint>> = HashMap::new();
         for dp in datapoints {
-            by_measurement
-                .entry(&dp.measurement)
-                .or_default()
-                .push(dp);
+            by_measurement.entry(&dp.measurement).or_default().push(dp);
         }
 
         for (measurement, dps) in by_measurement {
@@ -315,10 +301,16 @@ impl ArrowStorageEngine {
             self.write_batch_to_buffer(measurement, &owned)?;
         }
 
-        self.write_seq.fetch_add(datapoints.len() as u64, std::sync::atomic::Ordering::Release);
+        self.write_seq.fetch_add(
+            datapoints.len() as u64,
+            std::sync::atomic::Ordering::Release,
+        );
 
         let mut measurements = self.known_measurements.lock().unwrap_or_else(|e| {
-            tracing::warn!("Mutex poisoned in write_batch_bypass_wal, recovering: {}", e);
+            tracing::warn!(
+                "Mutex poisoned in write_batch_bypass_wal, recovering: {}",
+                e
+            );
             e.into_inner()
         });
         for dp in datapoints {
@@ -360,9 +352,9 @@ impl ArrowStorageEngine {
         projection: Option<&[String]>,
     ) -> Result<Vec<arrow::record_batch::RecordBatch>> {
         self.ensure_data_visible()?;
-        let batches = self
-            .reader
-            .read_range_arrow(measurement, start_micros, end_micros, projection)?;
+        let batches =
+            self.reader
+                .read_range_arrow(measurement, start_micros, end_micros, projection)?;
         Ok(batches)
     }
 
@@ -382,10 +374,7 @@ impl ArrowStorageEngine {
     }
 
     pub fn flush(&self) -> Result<()> {
-        let writers = self
-            .async_writers
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let writers = self.async_writers.lock().unwrap_or_else(|e| e.into_inner());
 
         let mut all_flushed = true;
         for (measurement, writer) in writers.iter() {
@@ -404,8 +393,12 @@ impl ArrowStorageEngine {
 
         if all_flushed {
             let current = self.write_seq.load(std::sync::atomic::Ordering::Acquire);
-            self.last_flush_seq.store(current, std::sync::atomic::Ordering::Release);
-            *self.last_flush_time.lock().unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
+            self.last_flush_seq
+                .store(current, std::sync::atomic::Ordering::Release);
+            *self
+                .last_flush_time
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = std::time::Instant::now();
         }
 
         if !all_flushed {
@@ -419,10 +412,15 @@ impl ArrowStorageEngine {
 
     fn ensure_data_visible(&self) -> Result<()> {
         let current = self.write_seq.load(std::sync::atomic::Ordering::Acquire);
-        let flushed = self.last_flush_seq.load(std::sync::atomic::Ordering::Acquire);
+        let flushed = self
+            .last_flush_seq
+            .load(std::sync::atomic::Ordering::Acquire);
         if current > flushed {
             let should_flush = {
-                let last = self.last_flush_time.lock().unwrap_or_else(|e| e.into_inner());
+                let last = self
+                    .last_flush_time
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
                 last.elapsed() >= std::time::Duration::from_secs(1)
             };
             if should_flush {
@@ -438,10 +436,7 @@ impl ArrowStorageEngine {
 
         let active_measurements = self.partition_manager.list_measurements();
         let writer_keys: Vec<String> = {
-            let writers = self
-                .async_writers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let writers = self.async_writers.lock().unwrap_or_else(|e| e.into_inner());
             writers.keys().cloned().collect()
         };
         let stale: Vec<String> = writer_keys
@@ -451,10 +446,7 @@ impl ArrowStorageEngine {
             .collect();
 
         if !stale.is_empty() {
-            let mut writers = self
-                .async_writers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut writers = self.async_writers.lock().unwrap_or_else(|e| e.into_inner());
             for m in &stale {
                 if let Some(mut writer) = writers.remove(m) {
                     if let Err(e) = writer.stop() {
@@ -465,7 +457,10 @@ impl ArrowStorageEngine {
         }
 
         if !dropped.is_empty() {
-            let mut known = self.known_measurements.lock().unwrap_or_else(|e| e.into_inner());
+            let mut known = self
+                .known_measurements
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             for m in &stale {
                 known.remove(m);
             }
@@ -499,10 +494,7 @@ impl Drop for ArrowStorageEngine {
             tracing::warn!("failed to flush during drop: {}", e);
         }
         {
-            let mut writers = self
-                .async_writers
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut writers = self.async_writers.lock().unwrap_or_else(|e| e.into_inner());
             for (_measurement, writer) in writers.iter_mut() {
                 if let Err(e) = writer.stop() {
                     tracing::warn!("failed to stop async writer during drop: {}", e);
@@ -584,7 +576,7 @@ impl tsdb_arrow::StorageEngine for ArrowStorageEngine {
                 ArrowStorageEngine::read_range(self, measurement, &Tags::new(), now, future)
                     .ok()
                     .filter(|dps| !dps.is_empty())?
-            }
+            },
         };
         Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(
             &datapoints,
@@ -894,8 +886,14 @@ mod tests {
             .list_measurement_parquet_files(date, "mem")
             .unwrap();
 
-        assert!(!cpu_files.is_empty(), "cpu should have files in its subdirectory");
-        assert!(!mem_files.is_empty(), "mem should have files in its subdirectory");
+        assert!(
+            !cpu_files.is_empty(),
+            "cpu should have files in its subdirectory"
+        );
+        assert!(
+            !mem_files.is_empty(),
+            "mem should have files in its subdirectory"
+        );
 
         for f in &cpu_files {
             assert!(f.to_string_lossy().contains("/cpu/"));

@@ -44,22 +44,22 @@ mod tests {
                             "unit".to_string(),
                             FieldValue::String("celsius".to_string()),
                         );
-                    }
+                    },
                     "humidity" => {
                         fields.insert("value".to_string(), FieldValue::Float(55.0 + noise * 20.0));
                         fields.insert(
                             "unit".to_string(),
                             FieldValue::String("percent".to_string()),
                         );
-                    }
+                    },
                     "pressure" => {
                         fields.insert("value".to_string(), FieldValue::Float(1013.0 + noise * 5.0));
                         fields.insert("unit".to_string(), FieldValue::String("hpa".to_string()));
-                    }
+                    },
                     _ => {
                         fields.insert("value".to_string(), FieldValue::Float(noise * 50.0));
                         fields.insert("unit".to_string(), FieldValue::String("mm_s".to_string()));
-                    }
+                    },
                 }
                 fields.insert(
                     "battery".to_string(),
@@ -290,7 +290,8 @@ mod tests {
         use tsdb_parquet::writer::{TsdbParquetWriter, WriteBufferConfig};
 
         let pm = PartitionManager::new(parquet_dir.path(), PartitionConfig::default()).unwrap();
-        let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "iot_sensor");
+        let mut writer =
+            TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "iot_sensor");
         writer.write_batch(&rocks_result).unwrap();
         writer.flush_all().unwrap();
 

@@ -100,7 +100,11 @@ impl DataArchiver {
                         if output_path.exists() {
                             db.drop_cf(cf_name)?;
                             if let Err(e) = std::fs::remove_file(&marker_path) {
-                                tracing::warn!("failed to remove marker file {}: {}", marker_path.display(), e);
+                                tracing::warn!(
+                                    "failed to remove marker file {}: {}",
+                                    marker_path.display(),
+                                    e
+                                );
                             }
                             archived_count += 1;
                             tracing::info!(
@@ -118,7 +122,11 @@ impl DataArchiver {
                     total_points += count;
                     db.drop_cf(cf_name)?;
                     if let Err(e) = std::fs::remove_file(&marker_path) {
-                        tracing::warn!("failed to remove marker file {}: {}", marker_path.display(), e);
+                        tracing::warn!(
+                            "failed to remove marker file {}: {}",
+                            marker_path.display(),
+                            e
+                        );
                     }
                     archived_count += 1;
                 }
@@ -269,11 +277,7 @@ impl DataArchiver {
         if let Ok(tags_hash_idx) = schema.index_of("tags_hash") {
             if let Ok(ts_idx) = schema.index_of("timestamp") {
                 props_builder = props_builder.set_sorting_columns(Some(vec![
-                    parquet::format::SortingColumn::new(
-                        tags_hash_idx as i32,
-                        false,
-                        false,
-                    ),
+                    parquet::format::SortingColumn::new(tags_hash_idx as i32, false, false),
                     parquet::format::SortingColumn::new(ts_idx as i32, false, false),
                 ]));
             }

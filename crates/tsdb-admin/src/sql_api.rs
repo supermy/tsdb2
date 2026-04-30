@@ -46,8 +46,8 @@ impl SqlApi {
         use datafusion::sql::sqlparser::parser::Parser;
 
         let dialect = GenericDialect;
-        let statements = Parser::parse_sql(&dialect, sql)
-            .map_err(|_| "SQL parse error".to_string())?;
+        let statements =
+            Parser::parse_sql(&dialect, sql).map_err(|_| "SQL parse error".to_string())?;
 
         for stmt in &statements {
             match stmt {
@@ -56,10 +56,10 @@ impl SqlApi {
                 | Statement::ExplainTable { .. }
                 | Statement::ShowTables { .. }
                 | Statement::ShowColumns { .. }
-                | Statement::ShowCreate { .. } => {}
+                | Statement::ShowCreate { .. } => {},
                 _ => {
                     return Err("Only SELECT/EXPLAIN/SHOW queries are allowed".to_string());
-                }
+                },
             }
         }
         Ok(())
@@ -77,13 +77,10 @@ impl SqlApi {
         self.register_iceberg_tables(&ctx)?;
 
         let start = std::time::Instant::now();
-        let df = ctx
-            .sql(sql)
-            .await
-            .map_err(|e| {
-                tracing::error!("SQL parse error: {}", e);
-                "SQL parse error".to_string()
-            })?;
+        let df = ctx.sql(sql).await.map_err(|e| {
+            tracing::error!("SQL parse error: {}", e);
+            "SQL parse error".to_string()
+        })?;
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(SQL_TIMEOUT_SECS),
@@ -96,7 +93,7 @@ impl SqlApi {
             Ok(Err(e)) => {
                 tracing::error!("SQL execute error: {}", e);
                 return Err("SQL execute error".to_string());
-            }
+            },
             Err(_) => return Err(format!("SQL query timed out after {}s", SQL_TIMEOUT_SECS)),
         };
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -126,7 +123,7 @@ impl SqlApi {
                             Err(_) => {
                                 map.insert(col_name.clone(), serde_json::Value::Null);
                                 continue;
-                            }
+                            },
                         };
                         if real_idx >= batch.num_columns() {
                             map.insert(col_name.clone(), serde_json::Value::Null);
@@ -190,12 +187,12 @@ impl SqlApi {
                                     if let Err(e) = ctx.register_table(m, Arc::new(mem_table)) {
                                         tracing::debug!("register table {}: {}", m, e);
                                     }
-                                }
+                                },
                                 Err(e) => tracing::debug!("create memtable for {}: {}", m, e),
                             }
                         }
                         registered.push((m.clone(), schema, limited_batches));
-                    }
+                    },
                     Err(e) => tracing::debug!("read_range_arrow for {}: {}", m, e),
                 }
             }
@@ -287,22 +284,23 @@ impl SqlApi {
                                         match batch_result {
                                             Ok(batch) => {
                                                 row_count += batch.num_rows();
-                                                let aligned = Self::align_schema(batch, &schema_ref);
+                                                let aligned =
+                                                    Self::align_schema(batch, &schema_ref);
                                                 all_batches.push(aligned);
                                                 if row_count >= MAX_ROCKSDB_LOAD_ROWS {
                                                     break;
                                                 }
-                                            }
+                                            },
                                             Err(e) => tracing::debug!("read parquet batch: {}", e),
                                         }
                                     }
-                                }
+                                },
                                 Err(e) => tracing::debug!("build parquet reader: {}", e),
                             }
-                        }
+                        },
                         Err(e) => tracing::debug!("open parquet {}: {}", pq_path.display(), e),
                     }
-                }
+                },
                 Err(e) => tracing::debug!("open file {}: {}", pq_path.display(), e),
             }
             if row_count >= MAX_ROCKSDB_LOAD_ROWS {
@@ -328,7 +326,9 @@ impl SqlApi {
         batch: arrow::record_batch::RecordBatch,
         target_schema: &Option<arrow::datatypes::SchemaRef>,
     ) -> arrow::record_batch::RecordBatch {
-        let Some(target) = target_schema else { return batch };
+        let Some(target) = target_schema else {
+            return batch;
+        };
         if batch.schema() == *target {
             return batch;
         }
@@ -337,11 +337,13 @@ impl SqlApi {
             if let Ok(idx) = batch.schema().index_of(field.name()) {
                 columns.push(batch.column(idx).clone());
             } else {
-                columns.push(arrow::array::new_null_array(field.data_type(), batch.num_rows()));
+                columns.push(arrow::array::new_null_array(
+                    field.data_type(),
+                    batch.num_rows(),
+                ));
             }
         }
-        arrow::record_batch::RecordBatch::try_new(target.clone(), columns)
-            .unwrap_or(batch)
+        arrow::record_batch::RecordBatch::try_new(target.clone(), columns).unwrap_or(batch)
     }
 
     fn collect_parquet_files_recursive(
@@ -409,7 +411,7 @@ impl SqlApi {
                         if let Err(e) = ctx.register_table(&registered_name, Arc::new(provider)) {
                             tracing::debug!("register iceberg table {}: {}", table_name, e);
                         }
-                    }
+                    },
                     Err(e) => tracing::debug!("create iceberg provider for {}: {}", table_name, e),
                 }
             }
@@ -490,7 +492,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::Float32 => {
                 if let Some(arr) = col.as_any().downcast_ref::<Float32Array>() {
                     if arr.is_null(row_idx) {
@@ -506,7 +508,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::Int64 => {
                 if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
                     if arr.is_null(row_idx) {
@@ -517,7 +519,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::Int32 => {
                 if let Some(arr) = col.as_any().downcast_ref::<Int32Array>() {
                     if arr.is_null(row_idx) {
@@ -528,7 +530,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::UInt64 => {
                 if let Some(arr) = col.as_any().downcast_ref::<UInt64Array>() {
                     if arr.is_null(row_idx) {
@@ -539,7 +541,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::Utf8 => {
                 if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
                     if arr.is_null(row_idx) {
@@ -550,7 +552,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::Boolean => {
                 if let Some(arr) = col.as_any().downcast_ref::<BooleanArray>() {
                     if arr.is_null(row_idx) {
@@ -561,7 +563,7 @@ impl SqlApi {
                 } else {
                     serde_json::Value::Null
                 }
-            }
+            },
             DataType::Timestamp(unit, _) => {
                 let ts_val =
                     match unit {
@@ -578,7 +580,7 @@ impl SqlApi {
                             } else {
                                 return serde_json::Value::Null;
                             }
-                        }
+                        },
                         arrow::datatypes::TimeUnit::Millisecond => {
                             if let Some(arr) =
                                 col.as_any().downcast_ref::<arrow::array::PrimitiveArray<
@@ -592,7 +594,7 @@ impl SqlApi {
                             } else {
                                 return serde_json::Value::Null;
                             }
-                        }
+                        },
                         arrow::datatypes::TimeUnit::Second => {
                             if let Some(arr) =
                                 col.as_any().downcast_ref::<arrow::array::PrimitiveArray<
@@ -606,7 +608,7 @@ impl SqlApi {
                             } else {
                                 return serde_json::Value::Null;
                             }
-                        }
+                        },
                         arrow::datatypes::TimeUnit::Nanosecond => {
                             if let Some(arr) =
                                 col.as_any().downcast_ref::<arrow::array::PrimitiveArray<
@@ -620,7 +622,7 @@ impl SqlApi {
                             } else {
                                 return serde_json::Value::Null;
                             }
-                        }
+                        },
                     };
                 let secs = ts_val / 1_000_000;
                 let dt =
@@ -628,7 +630,7 @@ impl SqlApi {
                         .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
                         .unwrap_or_else(|| ts_val.to_string());
                 serde_json::json!(dt)
-            }
+            },
             _ => serde_json::Value::Null,
         }
     }

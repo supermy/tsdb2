@@ -42,7 +42,7 @@ macro_rules! assert_datapoints_eq {
                                 a,
                                 b
                             );
-                        }
+                        },
                         _ => assert_eq!(v, av, "field '{}' mismatch at index {}", k, i),
                     }
                 } else {

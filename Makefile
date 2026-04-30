@@ -589,168 +589,32 @@ uninstall:
 # Database Info (curl API)
 # ============================================================
 
-db-info: db-info-rocksdb db-info-parquet db-info-lifecycle
-	@echo ""
-	@echo "✅ 数据库信息查询完成"
+db-info: db-info-rocksdb db-info-lifecycle db-info-schema
+
 
 db-info-rocksdb:
 	@echo "╔════════════════════════════════════════════════════════════╗"
 	@echo "║              RocksDB 数据结构与数据量                      ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
-	@echo ""
-	@echo "── 总体统计 ──"
-	@curl -sf http://localhost:$(HTTP_PORT)/api/rocksdb/stats 2>/dev/null | python3 -c "\
-import sys, json; \
-d = json.load(sys.stdin).get('data', {}); \
-print(f'  CF 总数:        {d.get(\"total_cf_count\", 0)}'); \
-print(f'  时序 CF 数:     {d.get(\"ts_cf_count\", 0)}'); \
-print(f'  指标名称:       {\", \".join(d.get(\"measurements\", [])) or \"(无)\"}'); \
-print(f'  SST 总大小:     {d.get(\"total_sst_size_bytes\", 0):,} bytes'); \
-print(f'  MemTable 大小:  {d.get(\"total_memtable_bytes\", 0):,} bytes'); \
-print(f'  Block Cache:    {d.get(\"total_block_cache_bytes\", 0):,} bytes'); \
-print(f'  总键数:         {d.get(\"total_keys\", 0):,}'); \
-print(f'  L0 文件数:      {d.get(\"l0_file_count\", 0)}'); \
-print(f'  待压缩:         {\"是\" if d.get(\"compaction_pending\") else \"否\"}')" 2>/dev/null || echo "  ❌ 无法连接服务器，请先执行 'make start'"
-	@echo ""
-	@echo "── Column Family 列表 ──"
-	@curl -sf http://localhost:$(HTTP_PORT)/api/rocksdb/cf-list 2>/dev/null | python3 -c "\
-import sys, json; \
-d = json.load(sys.stdin).get('data', {}); \
-cfs = d.get('column_families', d if isinstance(d, list) else []); \
-if isinstance(cfs, list): \
-    for cf in cfs: \
-        if isinstance(cf, str): print(f'  - {cf}'); \
-        elif isinstance(cf, dict): print(f'  - {cf.get(\"name\", cf)}  keys={cf.get(\"num_keys\",\"?\")}  size={cf.get(\"sst_size\",\"?\")}'); \
-else: print(f'  {cfs}')" 2>/dev/null || echo "  ❌ 无法获取 CF 列表"
-	@echo ""
-	@echo "── 各 CF 详细信息 ──"
-	@curl -sf http://localhost:$(HTTP_PORT)/api/rocksdb/cf-list 2>/dev/null | python3 -c "\
-import sys, json, subprocess; \
-d = json.load(sys.stdin).get('data', {}); \
-cfs = d.get('column_families', d if isinstance(d, list) else []); \
-names = [cf if isinstance(cf, str) else cf.get('name','') for cf in (cfs if isinstance(cfs, list) else [])]; \
-ts_names = [n for n in names if n.startswith('ts_')]; \
-for n in ts_names[:10]: \
-    try: \
-        r = subprocess.run(['curl', '-sf', f'http://localhost:$(HTTP_PORT)/api/rocksdb/cf-detail/{n}'], capture_output=True, text=True, timeout=5); \
-        detail = json.loads(r.stdout).get('data', {}); \
-        print(f'  {n}:'); \
-        print(f'    键数: {detail.get(\"estimate_num_keys\", 0):,}  SST大小: {detail.get(\"total_sst_file_size\", 0):,} bytes'); \
-        levels = detail.get('num_files_at_level', []); \
-        print(f'    层级文件数: {levels}'); \
-    except: pass" 2>/dev/null || true
+	@python3 scripts/db-info.py http://localhost:$(HTTP_PORT) rocksdb
 
 db-info-parquet:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║              Parquet 数据结构与数据量                      ║"
+	@echo "║              Parquet 数据文件概览                          ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
-	@echo ""
-	@echo "── Parquet 文件列表 ──"
-	@curl -sf http://localhost:$(HTTP_PORT)/api/parquet/list 2>/dev/null | python3 -c "\
-import sys, json; \
-d = json.load(sys.stdin).get('data', []); \
-if not d: print('  (无 Parquet 文件)'); \
-else: \
-    warm = [f for f in d if f.get('tier') == 'warm']; \
-    cold = [f for f in d if f.get('tier') == 'cold']; \
-    other = [f for f in d if f.get('tier') not in ('warm', 'cold')]; \
-    print(f'  总文件数: {len(d)}  (温数据: {len(warm)}, 冷数据: {len(cold)}, 其他: {len(other)})'); \
-    total_size = sum(f.get('file_size', 0) for f in d); \
-    total_rows = sum(f.get('num_rows', 0) for f in d); \
-    print(f'  总大小: {total_size:,} bytes ({total_size/1024/1024:.2f} MB)'); \
-    print(f'  总行数: {total_rows:,}'); \
-    print(''); \
-    print('  ── 温数据文件 (SNAPPY压缩) ──'); \
-    for f in warm[:5]: \
-        print(f'    {f.get(\"path\",\"?\")}  rows={f.get(\"num_rows\",0):,}  size={f.get(\"file_size\",0):,}B  measurement={f.get(\"measurement\",\"?\")}'); \
-    if len(warm) > 5: print(f'    ... 还有 {len(warm)-5} 个温数据文件'); \
-    print('  ── 冷数据文件 (ZSTD压缩) ──'); \
-    for f in cold[:5]: \
-        print(f'    {f.get(\"path\",\"?\")}  rows={f.get(\"num_rows\",0):,}  size={f.get(\"file_size\",0):,}B  measurement={f.get(\"measurement\",\"?\")}'); \
-    if len(cold) > 5: print(f'    ... 还有 {len(cold)-5} 个冷数据文件'); \
-    if other: \
-        print('  ── 其他文件 ──'); \
-        for f in other[:3]: \
-            print(f'    {f.get(\"path\",\"?\")}  rows={f.get(\"num_rows\",0):,}  size={f.get(\"file_size\",0):,}B  tier={f.get(\"tier\",\"?\")}')" 2>/dev/null || echo "  ❌ 无法连接服务器，请先执行 'make start'"
-	@echo ""
-	@echo "── Parquet 文件列结构 ──"
-	@curl -sf http://localhost:$(HTTP_PORT)/api/parquet/list 2>/dev/null | python3 -c "\
-import sys, json, subprocess; \
-d = json.load(sys.stdin).get('data', []); \
-for f in d[:3]: \
-    path = f.get('path',''); \
-    cols = f.get('columns', []); \
-    if cols: \
-        print(f'  {path}:'); \
-        for c in cols[:8]: \
-            print(f'    {c.get(\"name\",\"?\"):20s} {c.get(\"data_type\",\"?\"):15s} compressed={c.get(\"compressed_size\",0):,}B  uncompressed={c.get(\"uncompressed_size\",0):,}B'); \
-        if len(cols) > 8: print(f'    ... 还有 {len(cols)-8} 列'); \
-        print(''); \
-    else: \
-        try: \
-            r = subprocess.run(['curl', '-sf', f'http://localhost:$(HTTP_PORT)/api/parquet/file-detail?path={path}'], capture_output=True, text=True, timeout=5); \
-            detail = json.loads(r.stdout).get('data', {}); \
-            dcols = detail.get('columns', []); \
-            print(f'  {path}:'); \
-            for c in dcols[:8]: \
-                print(f'    {c.get(\"name\",\"?\"):20s} {c.get(\"data_type\",\"?\"):15s} compressed={c.get(\"compressed_size\",0):,}B  uncompressed={c.get(\"uncompressed_size\",0):,}B'); \
-            if len(dcols) > 8: print(f'    ... 还有 {len(dcols)-8} 列'); \
-            print(''); \
-        except: pass" 2>/dev/null || true
+	@python3 scripts/db-info.py http://localhost:$(HTTP_PORT) parquet
 
 db-info-lifecycle:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║              数据生命周期分布                              ║"
+	@echo "║              数据生命周期状态                              ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
-	@echo ""
-	@curl -sf http://localhost:$(HTTP_PORT)/api/lifecycle/status 2>/dev/null | python3 -c "\
-import sys, json; \
-d = json.load(sys.stdin).get('data', {}); \
-hot = d.get('hot_cfs', []); \
-warm = d.get('warm_cfs', []); \
-cold = d.get('cold_cfs', []); \
-print(f'── 热数据 (RocksDB) ──'); \
-print(f'  CF 数量: {len(hot)}  总大小: {d.get(\"total_hot_bytes\",0):,} bytes ({d.get(\"total_hot_bytes\",0)/1024/1024:.2f} MB)'); \
-total_hot_keys = sum(cf.get('num_keys',0) for cf in hot); \
-print(f'  总键数: {total_hot_keys:,}'); \
-for cf in hot[:8]: \
-    print(f'    {cf.get(\"cf_name\",\"?\"):40s} keys={cf.get(\"num_keys\",0):,}  size={cf.get(\"sst_size\",0):,}B  age={cf.get(\"age_days\",0)}天  可降级={cf.get(\"demote_eligible\",\"none\")}'); \
-if len(hot) > 8: print(f'    ... 还有 {len(hot)-8} 个热数据 CF'); \
-print(''); \
-print(f'── 温数据 (Parquet SNAPPY) ──'); \
-print(f'  分区数量: {len(warm)}  总大小: {d.get(\"total_warm_bytes\",0):,} bytes ({d.get(\"total_warm_bytes\",0)/1024/1024:.2f} MB)'); \
-for cf in warm[:5]: \
-    print(f'    {cf.get(\"cf_name\",\"?\"):40s} keys={cf.get(\"num_keys\",0):,}  size={cf.get(\"sst_size\",0):,}B'); \
-if len(warm) > 5: print(f'    ... 还有 {len(warm)-5} 个温数据分区'); \
-print(''); \
-print(f'── 冷数据 (Parquet ZSTD) ──'); \
-print(f'  分区数量: {len(cold)}  总大小: {d.get(\"total_cold_bytes\",0):,} bytes ({d.get(\"total_cold_bytes\",0)/1024/1024:.2f} MB)'); \
-for cf in cold[:5]: \
-    print(f'    {cf.get(\"cf_name\",\"?\"):40s} keys={cf.get(\"num_keys\",0):,}  size={cf.get(\"sst_size\",0):,}B'); \
-if len(cold) > 5: print(f'    ... 还有 {len(cold)-5} 个冷数据分区')" 2>/dev/null || echo "  ❌ 无法连接服务器，请先执行 'make start'"
+	@python3 scripts/db-info.py http://localhost:$(HTTP_PORT) lifecycle
 
 db-info-schema:
 	@echo "╔════════════════════════════════════════════════════════════╗"
-	@echo "║              指标与维度 Schema 信息                        ║"
+	@echo "║              Schema 信息                                  ║"
 	@echo "╚════════════════════════════════════════════════════════════╝"
-	@echo ""
-	@curl -sf http://localhost:$(HTTP_PORT)/api/rocksdb/series-schema 2>/dev/null | python3 -c "\
-import sys, json; \
-d = json.load(sys.stdin).get('data', {}); \
-measurements = d.get('measurements', []); \
-if not measurements: print('  (无 Schema 数据)'); \
-else: \
-    for m in measurements: \
-        print(f'  指标: {m.get(\"name\",\"?\")}'); \
-        print(f'    CF: {\", \".join(m.get(\"column_families\", []))}'); \
-        print(f'    Tag Keys: {\", \".join(m.get(\"tag_keys\", []))}'); \
-        print(f'    Fields: {\", \".join(m.get(\"field_names\", []))}'); \
-        series = m.get('series', []); \
-        print(f'    Series 数量: {len(series)}'); \
-        for s in series[:3]: \
-            print(f'      tags={s.get(\"tags\",{})}  fields={s.get(\"fields\",[])}'); \
-        if len(series) > 3: print(f'      ... 还有 {len(series)-3} 个 series'); \
-        print('')" 2>/dev/null || echo "  ❌ 无法连接服务器，请先执行 'make start'"
+	@python3 scripts/db-info.py http://localhost:$(HTTP_PORT) schema
 
 # ============================================================
 # Help

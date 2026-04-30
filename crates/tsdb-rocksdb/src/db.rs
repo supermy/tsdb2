@@ -340,7 +340,7 @@ impl TsdbRocksDb {
                     fields,
                     timestamp,
                 }))
-            }
+            },
             None => Ok(None),
         }
     }
@@ -420,9 +420,9 @@ impl TsdbRocksDb {
                                 timestamp: *timestamp,
                             });
                         }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {}
+                    },
+                    Ok(None) => {},
+                    Err(_) => {},
                 }
             }
         }
@@ -482,7 +482,7 @@ impl TsdbRocksDb {
                                 tsdb_arrow::schema::Tags::new()
                             };
                             e.insert(resolved).clone()
-                        }
+                        },
                     };
 
                     results.push(tsdb_arrow::schema::DataPoint {
@@ -613,7 +613,7 @@ impl TsdbRocksDb {
                                 tsdb_arrow::schema::Tags::new()
                             };
                             e.insert(resolved).clone()
-                        }
+                        },
                     };
 
                     results.push(tsdb_arrow::schema::DataPoint {
@@ -729,13 +729,13 @@ impl TsdbRocksDb {
             .db
             .create_cf(cf_name, &Self::data_cf_options(&block_opts, &self.config))
         {
-            Ok(_) => {}
+            Ok(_) => {},
             Err(e) => {
                 if let Some(cf) = self.db.cf_handle(cf_name) {
                     return Ok(cf);
                 }
                 return Err(e.into());
-            }
+            },
         }
         self.db.cf_handle(cf_name).ok_or_else(|| {
             crate::error::TsdbRocksDbError::Io(std::io::Error::other(format!(
@@ -875,9 +875,9 @@ impl tsdb_arrow::StorageEngine for TsdbRocksDb {
                             Ok(dps) if !dps.is_empty() => dps,
                             _ => return None,
                         }
-                    }
+                    },
                 }
-            }
+            },
         };
         Some(tsdb_arrow::schema::compact_tsdb_schema_from_datapoints(
             &datapoints,
@@ -1479,14 +1479,14 @@ mod tests {
                     );
                     assert_eq!(dp.timestamp, single.as_ref().unwrap().timestamp);
                     assert_eq!(dp.fields, single.as_ref().unwrap().fields);
-                }
+                },
                 None => {
                     assert!(
                         single.is_none(),
                         "get found but multi_get didn't at index {}",
                         i
                     );
-                }
+                },
             }
         }
     }

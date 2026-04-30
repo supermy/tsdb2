@@ -57,17 +57,21 @@ impl AdminServer {
         let data_dir_path = base_dir.as_ref().to_path_buf();
         let config_mgr = ConfigManager::new(&data_dir_path);
         let metrics = MetricsCollector::new(engine.clone());
-        let parquet_api = ParquetApi::new(engine.clone(), parquet_dir.as_ref().to_path_buf(), data_dir_path.clone());
+        let parquet_api = ParquetApi::new(
+            engine.clone(),
+            parquet_dir.as_ref().to_path_buf(),
+            data_dir_path.clone(),
+        );
         let iceberg_catalog = match iceberg_dir {
             Some(ref dir) => match tsdb_iceberg::IcebergCatalog::open(dir) {
                 Ok(catalog) => {
                     tracing::info!("iceberg catalog opened at {}", dir.display());
                     Some(Arc::new(catalog))
-                }
+                },
                 Err(e) => {
                     tracing::warn!("iceberg init failed: {}", e);
                     None
-                }
+                },
             },
             None => None,
         };
@@ -77,7 +81,7 @@ impl AdminServer {
                 Err(e) => {
                     tracing::warn!("iceberg api init failed: {}", e);
                     None
-                }
+                },
             },
             None => None,
         };
@@ -86,7 +90,11 @@ impl AdminServer {
             parquet_dir.as_ref().to_path_buf(),
             iceberg_catalog.clone(),
         );
-        let lifecycle_api = LifecycleApi::new(engine.clone(), parquet_dir.as_ref().to_path_buf(), data_dir_path.clone());
+        let lifecycle_api = LifecycleApi::new(
+            engine.clone(),
+            parquet_dir.as_ref().to_path_buf(),
+            data_dir_path.clone(),
+        );
         let (shutdown, _) = tokio::sync::watch::channel(false);
 
         Self {
@@ -154,7 +162,13 @@ impl BoundAdminServer {
         let service_mgr = self.inner.service_mgr.clone();
         let mut shutdown_rx = self.inner.shutdown.subscribe();
 
-        let engine_type = if self.inner.engine.as_any().downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>().is_some() {
+        let engine_type = if self
+            .inner
+            .engine
+            .as_any()
+            .downcast_ref::<tsdb_storage_arrow::ArrowStorageEngine>()
+            .is_some()
+        {
             "arrow"
         } else {
             "rocksdb"
@@ -253,7 +267,7 @@ impl BoundAdminServer {
                             Ok(req) => {
                                 let rt = tokio::runtime::Handle::current();
                                 rt.block_on(async { handle(req).await })
-                            }
+                            },
                             Err(e) => AdminResponse::err(format!("invalid request: {}", e)),
                         };
                         let reply_json = serde_json::to_string(&response).unwrap_or_else(|e| {
@@ -264,11 +278,11 @@ impl BoundAdminServer {
                         if let Err(e) = server_clone.send(reply) {
                             tracing::warn!("send reply error: {:?}", e);
                         }
-                    }
+                    },
                     Err(e) => {
                         tracing::warn!("recv error: {:?}", e);
                         std::thread::sleep(std::time::Duration::from_millis(100));
-                    }
+                    },
                 }
             }
         });
@@ -314,7 +328,7 @@ impl AdminServer {
                     AdminRequest::ServiceList => {
                         let list = service_mgr.list_services().await;
                         AdminResponse::ok(serde_json::to_value(&list).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::ServiceCreate {
                         name,
                         port,
@@ -328,87 +342,87 @@ impl AdminServer {
                     {
                         Ok(info) => {
                             AdminResponse::ok(serde_json::to_value(&info).unwrap_or_default())
-                        }
+                        },
                         Err(e) => AdminResponse::err(e.to_string()),
                     },
                     AdminRequest::ServiceStart { name } => {
                         match service_mgr.start_service(&name).await {
                             Ok(info) => {
                                 AdminResponse::ok(serde_json::to_value(&info).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ServiceStop { name } => {
                         match service_mgr.stop_service(&name).await {
                             Ok(info) => {
                                 AdminResponse::ok(serde_json::to_value(&info).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ServiceRestart { name } => {
                         match service_mgr.restart_service(&name).await {
                             Ok(info) => {
                                 AdminResponse::ok(serde_json::to_value(&info).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ServiceStatus { name } => {
                         match service_mgr.get_service(&name).await {
                             Ok(info) => {
                                 AdminResponse::ok(serde_json::to_value(&info).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ServiceDelete { name } => {
                         match service_mgr.delete_service(&name).await {
                             Ok(()) => AdminResponse::ok(serde_json::json!({"deleted": name})),
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ServiceLogs { name, lines } => {
                         let log_lines = lines.unwrap_or(100);
                         match service_mgr.get_service_logs(&name, log_lines).await {
                             Ok(logs) => {
                                 AdminResponse::ok(serde_json::to_value(&logs).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
 
                     AdminRequest::ConfigListProfiles => {
                         let mgr = config_mgr.read().await;
                         let profiles = mgr.list_profiles();
                         AdminResponse::ok(serde_json::to_value(&profiles).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::ConfigGetProfile { name } => {
                         let mgr = config_mgr.read().await;
                         match mgr.get_profile(&name) {
                             Ok(p) => {
                                 AdminResponse::ok(serde_json::to_value(&p).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ConfigSaveProfile { name, content } => {
                         let mut mgr = config_mgr.write().await;
                         match mgr.save_profile(&name, &content) {
                             Ok(p) => {
                                 AdminResponse::ok(serde_json::to_value(&p).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ConfigDeleteProfile { name } => {
                         let mut mgr = config_mgr.write().await;
                         match mgr.delete_profile(&name) {
                             Ok(_) => AdminResponse::ok(serde_json::json!({"deleted": name})),
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ConfigApply { service, profile } => {
                         let mgr = config_mgr.read().await;
                         match mgr.get_profile(&profile) {
@@ -423,10 +437,10 @@ impl AdminServer {
                                     })),
                                     Err(e) => AdminResponse::err(e.to_string()),
                                 }
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::ConfigCompare {
                         profile_a,
                         profile_b,
@@ -435,20 +449,21 @@ impl AdminServer {
                         match mgr.compare(&profile_a, &profile_b) {
                             Ok(diffs) => {
                                 AdminResponse::ok(serde_json::to_value(&diffs).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
 
                     AdminRequest::TestSql { service: _, sql } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
+                        let runner =
+                            TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner.run_sql(&sql).await {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::TestWriteBench {
                         service: _,
                         measurement,
@@ -456,37 +471,40 @@ impl AdminServer {
                         workers,
                         batch_size,
                     } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
+                        let runner =
+                            TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner
                             .run_write_bench(&measurement, total_points, workers, batch_size)
                             .await
                         {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::TestReadBench {
                         service: _,
                         measurement,
                         queries,
                         workers,
                     } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
+                        let runner =
+                            TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner.run_read_bench(&measurement, queries, workers).await {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::TestGenerateBusinessData {
                         scenario,
                         points_per_series,
                         skip_auto_demote,
                     } => {
-                        let runner = TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
+                        let runner =
+                            TestRunner::new(engine.clone(), parquet_dir.clone(), data_dir.clone());
                         match runner
                             .generate_business_data(&scenario, points_per_series, skip_auto_demote)
                             .await
@@ -494,12 +512,12 @@ impl AdminServer {
                             Ok(result) => AdminResponse::ok(result),
                             Err(e) => AdminResponse::err(e.to_string()),
                         }
-                    }
+                    },
                     AdminRequest::IcebergListTables => match iceberg_api.as_ref() {
                         Some(api) => match api.list_tables() {
                             Ok(tables) => {
                                 AdminResponse::ok(serde_json::to_value(&tables).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         },
                         None => AdminResponse::err("iceberg not enabled"),
@@ -515,13 +533,13 @@ impl AdminServer {
                                     Ok(s) => s,
                                     Err(e) => {
                                         return AdminResponse::err(format!("invalid schema: {}", e))
-                                    }
+                                    },
                                 };
                             match api.create_table(&name, &schema_def, &partition_type) {
                                 Ok(msg) => AdminResponse::ok(serde_json::json!({"message": msg})),
                                 Err(e) => AdminResponse::err(e),
                             }
-                        }
+                        },
                         None => AdminResponse::err("iceberg not enabled"),
                     },
                     AdminRequest::IcebergDropTable { name } => match iceberg_api.as_ref() {
@@ -535,7 +553,7 @@ impl AdminServer {
                         Some(api) => match api.table_detail(&name) {
                             Ok(detail) => {
                                 AdminResponse::ok(serde_json::to_value(&detail).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         },
                         None => AdminResponse::err("iceberg not enabled"),
@@ -548,12 +566,12 @@ impl AdminServer {
                             },
                             None => AdminResponse::err("iceberg not enabled"),
                         }
-                    }
+                    },
                     AdminRequest::IcebergScan { table, limit } => match iceberg_api.as_ref() {
                         Some(api) => match api.scan_table(&table, limit) {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         },
                         None => AdminResponse::err("iceberg not enabled"),
@@ -562,7 +580,7 @@ impl AdminServer {
                         Some(api) => match api.snapshots(&table) {
                             Ok(snaps) => {
                                 AdminResponse::ok(serde_json::to_value(&snaps).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         },
                         None => AdminResponse::err("iceberg not enabled"),
@@ -575,7 +593,7 @@ impl AdminServer {
                             },
                             None => AdminResponse::err("iceberg not enabled"),
                         }
-                    }
+                    },
                     AdminRequest::IcebergCompact { table } => match iceberg_api.as_ref() {
                         Some(api) => match api.compact(&table) {
                             Ok(msg) => AdminResponse::ok(serde_json::json!({"message": msg})),
@@ -591,7 +609,7 @@ impl AdminServer {
                             },
                             None => AdminResponse::err("iceberg not enabled"),
                         }
-                    }
+                    },
                     AdminRequest::IcebergUpdateSchema { table, changes } => {
                         match iceberg_api.as_ref() {
                             Some(api) => {
@@ -605,25 +623,25 @@ impl AdminServer {
                                     match api.update_schema(&table, schema_changes) {
                                         Ok(msg) => {
                                             AdminResponse::ok(serde_json::json!({"message": msg}))
-                                        }
+                                        },
                                         Err(e) => AdminResponse::err(e),
                                     }
                                 }
-                            }
+                            },
                             None => AdminResponse::err("iceberg not enabled"),
                         }
-                    }
+                    },
 
                     AdminRequest::MetricsHealth { service } => {
                         let mgr = metrics.read().await;
                         let health = mgr.health(&service);
                         AdminResponse::ok(serde_json::to_value(&health).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::MetricsStats { service: _ } => {
                         let mgr = metrics.read().await;
                         let stats = mgr.stats();
                         AdminResponse::ok(serde_json::to_value(&stats).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::MetricsTimeseries {
                         service: _,
                         metric,
@@ -632,19 +650,19 @@ impl AdminServer {
                         let mgr = metrics.read().await;
                         let ts = mgr.timeseries(&metric, range_secs);
                         AdminResponse::ok(serde_json::to_value(&ts).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::MetricsAlerts { service } => {
                         let mgr = metrics.read().await;
                         let health = mgr.health(&service);
                         let alerts = mgr.alerts(&health);
                         AdminResponse::ok(serde_json::to_value(&alerts).unwrap_or_default())
-                    }
+                    },
 
                     AdminRequest::CollectorStatus => {
                         let mgr = metrics.read().await;
                         let status = mgr.collector_status();
                         AdminResponse::ok(serde_json::to_value(&status).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::CollectorConfigure {
                         interval_secs,
                         enabled,
@@ -653,48 +671,48 @@ impl AdminServer {
                         mgr.configure_collector(interval_secs, enabled);
                         let status = mgr.collector_status();
                         AdminResponse::ok(serde_json::to_value(&status).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::CollectorStart => {
                         let mgr = metrics.read().await;
                         mgr.start_collector();
                         let status = mgr.collector_status();
                         AdminResponse::ok(serde_json::to_value(&status).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::CollectorStop => {
                         let mgr = metrics.read().await;
                         mgr.stop_collector();
                         let status = mgr.collector_status();
                         AdminResponse::ok(serde_json::to_value(&status).unwrap_or_default())
-                    }
+                    },
 
                     AdminRequest::RocksdbStats => {
                         let mgr = metrics.read().await;
                         let overview = mgr.rocksdb_overview();
                         AdminResponse::ok(serde_json::to_value(&overview).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::RocksdbCfList => {
                         let mgr = metrics.read().await;
                         let cfs = mgr.rocksdb_cf_list();
                         AdminResponse::ok(serde_json::to_value(&cfs).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::RocksdbCfDetail { name } => {
                         let mgr = metrics.read().await;
                         match mgr.rocksdb_cf_detail(&name) {
                             Some(detail) => {
                                 AdminResponse::ok(serde_json::to_value(&detail).unwrap_or_default())
-                            }
+                            },
                             None => AdminResponse::err(format!("CF '{}' not found", name)),
                         }
-                    }
+                    },
                     AdminRequest::RocksdbCompact { cf } => {
                         let mgr = metrics.read().await;
                         match mgr.rocksdb_compact(cf.as_deref()) {
                             Ok(()) => {
                                 AdminResponse::ok(serde_json::json!({"compacted": true, "cf": cf}))
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                     AdminRequest::RocksdbKvScan {
                         cf,
                         prefix,
@@ -710,41 +728,41 @@ impl AdminServer {
                         ) {
                             Ok(result) => {
                                 AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                     AdminRequest::RocksdbKvGet { cf, key } => {
                         let mgr = metrics.read().await;
                         match mgr.rocksdb_kv_get(&cf, &key) {
                             Ok(entry) => {
                                 AdminResponse::ok(serde_json::to_value(&entry).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                     AdminRequest::RocksdbSeriesSchema => {
                         let mgr = metrics.read().await;
                         match mgr.rocksdb_series_schema() {
                             Ok(schema) => {
                                 AdminResponse::ok(serde_json::to_value(&schema).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
 
                     AdminRequest::ParquetList => {
                         let files = parquet_api.list_parquet_files();
                         AdminResponse::ok(serde_json::to_value(&files).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::ParquetFileDetail { path } => {
                         match parquet_api.file_detail(&path) {
                             Ok(info) => {
                                 AdminResponse::ok(serde_json::to_value(&info).unwrap_or_default())
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                     AdminRequest::ParquetPreview { path, limit } => {
                         match parquet_api.preview(&path, limit.unwrap_or(50)) {
                             Ok(preview) => AdminResponse::ok(
@@ -752,49 +770,49 @@ impl AdminServer {
                             ),
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
 
                     AdminRequest::SqlExecute { sql } => match sql_api.execute(&sql).await {
                         Ok(result) => {
                             AdminResponse::ok(serde_json::to_value(&result).unwrap_or_default())
-                        }
+                        },
                         Err(e) => AdminResponse::err(e),
                     },
                     AdminRequest::SqlTables => match sql_api.tables().await {
                         Ok(tables) => {
                             AdminResponse::ok(serde_json::to_value(&tables).unwrap_or_default())
-                        }
+                        },
                         Err(e) => AdminResponse::err(e),
                     },
 
                     AdminRequest::LifecycleStatus => {
                         let status = lifecycle_api.status();
                         AdminResponse::ok(serde_json::to_value(&status).unwrap_or_default())
-                    }
+                    },
                     AdminRequest::LifecycleArchive { older_than_days } => {
                         match lifecycle_api.archive(older_than_days) {
                             Ok(archived) => {
                                 AdminResponse::ok(serde_json::json!({"archived": archived}))
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                     AdminRequest::LifecycleDemoteToWarm { cf_names } => {
                         match lifecycle_api.demote_to_warm(&cf_names) {
                             Ok(demoted) => {
                                 AdminResponse::ok(serde_json::json!({"demoted": demoted}))
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                     AdminRequest::LifecycleDemoteToCold { cf_names } => {
                         match lifecycle_api.demote_to_cold(&cf_names) {
                             Ok(demoted) => {
                                 AdminResponse::ok(serde_json::json!({"demoted": demoted}))
-                            }
+                            },
                             Err(e) => AdminResponse::err(e),
                         }
-                    }
+                    },
                 }
             })
         })

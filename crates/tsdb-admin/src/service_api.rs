@@ -55,7 +55,7 @@ impl ServiceManager {
                         }
                         tracing::info!("loaded {} persisted services", services.len());
                     }
-                }
+                },
                 Err(e) => tracing::warn!("parse persisted services: {}", e),
             },
             Err(e) => tracing::debug!("read persisted services: {}", e),
@@ -82,7 +82,9 @@ impl ServiceManager {
                     }
                     let _ = std::fs::remove_file(&tmp_path);
                 }
-                tracing::error!("persist services: atomic write failed, refusing non-atomic fallback");
+                tracing::error!(
+                    "persist services: atomic write failed, refusing non-atomic fallback"
+                );
             }
         } else {
             tracing::warn!("persist services: could not acquire read lock");
@@ -122,7 +124,9 @@ impl ServiceManager {
     pub async fn list_services(&self) -> Vec<ServiceInfo> {
         {
             let services = self.services.read().await;
-            let needs_refresh = services.values().any(|s| s.status == ServiceStatus::Running);
+            let needs_refresh = services
+                .values()
+                .any(|s| s.status == ServiceStatus::Running);
             if !needs_refresh {
                 return services.values().cloned().collect();
             }
@@ -373,14 +377,14 @@ impl ServiceManager {
                     }
                     dead_names.push(name.clone());
                     let _ = status;
-                }
-                Ok(None) => {}
+                },
+                Ok(None) => {},
                 Err(_) => {
                     if let Some(info) = services.get_mut(name) {
                         info.status = ServiceStatus::Error;
                     }
                     dead_names.push(name.clone());
-                }
+                },
             }
         }
 
@@ -391,9 +395,9 @@ impl ServiceManager {
 
     async fn kill_child(child: &mut std::process::Child) {
         match child.try_wait() {
-            Ok(Some(_)) => {}
+            Ok(Some(_)) => {},
             Err(_) => return,
-            Ok(None) => {}
+            Ok(None) => {},
         }
 
         unsafe {
@@ -401,12 +405,12 @@ impl ServiceManager {
         }
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         match child.try_wait() {
-            Ok(Some(_)) => {}
+            Ok(Some(_)) => {},
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-            }
-            Err(_) => {}
+            },
+            Err(_) => {},
         }
     }
 

@@ -13,7 +13,8 @@ fn bench_write_batch(c: &mut Criterion) {
             b.iter(|| {
                 let dir = tempfile::tempdir().unwrap();
                 let pm = PartitionManager::new(dir.path(), PartitionConfig::default()).unwrap();
-                let mut writer = TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
+                let mut writer =
+                    TsdbParquetWriter::new(Arc::new(pm), WriteBufferConfig::default(), "cpu");
                 writer.write_batch(black_box(&dps)).unwrap();
                 writer.flush_all().unwrap();
             });

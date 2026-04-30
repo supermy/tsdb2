@@ -4,9 +4,7 @@ use crate::error::Result;
 
 impl PartitionSpec {
     pub fn field_index(&self, source_id: i32) -> Option<usize> {
-        self.fields
-            .iter()
-            .position(|f| f.source_id == source_id)
+        self.fields.iter().position(|f| f.source_id == source_id)
     }
 }
 
@@ -58,7 +56,7 @@ impl Transform {
                         .as_str()
                         .map(|s| serde_json::Value::String(s.to_string()))
                 }
-            }
+            },
             Transform::Hour => {
                 if let Some(ts) = value.as_i64() {
                     let secs = ts / 1_000_000;
@@ -67,7 +65,7 @@ impl Transform {
                 } else {
                     None
                 }
-            }
+            },
             Transform::Month => {
                 if let Some(ts) = value.as_i64() {
                     let secs = ts / 1_000_000;
@@ -76,7 +74,7 @@ impl Transform {
                 } else {
                     None
                 }
-            }
+            },
             Transform::Year => {
                 if let Some(ts) = value.as_i64() {
                     let secs = ts / 1_000_000;
@@ -85,7 +83,7 @@ impl Transform {
                 } else {
                     None
                 }
-            }
+            },
             Transform::Bucket { n } => {
                 if *n == 0 {
                     None
@@ -98,7 +96,7 @@ impl Transform {
                 } else {
                     None
                 }
-            }
+            },
             Transform::Truncate { w } => {
                 if let Some(s) = value.as_str() {
                     let truncated: String = s.chars().take(*w as usize).collect();
@@ -106,7 +104,7 @@ impl Transform {
                 } else {
                     None
                 }
-            }
+            },
             Transform::Void => None,
         }
     }
@@ -171,15 +169,15 @@ impl PartitionSpec {
                         name,
                         transform,
                     });
-                }
+                },
                 PartitionSpecChange::RemoveField { field_id } => {
                     new_fields.retain(|f| f.field_id != field_id);
-                }
+                },
                 PartitionSpecChange::RenameField { field_id, new_name } => {
                     if let Some(f) = new_fields.iter_mut().find(|f| f.field_id == field_id) {
                         f.name = new_name;
                     }
-                }
+                },
             }
         }
         PartitionSpec {

@@ -157,12 +157,12 @@ fn open_engine(
             let config = load_rocksdb_config(config_name)?;
             let db = tsdb_rocksdb::TsdbRocksDb::open(data_dir, config)?;
             Ok(Arc::new(db))
-        }
+        },
         "arrow" | "parquet" => {
             let config = tsdb_storage_arrow::config::ArrowStorageConfig::default();
             let engine = tsdb_storage_arrow::engine::ArrowStorageEngine::open(data_dir, config)?;
             Ok(Arc::new(engine))
-        }
+        },
         _ => anyhow::bail!(
             "Unknown storage engine: {}. Use 'rocksdb' or 'arrow'.",
             engine_type
@@ -368,7 +368,14 @@ fn execute_serve(cfg: ServeConfig) -> anyhow::Result<()> {
         let service = arrow_flight::flight_service_server::FlightServiceServer::new(flight_server);
         let flight_addr = format!("{}:{}", cfg.host, cfg.flight_port)
             .parse()
-            .map_err(|e| anyhow::anyhow!("invalid flight address {}:{}: {}", cfg.host, cfg.flight_port, e))?;
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "invalid flight address {}:{}: {}",
+                    cfg.host,
+                    cfg.flight_port,
+                    e
+                )
+            })?;
         let flight_server = tonic::transport::Server::builder()
             .add_service(service)
             .serve(flight_addr);
@@ -470,7 +477,7 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
             let spec = tsdb_iceberg::PartitionSpec::day_partition(0, 1);
             catalog.create_table(&name, schema, spec)?;
             println!("Created Iceberg table: {}", name);
-        }
+        },
         IcebergActions::List => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let tables = catalog.list_tables()?;
@@ -492,12 +499,12 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                     );
                 }
             }
-        }
+        },
         IcebergActions::Drop { name } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             catalog.drop_table(&name)?;
             println!("Dropped Iceberg table: {}", name);
-        }
+        },
         IcebergActions::Snapshots { name } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let meta = catalog.load_table(&name)?;
@@ -517,16 +524,15 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
 
             println!("\nSnapshot Log:");
             for entry in &meta.snapshot_log {
-                let dt =
-                    chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
-                        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+                let dt = chrono::DateTime::from_timestamp_millis(entry.timestamp_ms as i64)
+                    .unwrap_or(chrono::DateTime::UNIX_EPOCH);
                 println!(
                     "  snapshot_id={}, time={}",
                     entry.snapshot_id,
                     dt.format("%Y-%m-%d %H:%M:%S")
                 );
             }
-        }
+        },
         IcebergActions::Append { name, file, format } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let meta = catalog.load_table(&name)?;
@@ -546,18 +552,18 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                         .deserialize()
                         .map(|r| r.map_err(|e| anyhow::anyhow!(e)))
                         .collect::<anyhow::Result<Vec<_>>>()?
-                }
+                },
                 other => anyhow::bail!("Unsupported import format: {}", other),
             };
 
             table.append(&dps)?;
             println!("Appended {} datapoints to table '{}'", dps.len(), name);
 
-            let snap = table.current_snapshot().ok_or_else(|| {
-                anyhow::anyhow!("no current snapshot after append")
-            })?;
+            let snap = table
+                .current_snapshot()
+                .ok_or_else(|| anyhow::anyhow!("no current snapshot after append"))?;
             println!("New snapshot: {}", snap.snapshot_id);
-        }
+        },
         IcebergActions::Scan { name, sql } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let meta = catalog.load_table(&name)?;
@@ -577,7 +583,7 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                     print_batches(&batches)?;
 
                     println!("\nTotal rows: {}", total_rows);
-                }
+                },
                 None => {
                     println!("Scanning Iceberg table '{}':", name);
                     println!("============================");
@@ -594,9 +600,9 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                     let batches = scan.execute()?;
                     let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
                     println!("\nTotal rows: {}", total_rows);
-                }
+                },
             }
-        }
+        },
         IcebergActions::Compact { name } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let meta = catalog.load_table(&name)?;
@@ -625,7 +631,7 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                 .len();
             println!("After compact: {} data files", after_files);
             println!("Compacted table '{}'", name);
-        }
+        },
         IcebergActions::Rollback { name, snapshot_id } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let meta = catalog.load_table(&name)?;
@@ -634,7 +640,7 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
 
             table.rollback_to_snapshot(snapshot_id)?;
             println!("Rolled back table '{}' to snapshot {}", name, snapshot_id);
-        }
+        },
         IcebergActions::Expire { name, keep_days } => {
             let catalog = tsdb_iceberg::IcebergCatalog::open(&catalog_dir)?;
             let meta = catalog.load_table(&name)?;
@@ -652,7 +658,7 @@ fn execute_iceberg(data_dir: &str, action: IcebergActions) -> anyhow::Result<()>
                 "Expired snapshots for '{}': {} -> {} (kept last {} days)",
                 name, before, after, keep_days
             );
-        }
+        },
     }
 
     Ok(())
@@ -790,7 +796,7 @@ fn execute_query(
                                     } else {
                                         serde_json::json!(f)
                                     }
-                                }
+                                },
                                 tsdb_arrow::schema::FieldValue::Integer(i) => serde_json::json!(i),
                                 tsdb_arrow::schema::FieldValue::String(s) => serde_json::json!(s),
                                 tsdb_arrow::schema::FieldValue::Boolean(b) => serde_json::json!(b),
@@ -802,7 +808,7 @@ fn execute_query(
                     })
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&json_rows)?);
-            }
+            },
             "csv" => {
                 println!("{}", result.columns.join(","));
                 for row in &result.rows {
@@ -818,14 +824,14 @@ fn execute_query(
                         .collect();
                     println!("{}", vals.join(","));
                 }
-            }
+            },
             _ => {
                 println!("{}", result.columns.join("\t"));
                 for row in &result.rows {
                     let vals: Vec<String> = row.iter().map(|v| format!("{:?}", v)).collect();
                     println!("{}", vals.join("\t"));
                 }
-            }
+            },
         }
 
         Ok(())
@@ -872,7 +878,7 @@ fn execute_import(
             }
 
             println!("Imported {} data points from {}", total, file);
-        }
+        },
         "csv" => {
             let mut reader = csv::Reader::from_path(file)?;
             let headers = reader.headers()?.clone();
@@ -892,7 +898,7 @@ fn execute_import(
                             if !val.is_empty() {
                                 dp.tags.insert(tag_key.to_string(), val.to_string());
                             }
-                        }
+                        },
                         h => {
                             if !val.is_empty() {
                                 if let Ok(f) = val.parse::<f64>() {
@@ -917,7 +923,7 @@ fn execute_import(
                                     );
                                 }
                             }
-                        }
+                        },
                     }
                 }
 
@@ -930,13 +936,13 @@ fn execute_import(
             }
 
             println!("Imported {} data points from {}", total, file);
-        }
+        },
         _ => {
             anyhow::bail!(
                 "Unsupported import format: {}. Use 'json' or 'csv'.",
                 format
             );
-        }
+        },
     }
 
     Ok(())
@@ -971,7 +977,7 @@ fn execute_archive(
                     println!("  {}", f);
                 }
             }
-        }
+        },
         ArchiveActions::Restore { file } => {
             if !Path::new(&file).exists() {
                 anyhow::bail!("Archive file not found: {}", file);
@@ -1003,7 +1009,7 @@ fn execute_archive(
             }
 
             println!("Restored {} data points from {}", count, file);
-        }
+        },
         ArchiveActions::List { archive_dir } => {
             let archive_path = Path::new(&archive_dir);
             let files = tsdb_rocksdb::DataArchiver::list_archives(archive_path)?;
@@ -1018,7 +1024,7 @@ fn execute_archive(
                     println!("  {} ({} bytes)", f, size);
                 }
             }
-        }
+        },
     }
 
     Ok(())
@@ -1047,7 +1053,7 @@ fn execute_export(
         "json" => {
             let json = serde_json::to_string_pretty(&datapoints)?;
             std::fs::write(output, &json)?;
-        }
+        },
         "csv" => {
             let mut tag_keys: Vec<String> = datapoints
                 .iter()
@@ -1095,13 +1101,13 @@ fn execute_export(
                 wtr.write_record(&row)?;
             }
             wtr.flush()?;
-        }
+        },
         _ => {
             anyhow::bail!(
                 "Unsupported export format: {}. Use 'json' or 'csv'.",
                 format
             );
-        }
+        },
     }
 
     println!("Exported {} data points to {}", datapoints.len(), output);
@@ -1141,10 +1147,10 @@ fn execute_doctor(data_dir: &str, _config_name: &str) -> anyhow::Result<()> {
 
             println!();
             println!("Doctor check complete. No critical issues found.");
-        }
+        },
         Err(e) => {
             println!("[FAIL] Cannot open database: {}", e);
-        }
+        },
     }
 
     Ok(())
@@ -1215,7 +1221,7 @@ fn run_bench(
                 "ops_per_sec": pts_per_sec,
             });
             eprintln!("{}", serde_json::to_string_pretty(&report)?);
-        }
+        },
         "read" => {
             let base_ts = chrono::Utc::now().timestamp_micros();
             let dps: Vec<tsdb_arrow::schema::DataPoint> = (0..points)
@@ -1258,10 +1264,10 @@ fn run_bench(
                 "ops_per_sec": pts_per_sec,
             });
             eprintln!("{}", serde_json::to_string_pretty(&report)?);
-        }
+        },
         _ => {
             anyhow::bail!("Unknown bench mode: {}. Use 'write' or 'read'.", mode);
-        }
+        },
     }
 
     Ok(())

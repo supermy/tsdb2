@@ -92,7 +92,7 @@ impl GatewayState {
                         )));
                     }
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                }
+                },
             }
         }
     }
@@ -110,10 +110,10 @@ impl GatewayState {
                         let mut clients = clients.write().await;
                         clients.retain(|(_, tx)| tx.try_send(data.clone()).is_ok());
                     });
-                }
+                },
                 Err(_) => {
                     std::thread::sleep(std::time::Duration::from_millis(100));
-                }
+                },
             }
         });
     }
@@ -176,7 +176,7 @@ pub fn build_router(state: GatewayState) -> Router {
                     .allow_headers([axum::http::header::CONTENT_TYPE])
                     .allow_credentials(true)
             }
-        }
+        },
         _ => CorsLayer::new()
             .allow_origin([
                 "http://localhost:3000".parse().unwrap(),
@@ -194,15 +194,15 @@ pub fn build_router(state: GatewayState) -> Router {
     let api = Router::new()
         .route("/api/services", get(list_services).post(create_service))
         .route(
-            "/api/services/{name}",
+            "/api/services/:name",
             get(get_service).delete(delete_service),
         )
-        .route("/api/services/{name}/start", post(start_service))
-        .route("/api/services/{name}/stop", post(stop_service))
-        .route("/api/services/{name}/restart", post(restart_service))
-        .route("/api/services/{name}/logs", get(get_service_logs))
+        .route("/api/services/:name/start", post(start_service))
+        .route("/api/services/:name/stop", post(stop_service))
+        .route("/api/services/:name/restart", post(restart_service))
+        .route("/api/services/:name/logs", get(get_service_logs))
         .route("/api/configs", get(list_configs).post(save_config))
-        .route("/api/configs/{name}", get(get_config).delete(delete_config))
+        .route("/api/configs/:name", get(get_config).delete(delete_config))
         .route("/api/configs/apply", post(apply_config))
         .route("/api/configs/compare", post(compare_config))
         .route("/api/test/sql", post(test_sql))
@@ -222,7 +222,7 @@ pub fn build_router(state: GatewayState) -> Router {
         .route("/api/collector/stop", post(collector_stop))
         .route("/api/rocksdb/stats", get(rocksdb_stats))
         .route("/api/rocksdb/cf-list", get(rocksdb_cf_list))
-        .route("/api/rocksdb/cf-detail/{name}", get(rocksdb_cf_detail))
+        .route("/api/rocksdb/cf-detail/:name", get(rocksdb_cf_detail))
         .route("/api/rocksdb/compact", post(rocksdb_compact))
         .route("/api/rocksdb/series-schema", get(rocksdb_series_schema))
         .route("/api/rocksdb/kv-scan", get(rocksdb_kv_scan))
@@ -247,20 +247,20 @@ pub fn build_router(state: GatewayState) -> Router {
             get(iceberg_list_tables).post(iceberg_create_table),
         )
         .route(
-            "/api/iceberg/tables/{name}",
+            "/api/iceberg/tables/:name",
             get(iceberg_table_detail).delete(iceberg_drop_table),
         )
-        .route("/api/iceberg/tables/{name}/append", post(iceberg_append))
-        .route("/api/iceberg/tables/{name}/scan", get(iceberg_scan))
+        .route("/api/iceberg/tables/:name/append", post(iceberg_append))
+        .route("/api/iceberg/tables/:name/scan", get(iceberg_scan))
         .route(
-            "/api/iceberg/tables/{name}/snapshots",
+            "/api/iceberg/tables/:name/snapshots",
             get(iceberg_snapshots),
         )
-        .route("/api/iceberg/tables/{name}/rollback", post(iceberg_rollback))
-        .route("/api/iceberg/tables/{name}/compact", post(iceberg_compact))
-        .route("/api/iceberg/tables/{name}/expire", post(iceberg_expire))
+        .route("/api/iceberg/tables/:name/rollback", post(iceberg_rollback))
+        .route("/api/iceberg/tables/:name/compact", post(iceberg_compact))
+        .route("/api/iceberg/tables/:name/expire", post(iceberg_expire))
         .route(
-            "/api/iceberg/tables/{name}/schema",
+            "/api/iceberg/tables/:name/schema",
             post(iceberg_update_schema),
         )
         .route("/api/ws", get(ws_handler))
@@ -626,12 +626,7 @@ async fn metrics_stats(
     if let Err(e) = validate_name(&service) {
         return (StatusCode::BAD_REQUEST, Json(AdminResponse::err(e)));
     }
-    api_handler!(
-        state,
-        AdminRequest::MetricsStats {
-            service
-        }
-    )
+    api_handler!(state, AdminRequest::MetricsStats { service })
 }
 
 #[derive(Deserialize)]

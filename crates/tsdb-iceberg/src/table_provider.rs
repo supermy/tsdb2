@@ -98,7 +98,7 @@ impl TableProvider for IcebergTableProvider {
                     .map(|&idx| self.schema.field(idx).clone())
                     .collect();
                 Arc::new(ArrowSchema::new(fields))
-            }
+            },
             None => self.schema.clone(),
         };
 
@@ -271,7 +271,7 @@ impl IcebergScanStream {
                         "failed to open data file {}: {}",
                         df.file_path, e
                     ))));
-                }
+                },
             };
 
             let builder =
@@ -282,7 +282,7 @@ impl IcebergScanStream {
                             "failed to create parquet reader for {}: {}",
                             df.file_path, e
                         ))));
-                    }
+                    },
                 };
 
             let reader = match builder.build() {
@@ -292,20 +292,20 @@ impl IcebergScanStream {
                         "failed to build parquet reader for {}: {}",
                         df.file_path, e
                     ))));
-                }
+                },
             };
 
             match reader.collect::<std::result::Result<Vec<_>, _>>() {
                 Ok(batches) => {
                     self.current_batches = batches;
                     self.current_batch_idx = 0;
-                }
+                },
                 Err(e) => {
                     return Some(Err(DataFusionError::Execution(format!(
                         "failed to read parquet batches from {}: {}",
                         df.file_path, e
                     ))));
-                }
+                },
             }
         }
     }
